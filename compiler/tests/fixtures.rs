@@ -124,3 +124,82 @@ mod positive {
         assert_eq!(*value, ArgValue::Symbol("true".into()));
     }
 }
+
+mod negative {
+    use nflc::*;
+
+    fn read_fixture(name: &str) -> String {
+        let path = format!("../tests/fixtures/negative/{name}");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
+    }
+
+    #[test]
+    fn tabs_in_indent_at_line_5() {
+        let src = read_fixture("tabs_in_indent.nfl");
+        let err = parse(&src).expect_err("must reject tab in indent");
+        assert!(err.message.to_lowercase().contains("tab"),
+                "expected tab-related error, got: {}", err.message);
+        assert_eq!(err.line, 5, "tab is on line 5 of fixture");
+    }
+
+    #[test]
+    fn missing_colon_at_line_4() {
+        let src = read_fixture("missing_colon.nfl");
+        let err = parse(&src).expect_err("must reject missing colon");
+        assert!(err.message.contains("':'") || err.message.to_lowercase().contains("colon")
+                || err.message.contains("'newline'") || err.message.contains("newline"),
+                "expected message about ':' or 'newline', got: {}", err.message);
+        assert_eq!(err.line, 4, "missing colon error reported at line 4");
+    }
+
+    #[test]
+    fn unclosed_bracket_at_line_5() {
+        let src = read_fixture("unclosed_bracket.nfl");
+        let err = parse(&src).expect_err("must reject unclosed bracket");
+        assert!(err.message.contains("']'") || err.message.contains("','")
+                || err.message.contains("newline"),
+                "expected message about ']' or ',' or 'newline', got: {}", err.message);
+        assert_eq!(err.line, 5, "unclosed bracket reported at line 5 (where Newline appears)");
+    }
+
+    #[test]
+    fn empty_tensor_at_line_5() {
+        let src = read_fixture("empty_tensor.nfl");
+        let err = parse(&src).expect_err("must reject empty Tensor[]");
+        assert!(err.message.to_lowercase().contains("dim")
+                || err.message.to_lowercase().contains("empty"),
+                "expected message about empty dims, got: {}", err.message);
+        assert_eq!(err.line, 5);
+    }
+
+    #[test]
+    fn empty_op_args_at_line_6() {
+        let src = read_fixture("empty_op_args.nfl");
+        let err = parse(&src).expect_err("must reject linear[]");
+        assert!(err.message.to_lowercase().contains("argument")
+                || err.message.to_lowercase().contains("empty"),
+                "expected message about empty op args, got: {}", err.message);
+        assert_eq!(err.line, 6);
+    }
+
+    #[test]
+    fn named_before_positional_at_line_6() {
+        let src = read_fixture("named_before_positional.nfl");
+        let err = parse(&src).expect_err("must reject named-then-positional");
+        assert!(err.message.to_lowercase().contains("positional")
+                || err.message.to_lowercase().contains("named"),
+                "expected message about ordering, got: {}", err.message);
+        assert_eq!(err.line, 6);
+    }
+
+    #[test]
+    fn bad_dedent_at_line_8() {
+        let src = read_fixture("bad_dedent.nfl");
+        let err = parse(&src).expect_err("must reject bad dedent");
+        assert!(err.message.to_lowercase().contains("dedent")
+                || err.message.to_lowercase().contains("indent"),
+                "expected message about dedent/indent, got: {}", err.message);
+        assert_eq!(err.line, 8, "bad dedent occurs on line 8 of the fixture");
+    }
+}
