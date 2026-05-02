@@ -1,0 +1,6 @@
+# NEGATIVE: tab character used in leading whitespace on line 5.
+# Expected: LexError::TabInIndent at line 5, col 1.
+
+model X [batch=8]:
+	x: Tensor[batch, 4]
+    x -> linear[2]

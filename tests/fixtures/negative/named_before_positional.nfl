@@ -1,0 +1,6 @@
+# NEGATIVE: linear[a=1, 2] — positional after named on line 6.
+# Expected: ParseError mentioning 'positional' or 'named' at line 6.
+
+model X [batch=8]:
+    x: Tensor[batch, 4]
+    x -> linear[a=1, 2]
