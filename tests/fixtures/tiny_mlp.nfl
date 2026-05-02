@@ -1,0 +1,7 @@
+# Minimal valid NFL: one model_param, one variable_decl with all-integer dims,
+# one pipeline_stmt with two ops.
+
+model TinyMLP [batch=8]:
+    x: Tensor[batch, 4]
+
+    x -> linear[2] -> softmax

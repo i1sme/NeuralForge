@@ -1,0 +1,80 @@
+(* ============================================================ *)
+(* NeuralForge Language v0.1 — formal grammar                   *)
+(* Notation: ISO/IEC 14977 EBNF                                 *)
+(*                                                              *)
+(* Scope: inference-only.                                       *)
+(* Training syntax (loss/optimiser) will arrive in v0.2.        *)
+(*                                                              *)
+(* Implicit semantics (NOT enforced by this grammar):           *)
+(*   - The output of a model is the value produced by the last  *)
+(*     operation of the last pipeline_stmt in its body.         *)
+(*   - Symbolic dims in Tensor[…] must reference an identifier  *)
+(*     declared in model_params.                                *)
+(*   - Operation names must resolve against the stdlib.         *)
+(*   - The first identifier of a pipeline_stmt must reference   *)
+(*     a previously-declared variable.                          *)
+(* ============================================================ *)
+
+(* === Top-level structure ====================================== *)
+nfl_source       = { newline } , { model_def , { newline } } ;
+
+model_def        = "model" , identifier , "[" , model_params , "]" , ":" , newline
+                 , INDENT , model_body , DEDENT ;
+
+model_params     = named_value , { "," , named_value } ;
+named_value      = identifier , "=" , integer ;
+
+(* === Model body =============================================== *)
+model_body       = model_stmt , { newline , model_stmt } ;
+model_stmt       = variable_decl | pipeline_stmt ;
+
+variable_decl    = identifier , ":" , type_expr ;
+
+type_expr        = "Tensor" , "[" , dim_list , "]" ;
+dim_list         = dim , { "," , dim } ;
+dim              = integer | identifier ;
+
+(* === Pipelines ================================================ *)
+pipeline_stmt    = identifier , pipeline_chain ;
+pipeline_chain   = pipeline_step , { pipeline_step } ;
+pipeline_step    = "->" , operation ;
+(* A line break inside a pipeline_chain is permitted iff the     *)
+(* next non-empty line begins with "->" and its leading-space    *)
+(* count is strictly greater than the enclosing model_body's     *)
+(* indent. The lexer attaches such continuation lines to the     *)
+(* current pipeline_stmt and does NOT emit INDENT/DEDENT for     *)
+(* them — they are not their own block.                          *)
+
+(* === Operations =============================================== *)
+operation        = identifier , [ "[" , op_args , "]" ] ;
+op_args          = positional_args , [ "," , named_args ]
+                 | named_args ;
+positional_args  = arg_value , { "," , arg_value } ;
+named_args       = named_arg , { "," , named_arg } ;
+named_arg        = identifier , "=" , arg_value ;
+arg_value        = number | identifier ;
+
+(* === Lexical ================================================== *)
+identifier       = letter , { letter | digit | "_" } ;
+letter           = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j"
+                 | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t"
+                 | "u" | "v" | "w" | "x" | "y" | "z"
+                 | "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J"
+                 | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T"
+                 | "U" | "V" | "W" | "X" | "Y" | "Z" ;
+digit            = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+integer          = digit , { digit } ;
+number           = integer , [ "." , integer ] ;
+
+(* === Whitespace and tokens not shown above ==================== *)
+(* newline    : LF or CRLF; multiple consecutive newlines are    *)
+(*              equivalent to one.                               *)
+(* INDENT     : virtual token emitted by the lexer when the      *)
+(*              leading-space count of a line exceeds the        *)
+(*              current block's indent level by exactly 4.       *)
+(* DEDENT     : virtual token emitted when leading space drops   *)
+(*              back to or below an enclosing block's level.     *)
+(* comment    : "#" followed by any characters up to (but not    *)
+(*              including) the next newline; eaten by the lexer  *)
+(*              and not present in the parse tree.               *)
+(* tab in leading whitespace : lexical error.                    *)

@@ -1,0 +1,19 @@
+# Three valid formattings of the same network. Each sub-model is a separate
+# model_def; all three are valid and equivalent semantically. Stress-tests the
+# pipeline-continuation lexer rules (single line, per-step wrap, mixed wrap).
+
+model SingleLine [batch=4, input=10, output=2]:
+    x: Tensor[batch, input]
+    x -> linear[8] -> relu -> linear[output] -> softmax
+
+model PerStepWrap [batch=4, input=10, output=2]:
+    x: Tensor[batch, input]
+    x -> linear[8]
+      -> relu
+      -> linear[output]
+      -> softmax
+
+model MixedWrap [batch=4, input=10, output=2]:
+    x: Tensor[batch, input]
+    x -> linear[8] -> relu
+      -> linear[output] -> softmax

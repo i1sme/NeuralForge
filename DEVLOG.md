@@ -14,6 +14,37 @@ Format for each entry:
 
 ---
 
+## 2026-05-02 — Milestone 1 closed: NFL Grammar v0.1 shipped
+
+### What was done
+- Wrote `language/grammar.ebnf` (formal ISO/IEC 14977 grammar, inference-only, 24 productions)
+- Wrote `docs/language_reference/grammar.md` (human-readable reference, 9 sections, line-by-line walkthrough of `tests/fixtures/classifier.nfl`)
+- Added 5 positive fixtures under `tests/fixtures/`: `classifier.nfl`, `tiny_mlp.nfl`,
+  `pipeline_styles.nfl`, `comments.nfl`, `mixed_args.nfl`
+- Verified all artefacts by manual review: reachability of every production from `nfl_source`,
+  reference-doc coverage of every production, hand-trace of every fixture against the grammar
+
+### Decisions made
+None new. All design decisions for M1 were captured during brainstorming on 2026-05-02 (entry below)
+and recorded in `docs/superpowers/specs/2026-05-02-nfl-grammar-v0.1-design.md`. This session
+executed the plan in `docs/superpowers/plans/2026-05-02-nfl-grammar-v0.1.md`.
+
+### Problems encountered
+- Verification pass found that the root production `nfl_source` was not named anywhere in
+  the reference doc (every other production was covered). Fixed by adding a one-sentence
+  mention in §1 Overview.
+- A self-noted "spec discrepancy" (six vs seven `pipeline_step`s in a walkthrough) turned
+  out to be a false alarm — the spec did not contain that walkthrough; it lives only in
+  the reference doc, where the count was already correct.
+
+### Next step
+Begin **Milestone 2 — Parser prototype**: implement a parser that consumes `.nfl` files and
+produces a typed AST. The 5 fixtures from this milestone become the initial test corpus.
+The choice of implementation language (Rust / C++ / Python / …) is the first decision of
+M2 — to be resolved via a fresh `superpowers:brainstorming` cycle for M2.
+
+---
+
 ## 2026-05-02 — Brainstorming Milestone 1 (NFL Grammar v0.1); loss deferred to v0.2
 
 ### What was done
