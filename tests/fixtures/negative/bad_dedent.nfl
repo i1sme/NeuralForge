@@ -1,0 +1,8 @@
+# NEGATIVE: dedent to a level (col 3) that is not on the indent stack.
+# Body indent is 4; line 8 drops to 2.
+# Expected: LexError::BadDedent at line 8, col 3.
+
+model X [batch=8]:
+    x: Tensor[batch, 4]
+    x -> linear[2]
+  bar

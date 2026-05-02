@@ -14,6 +14,84 @@ Format for each entry:
 
 ---
 
+## 2026-05-02 — Milestone 2 closed: NFL Parser prototype shipped (Rust, std-only)
+
+### What was done
+- Bootstrapped Cargo workspace at the repo root with member crate `nflc` (`compiler/`); std-only, edition 2021
+- Implemented hand-written lexer (`compiler/src/lexer/`):
+  - `tokens.rs` — `Token`, `TokenKind`, `LexError`
+  - `mod.rs` — `lex(&str) -> Result<Vec<Token>, LexError>` with line-by-line scanning
+  - `indent.rs` — `IndentStack` emitting virtual `Indent`/`Dedent` tokens
+  - Comments, LF/CRLF newlines, pipeline-continuation rule (grammar §5.2), tab rejection
+  - 26 unit tests
+- Implemented hand-written recursive-descent parser (`compiler/src/parser/`):
+  - One `parse_*` function per EBNF production: `parse_arg_value`, `parse_named_arg`,
+    `parse_op_args`, `parse_operation`, `parse_pipeline_stmt`, `parse_dim`, `parse_dim_list`,
+    `parse_type_expr`, `parse_variable_decl`, `parse_named_value`, `parse_model_params`,
+    `parse_model_stmt`, `parse_model_body`, `parse_model_def`, `parse_nfl_source`
+  - 24 unit tests
+- Defined typed AST (`compiler/src/ast.rs`) with `Span` on every node
+- Implemented `nflc parse <file>` CLI with `--tokens` flag for token-stream debug
+- Library entry: `nflc::parse(&str) -> Result<NflSource, ParseError>` (lex + parse)
+- Added 7 negative fixtures under `tests/fixtures/negative/`: tabs_in_indent,
+  missing_colon, unclosed_bracket, empty_tensor, empty_op_args,
+  named_before_positional, bad_dedent
+- Integration tests (`compiler/tests/fixtures.rs`): 5 positive + 7 negative — all green
+- Removed legacy empty `compiler/{lexer,parser,ir,passes}/` and `compiler/.gitkeep` —
+  Rust convention is `compiler/src/<module>/`, the legacy stubs are no longer needed
+
+### Decisions made
+None new. All design decisions were captured in
+`docs/superpowers/specs/2026-05-02-m2-parser-prototype-design.md` during brainstorming.
+This session executed the plan in `docs/superpowers/plans/2026-05-02-m2-parser-prototype.md`
+(20 tasks, 22 commits).
+
+### Problems encountered
+- **Plan defect found during Task 16 e2e verification.** `parse_pipeline_stmt` did not
+  tolerate `Newline` between a step and the leading `->` of a continuation line, even
+  though the lexer correctly suppressed `Indent`/`Dedent` for such lines. Symptom:
+  classifier.nfl, pipeline_styles.nfl, mixed_args.nfl all failed to parse end-to-end
+  while their unit tests (which used inline-only pipelines) passed. Fix: tolerate one
+  `Newline` before each continuation `Arrow` in the parser loop. Committed as `dbb57b1`.
+- **Same fix bundle:** `parse_model_body` did not tolerate blank/comment-only `Newline`
+  between the model-header `:` `Newline` and the first content line's `Indent`. Symptom:
+  comments.nfl failed (its first body line is a comment). Fix: `skip_newlines()` before
+  `consume(Indent)`.
+- **`unused_mut` ratchet during Task 4.** The plan's literal lex code had `let mut line`
+  but never mutated it (newlines arrived in Task 5). Implementer removed `mut` to keep
+  zero-warnings; restored it in Task 5 when newline handling landed. Cosmetic, no
+  functional impact.
+- **`#![allow(dead_code)]` was needed on `parser/mod.rs` until Task 15** wired
+  `nflc::parse(&str)` to the `pub(crate)` `parse_*` chain. The plan's "remove on Task 10"
+  was wrong — the `cargo build` (lib only, without tests) flagged the chain as unused
+  until the public entry point existed. Task 15 removed the directive cleanly.
+
+### Known tech debt (carried forward — see spec §9)
+1. **`TypeExpr.name: String`** is fixed to `"Tensor"` for v0.1. When v0.2 introduces
+   additional types this becomes either an `enum TypeKind` or a `String` validated by
+   the semantic pass. Revisit at start of v0.2 grammar work.
+2. **`Span` is start-only.** End-position is omitted in v0.1; add it when the first
+   consumer (likely the M7 viewer) demands a full source range.
+3. **No CI.** `cargo test` is run manually. Open a small follow-up PR to add a
+   GitHub Actions workflow on stable Rust before M3 ships.
+4. **Crate version `0.1.0` policy undecided.** Standard semver applies, but bump
+   policy for the v0.x series should be agreed before v1.0.
+5. **Lexer error formatting:** `LexError::UnknownChar { ch: b as char }` mis-renders
+   non-ASCII bytes (e.g. UTF-8 sequences appear as Latin-1 fragments). Cosmetic;
+   addresses when error reporting matures (v0.2 / Ariadne-style).
+6. **`5.` and `.5` produce `UnknownChar` instead of `BadNumber`.** Spec §5.1 mentions
+   `BadNumber` for these forms; current implementation rejects them via a different
+   path. Acceptable for v0.1; clean up in v0.2.
+
+### Next step
+Begin **Milestone 3 — UIR prototype**: build the Universal IR (computation DAG) from
+the AST. The 5 positive fixtures from this milestone parse cleanly and the AST types
+are stable. The first M3 decision is the UIR's data shape (DAG node-and-edge
+representation, sharing strategy, shape-inference timing) — to be resolved via a
+fresh `superpowers:brainstorming` cycle for M3.
+
+---
+
 ## 2026-05-02 — Milestone 1 closed: NFL Grammar v0.1 shipped
 
 ### What was done

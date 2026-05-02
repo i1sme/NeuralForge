@@ -1,0 +1,6 @@
+# NEGATIVE: Tensor[] with empty dim_list on line 5.
+# Expected: ParseError mentioning 'dim' or 'empty' at line 5.
+
+model X [batch=8]:
+    x: Tensor[]
+    x -> linear[2]

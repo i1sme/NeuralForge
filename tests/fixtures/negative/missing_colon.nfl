@@ -1,0 +1,6 @@
+# NEGATIVE: missing ':' after model header.
+# Expected: ParseError mentioning ':' at line 4 (after the ']' on line 4).
+
+model X [batch=8]
+    x: Tensor[batch, 4]
+    x -> linear[2]

@@ -31,11 +31,19 @@ NeuralForge/
 ├── CLAUDE.md               ← you are here
 ├── PROJECT_SPEC.md         ← full design specification
 │
-├── compiler/
-│   ├── lexer/              ← tokenises NFL source
-│   ├── parser/             ← builds typed AST from tokens
-│   ├── ir/                 ← Universal IR (UIR) — computation graph
-│   └── passes/             ← optimisation passes (fusion, tiling, scheduling)
+├── Cargo.toml              ← workspace manifest (members = ["compiler"], more added per milestone)
+│
+├── compiler/               ← `nflc` crate (Cargo workspace member)
+│   ├── Cargo.toml
+│   ├── src/
+│   │   ├── lib.rs          ← public API: `nflc::parse(&str)` etc.
+│   │   ├── main.rs         ← `nflc` CLI binary
+│   │   ├── ast.rs          ← typed AST nodes (Span on every node)
+│   │   ├── lexer/          ← tokeniser + INDENT/DEDENT machine
+│   │   └── parser/         ← recursive-descent parser, one fn per EBNF production
+│   └── tests/              ← integration tests (positive + negative fixtures)
+│
+│   (ir/ and passes/ modules will live under compiler/src/ in M3+)
 │
 ├── profiles/
 │   ├── generic/            ← scalar fallback, any POSIX target
@@ -129,13 +137,15 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-Milestone 1 complete: NFL Grammar v0.1 (inference-only) is formally defined.
-The artefacts are `language/grammar.ebnf`, `docs/language_reference/grammar.md`, and
-five positive fixtures under `tests/fixtures/`.
+Milestone 2 complete: NFL Parser prototype shipped (Rust, std-only). The implementation
+is a Cargo workspace at the repo root with member crate `nflc` under `compiler/`,
+hand-written lexer + recursive-descent parser, typed AST, and a `nflc parse <file>`
+CLI. All 5 positive fixtures parse cleanly; 7 new negative fixtures verify rejection
+behaviour at specific (line, col). 62 tests passing (50 unit + 12 integration).
 
-The immediate next step is **Milestone 2 — Parser prototype**: implement a parser that
-consumes `.nfl` files and emits a typed AST. The choice of implementation language
-(Rust / C++ / Python / …) is the first M2 decision.
+The immediate next step is **Milestone 3 — UIR prototype**: build the Universal IR
+(computation DAG) from the parsed AST. The AST is the input; the UIR is the foundation
+for every architecture profile from M4 onward.
 
 ---
 

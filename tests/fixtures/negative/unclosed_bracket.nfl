@@ -1,0 +1,7 @@
+# NEGATIVE: unclosed '[' in model_params on line 4.
+# Expected: ParseError mentioning ']' or ',' at line 5 (where Newline appears
+# instead of more params).
+
+model X [batch=8
+    x: Tensor[batch, 4]
+    x -> linear[2]
