@@ -171,3 +171,54 @@ fn lex_nested_indent_dedent() {
         ],
     );
 }
+
+#[test]
+fn lex_pipeline_continuation_basic() {
+    // Continuation line starts with ->: no Indent/Dedent for that line.
+    let src = "model X:\n    a -> b\n      -> c\n";
+    assert_eq!(
+        lex_kinds(src),
+        vec![
+            Model, Ident("X".into()), Colon, Newline,
+            Indent,
+            Ident("a".into()), Arrow, Ident("b".into()), Newline,
+            Arrow, Ident("c".into()), Newline,        // continuation: NO Indent
+            Dedent, Eof,
+        ],
+    );
+}
+
+#[test]
+fn lex_pipeline_continuation_then_real_dedent() {
+    // After pipeline ends, returning to the outer indent level should NOT
+    // emit a Dedent (we never indented for the continuation).
+    let src = "model X:\n    a -> b\n      -> c\nfoo\n";
+    assert_eq!(
+        lex_kinds(src),
+        vec![
+            Model, Ident("X".into()), Colon, Newline,
+            Indent,
+            Ident("a".into()), Arrow, Ident("b".into()), Newline,
+            Arrow, Ident("c".into()), Newline,
+            Dedent,
+            Ident("foo".into()), Newline,
+            Eof,
+        ],
+    );
+}
+
+#[test]
+fn lex_two_continuations_in_a_row() {
+    let src = "model X:\n    a -> b\n      -> c\n      -> d\n";
+    assert_eq!(
+        lex_kinds(src),
+        vec![
+            Model, Ident("X".into()), Colon, Newline,
+            Indent,
+            Ident("a".into()), Arrow, Ident("b".into()), Newline,
+            Arrow, Ident("c".into()), Newline,
+            Arrow, Ident("d".into()), Newline,
+            Dedent, Eof,
+        ],
+    );
+}

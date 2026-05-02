@@ -57,12 +57,22 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             continue;
         }
 
-        // Content line: adjust indent stack to the leading-space count.
-        let first_col = indent_spaces as u32 + 1;
-        stack.adjust_to(indent_spaces, line, first_col, &mut tokens)?;
+        // Detect pipeline continuation: a content line that starts with "->"
+        // at an indent strictly greater than the current block's indent is a
+        // continuation of the previous pipeline_stmt — no Indent/Dedent emitted.
+        let starts_with_arrow = i + 1 < bytes.len()
+            && bytes[i] == b'-'
+            && bytes[i + 1] == b'>';
+        let is_continuation = starts_with_arrow
+            && indent_spaces > stack.current_top();
 
-        // Lex tokens on this line up to (but not including) the newline.
-        let mut col: u32 = first_col;
+        if !is_continuation {
+            let first_col = indent_spaces as u32 + 1;
+            stack.adjust_to(indent_spaces, line, first_col, &mut tokens)?;
+        }
+        // Whether continuation or not, the column of the first non-whitespace
+        // character is `indent_spaces + 1`.
+        let mut col: u32 = indent_spaces as u32 + 1;
         while i < bytes.len() && bytes[i] != b'\n' && bytes[i] != b'\r' {
             let b = bytes[i];
 

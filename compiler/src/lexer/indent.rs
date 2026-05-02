@@ -59,4 +59,8 @@ impl IndentStack {
             out.push(Token::new(TokenKind::Dedent, line, col));
         }
     }
+
+    pub fn current_top(&self) -> usize {
+        *self.levels.last().expect("stack always non-empty")
+    }
 }
