@@ -366,3 +366,58 @@ pub(crate) fn parse_model_params(p: &mut Parser) -> Result<Vec<NamedValue>, Pars
     }
     Ok(params)
 }
+
+use crate::ast::{ModelDef, ModelStmt};
+
+pub(crate) fn parse_model_stmt(p: &mut Parser) -> Result<ModelStmt, ParseError> {
+    // Disambiguate: variable_decl is `Ident ":" Tensor[...]`, pipeline_stmt
+    // is `Ident "->" ...`. Look at the token after the leading identifier.
+    let after = match p.peek_at(1) {
+        Some(k) => k,
+        None => return Err(p.error_expected(&["':'", "'->'"])),
+    };
+    match after {
+        TokenKind::Colon => Ok(ModelStmt::VariableDecl(parse_variable_decl(p)?)),
+        TokenKind::Arrow => Ok(ModelStmt::Pipeline(parse_pipeline_stmt(p)?)),
+        _ => Err(p.error_expected(&["':'", "'->'"])),
+    }
+}
+
+pub(crate) fn parse_model_body(p: &mut Parser) -> Result<Vec<ModelStmt>, ParseError> {
+    p.consume(TokenKind::Indent, "indented body")?;
+    let mut stmts = Vec::new();
+    loop {
+        // Eat blank-line newlines between statements.
+        p.skip_newlines();
+        if matches!(p.peek_kind(), TokenKind::Dedent) {
+            break;
+        }
+        stmts.push(parse_model_stmt(p)?);
+        // After each stmt the lexer emits a Newline (or it's followed
+        // immediately by Dedent at EOF). Consume one if present.
+        p.eat(&TokenKind::Newline);
+    }
+    p.consume(TokenKind::Dedent, "dedent")?;
+    Ok(stmts)
+}
+
+pub(crate) fn parse_model_def(p: &mut Parser) -> Result<ModelDef, ParseError> {
+    let (line, col) = (p.peek().line, p.peek().col);
+    p.consume(TokenKind::Model, "model")?;
+    let TokenKind::Ident(name) = p.peek_kind().clone() else {
+        return Err(p.error_expected(&["model name (identifier)"]));
+    };
+    p.advance();
+    p.consume(TokenKind::LBracket, "[")?;
+    let params = parse_model_params(p)?;
+    p.consume(TokenKind::RBracket, "]")?;
+    p.consume(TokenKind::Colon, ":")?;
+    p.consume(TokenKind::Newline, "newline")?;
+    let body = parse_model_body(p)?;
+    Ok(ModelDef {
+        name,
+        params,
+        body,
+        span: Span::new(line, col),
+    })
+}

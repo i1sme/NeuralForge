@@ -167,3 +167,32 @@ fn parse_model_params_one() {
     let params = parse_model_params(&mut p).unwrap();
     assert_eq!(params.len(), 1);
 }
+
+#[test]
+fn parse_model_def_minimal() {
+    let mut p = parser_of("model TinyMLP [batch=8]:\n    x: Tensor[batch, 4]\n    x -> linear[2] -> softmax\n");
+    let m = parse_model_def(&mut p).unwrap();
+    assert_eq!(m.name, "TinyMLP");
+    assert_eq!(m.params.len(), 1);
+    assert_eq!(m.body.len(), 2);
+    assert!(matches!(m.body[0], ModelStmt::VariableDecl(_)));
+    assert!(matches!(m.body[1], ModelStmt::Pipeline(_)));
+}
+
+#[test]
+fn parse_model_def_three_params() {
+    let src = "model X [batch=32, input=784, output=10]:\n    x: Tensor[batch, input]\n    x -> linear[output] -> softmax\n";
+    let mut p = parser_of(src);
+    let m = parse_model_def(&mut p).unwrap();
+    assert_eq!(m.params.len(), 3);
+    let ModelStmt::Pipeline(ps) = &m.body[1] else { panic!() };
+    assert_eq!(ps.steps.len(), 2);
+}
+
+#[test]
+fn parse_model_def_missing_colon_is_error() {
+    let mut p = parser_of("model X [batch=8]\n    x: Tensor[batch, 4]\n    x -> linear[2]\n");
+    let err = parse_model_def(&mut p).unwrap_err();
+    assert!(err.message.contains("':'") || err.message.to_lowercase().contains("colon"),
+            "got: {}", err.message);
+}
