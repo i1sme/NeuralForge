@@ -222,3 +222,51 @@ fn lex_two_continuations_in_a_row() {
         ],
     );
 }
+
+#[test]
+fn err_tab_in_indent() {
+    let src = "model X:\n\tfoo\n";              // tab as the leading whitespace
+    let err = lex(src).unwrap_err();
+    match err {
+        LexError::TabInIndent { line, col } => {
+            assert_eq!(line, 2);
+            assert_eq!(col, 1);
+        }
+        other => panic!("expected TabInIndent, got {other:?}"),
+    }
+}
+
+#[test]
+fn err_unknown_char() {
+    let src = "model X:\n    @\n";
+    let err = lex(src).unwrap_err();
+    match err {
+        LexError::UnknownChar { ch, .. } => assert_eq!(ch, '@'),
+        other => panic!("expected UnknownChar, got {other:?}"),
+    }
+}
+
+#[test]
+fn err_bad_dedent() {
+    // Body indented to 4, then dedent to 2 (not a level on the stack).
+    let src = "model X:\n    foo\n  bar\n";
+    let err = lex(src).unwrap_err();
+    match err {
+        LexError::BadDedent { line, .. } => assert_eq!(line, 3),
+        other => panic!("expected BadDedent, got {other:?}"),
+    }
+}
+
+#[test]
+fn err_position_in_lex_error() {
+    let src = "model X:\n\tfoo\n";
+    let err = lex(src).unwrap_err();
+    assert_eq!(err.position(), (2, 1));
+}
+
+#[test]
+fn lex_error_displays_human_message() {
+    let err = LexError::TabInIndent { line: 5, col: 1 };
+    let msg = format!("{err}");
+    assert!(msg.to_lowercase().contains("tab"), "got: {msg}");
+}
