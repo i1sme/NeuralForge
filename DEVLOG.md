@@ -14,6 +14,51 @@ Format for each entry:
 
 ---
 
+## 2026-05-02 — Brainstorming Milestone 1 (NFL Grammar v0.1); loss deferred to v0.2
+
+### What was done
+- Started brainstorming session for Milestone 1 using `superpowers:brainstorming` skill
+- Confirmed scope (Milestone 1 only — formal EBNF grammar)
+- Confirmed coverage baseline (the README example, modulo decisions below)
+- Confirmed block structure (Python-style: significant indent, `:` opens, dedent closes)
+- Resolved a loss-syntax ambiguity (see Decisions); updated `README.md` and `PROJECT_SPEC.md`
+
+### Decisions made
+
+**v0.1 grammar is inference-only; loss syntax deferred to v0.2.**
+The original README example included `-> loss: CrossEntropy` as a pipeline terminator. This
+made `->` ambiguous: in every other position it means "transform data through op", but in the
+loss form it means "terminate the pipeline and bind a training loss". For a language whose
+explicit goal is to be LLM-friendly, that dual meaning is a hazard.
+Three alternatives were considered: (α) keep the form but mark it as a terminal production
+in the grammar; (β) split `loss: TypeName` out as its own statement parallel to `x: Tensor[…]`;
+(γ) treat `loss[CrossEntropy]` as a regular operation. The chosen option is to remove all
+training syntax from v0.1 entirely — `->` retains a single meaning, the v0.1 spec stays
+small, and a coherent training-syntax design (loss + optimiser + training loop hints) can
+be done together in v0.2 instead of bolting on a special case now.
+
+**Milestone 1 produces three artefacts, not just the grammar.**
+Approach B was selected: `language/grammar.ebnf` (formal, ISO/IEC 14977) + `docs/language_reference/grammar.md`
+(human-readable, with examples) + `tests/fixtures/*.nfl` (canonical valid programs).
+Writing the reference doc forces ambiguities in the EBNF to surface; the fixtures become the
+golden corpus the M2 parser will be tested against. No parser tooling is committed to at
+this stage — fixtures are reviewed by hand for now.
+
+**Block structure: Python-style with 4-space indent; tabs forbidden.**
+Matches the README example aesthetic and is token-efficient. Tabs are rejected up front to
+avoid the recurring tabs-vs-spaces ambiguity that bites LLM-generated code.
+
+### Problems encountered
+- None blocking. The loss-syntax ambiguity was caught and resolved during brainstorming,
+  before any grammar was written.
+
+### Next step
+Finish the brainstorming design (grammar outline, fixtures plan, acceptance criteria),
+write the spec to `docs/superpowers/specs/2026-05-02-nfl-grammar-v0.1-design.md`,
+then transition to `superpowers:writing-plans` to produce the implementation plan.
+
+---
+
 ## 2026-05-02 — Project founded; architecture designed; initial files created
 
 ### What was done
