@@ -111,3 +111,35 @@ fn parse_pipeline_missing_arrow_after_source_is_error() {
     let err = parse_pipeline_stmt(&mut p).unwrap_err();
     assert!(err.message.contains("'->'"), "got: {}", err.message);
 }
+
+#[test]
+fn parse_type_expr_integer_dims() {
+    let mut p = parser_of("Tensor[8, 4]");
+    let t = parse_type_expr(&mut p).unwrap();
+    assert_eq!(t.name, "Tensor");
+    assert_eq!(t.dims, vec![Dim::Integer(8), Dim::Integer(4)]);
+}
+
+#[test]
+fn parse_type_expr_symbolic_dims() {
+    let mut p = parser_of("Tensor[batch, input]");
+    let t = parse_type_expr(&mut p).unwrap();
+    assert_eq!(t.dims, vec![Dim::Symbol("batch".into()), Dim::Symbol("input".into())]);
+}
+
+#[test]
+fn parse_type_expr_empty_brackets_is_error() {
+    let mut p = parser_of("Tensor[]");
+    let err = parse_type_expr(&mut p).unwrap_err();
+    assert!(err.message.to_lowercase().contains("dim")
+            || err.message.to_lowercase().contains("empty"),
+            "got: {}", err.message);
+}
+
+#[test]
+fn parse_variable_decl_basic() {
+    let mut p = parser_of("x: Tensor[batch, 4]");
+    let v = parse_variable_decl(&mut p).unwrap();
+    assert_eq!(v.name, "x");
+    assert_eq!(v.ty.dims.len(), 2);
+}

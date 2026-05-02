@@ -275,3 +275,63 @@ pub(crate) fn parse_pipeline_stmt(p: &mut Parser) -> Result<PipelineStmt, ParseE
         span: Span::new(line, col),
     })
 }
+
+use crate::ast::{Dim, TypeExpr, VariableDecl};
+
+pub(crate) fn parse_dim(p: &mut Parser) -> Result<Dim, ParseError> {
+    match p.peek_kind().clone() {
+        TokenKind::Integer(n) => {
+            p.advance();
+            Ok(Dim::Integer(n))
+        }
+        TokenKind::Ident(s) => {
+            p.advance();
+            Ok(Dim::Symbol(s))
+        }
+        _ => Err(p.error_expected(&["integer", "identifier"])),
+    }
+}
+
+pub(crate) fn parse_dim_list(p: &mut Parser) -> Result<Vec<Dim>, ParseError> {
+    let mut dims = vec![parse_dim(p)?];
+    while p.eat(&TokenKind::Comma) {
+        dims.push(parse_dim(p)?);
+    }
+    Ok(dims)
+}
+
+pub(crate) fn parse_type_expr(p: &mut Parser) -> Result<TypeExpr, ParseError> {
+    let (line, col) = (p.peek().line, p.peek().col);
+    p.consume(TokenKind::Tensor, "Tensor")?;
+    p.consume(TokenKind::LBracket, "[")?;
+    if matches!(p.peek_kind(), TokenKind::RBracket) {
+        return Err(ParseError {
+            message: "Tensor type requires at least one dimension; empty dim_list is invalid".into(),
+            line: p.peek().line,
+            col: p.peek().col,
+            expected: vec!["integer", "identifier"],
+        });
+    }
+    let dims = parse_dim_list(p)?;
+    p.consume(TokenKind::RBracket, "]")?;
+    Ok(TypeExpr {
+        name: "Tensor".to_string(),
+        dims,
+        span: Span::new(line, col),
+    })
+}
+
+pub(crate) fn parse_variable_decl(p: &mut Parser) -> Result<VariableDecl, ParseError> {
+    let TokenKind::Ident(name) = p.peek_kind().clone() else {
+        return Err(p.error_expected(&["identifier"]));
+    };
+    let (line, col) = (p.peek().line, p.peek().col);
+    p.advance();
+    p.consume(TokenKind::Colon, ":")?;
+    let ty = parse_type_expr(p)?;
+    Ok(VariableDecl {
+        name,
+        ty,
+        span: Span::new(line, col),
+    })
+}
