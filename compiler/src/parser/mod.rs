@@ -256,10 +256,23 @@ pub(crate) fn parse_pipeline_stmt(p: &mut Parser) -> Result<PipelineStmt, ParseE
     p.advance();
 
     // pipeline_chain = pipeline_step , { pipeline_step } ; — at least one step.
+    // Continuation lines: the lexer suppresses INDENT/DEDENT when a line starts
+    // with `->` at deeper indent (grammar §5.2), but it still emits a Newline
+    // between the previous step and the continuation. Tolerate that Newline
+    // here so the chain is parsed as a single pipeline_stmt.
     let mut steps = Vec::new();
     p.consume(TokenKind::Arrow, "->")?;
     steps.push(parse_operation(p)?);
-    while matches!(p.peek_kind(), TokenKind::Arrow) {
+    loop {
+        // Skip a single Newline if it precedes a continuation Arrow.
+        while matches!(p.peek_kind(), TokenKind::Newline)
+            && matches!(p.peek_at(1), Some(TokenKind::Arrow))
+        {
+            p.advance();
+        }
+        if !matches!(p.peek_kind(), TokenKind::Arrow) {
+            break;
+        }
         p.advance();
         steps.push(parse_operation(p)?);
     }
@@ -379,6 +392,11 @@ pub(crate) fn parse_model_stmt(p: &mut Parser) -> Result<ModelStmt, ParseError> 
 }
 
 pub(crate) fn parse_model_body(p: &mut Parser) -> Result<Vec<ModelStmt>, ParseError> {
+    // Tolerate blank or comment-only lines between the model header's Newline
+    // and the first content line — the lexer emits Newlines for those without
+    // affecting the indent stack, so the Indent appears AFTER one or more
+    // Newlines rather than immediately.
+    p.skip_newlines();
     p.consume(TokenKind::Indent, "indented body")?;
     let mut stmts = Vec::new();
     loop {
