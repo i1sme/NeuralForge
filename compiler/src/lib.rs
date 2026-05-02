@@ -4,3 +4,4 @@
 //! [`parse`], which accepts NFL source text and returns a typed AST.
 
 pub mod ast;
+pub mod lexer;
