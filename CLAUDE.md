@@ -129,10 +129,13 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-Early design phase. Nothing is implemented yet.
+Milestone 1 complete: NFL Grammar v0.1 (inference-only) is formally defined.
+The artefacts are `language/grammar.ebnf`, `docs/language_reference/grammar.md`, and
+five positive fixtures under `tests/fixtures/`.
 
-The immediate next step is: **define the NFL grammar formally** (EBNF) and build a parser
-prototype that handles a simple feedforward network definition.
+The immediate next step is **Milestone 2 — Parser prototype**: implement a parser that
+consumes `.nfl` files and emits a typed AST. The choice of implementation language
+(Rust / C++ / Python / …) is the first M2 decision.
 
 ---
 
