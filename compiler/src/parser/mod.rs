@@ -4,6 +4,12 @@
 //! an AST node or a [`ParseError`]. There is no error recovery in v0.1 — the
 //! first error halts parsing.
 
+// All parse_* and Parser items are `pub(crate)` and currently consumed only
+// by `parser::tests`. The library entry `nflc::parse(&str)` (added in Task 15)
+// will call into this chain from non-test code — at that point the dead_code
+// lint stops firing and this directive should be removed.
+#![allow(dead_code)]
+
 #[cfg(test)]
 mod tests;
 
