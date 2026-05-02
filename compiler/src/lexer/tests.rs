@@ -61,3 +61,28 @@ fn lex_token_positions() {
     assert_eq!(toks[1].col, 7);
     assert_eq!(toks[1].kind, Ident("x".into()));
 }
+
+#[test]
+fn lex_comment_alone() {
+    // A comment-only file produces no token but Eof.
+    assert_eq!(lex_kinds("# hello"), vec![Eof]);
+}
+
+#[test]
+fn lex_comment_at_end_of_line() {
+    // Comment after a token does not affect the token, and is consumed.
+    assert_eq!(
+        lex_kinds("model # ignored"),
+        vec![Model, Eof],
+    );
+}
+
+#[test]
+fn lex_newline_lf() {
+    assert_eq!(lex_kinds("model\nTensor"), vec![Model, Newline, Tensor, Eof]);
+}
+
+#[test]
+fn lex_newline_crlf() {
+    assert_eq!(lex_kinds("model\r\nTensor"), vec![Model, Newline, Tensor, Eof]);
+}

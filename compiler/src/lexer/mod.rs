@@ -13,7 +13,7 @@ pub use tokens::{LexError, Token, TokenKind};
 /// newlines, and pipeline continuation are added in later tasks.
 pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     let mut tokens = Vec::new();
-    let line: u32 = 1;
+    let mut line: u32 = 1;
     let mut col: u32 = 1;
 
     let bytes = source.as_bytes();
@@ -28,6 +28,37 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         if b == b' ' || b == b'\t' {
             i += 1;
             col += 1;
+            continue;
+        }
+
+        // Comment: consume to end of line (do not include the newline itself).
+        if b == b'#' {
+            while i < bytes.len() && bytes[i] != b'\n' && bytes[i] != b'\r' {
+                i += 1;
+                col += 1;
+            }
+            continue;
+        }
+
+        // Newline: support both LF and CRLF.
+        if b == b'\n' {
+            tokens.push(Token::new(TokenKind::Newline, line, col));
+            i += 1;
+            line += 1;
+            col = 1;
+            continue;
+        }
+        if b == b'\r' {
+            // CRLF: consume the \r, then expect \n on the next iteration. If the
+            // next byte is \n, treat the pair as one newline; if not, it's still
+            // a newline (rare bare-CR case — accept silently for robustness).
+            tokens.push(Token::new(TokenKind::Newline, line, col));
+            i += 1;
+            if i < bytes.len() && bytes[i] == b'\n' {
+                i += 1;
+            }
+            line += 1;
+            col = 1;
             continue;
         }
 
