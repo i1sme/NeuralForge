@@ -17,9 +17,9 @@ NFL (NeuralForge Language) is a domain-specific language for describing neural n
 that compile ahead-of-time to assembly. v0.1 covers the **inference** path only:
 declaring a model, its inputs, and the chain of operations that produces an output.
 
-A complete v0.1 NFL file consists of one or more **model definitions**. Each model has
-a name, parameters in square brackets, a typed input declaration, and a pipeline of
-operations.
+A complete v0.1 NFL file (the grammar's root production `nfl_source`) consists of zero
+or more **model definitions**, separated by optional blank lines. Each model has a name,
+parameters in square brackets, a typed input declaration, and a pipeline of operations.
 
 ```nfl
 model TinyMLP [batch=8]:
