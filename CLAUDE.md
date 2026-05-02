@@ -31,11 +31,19 @@ NeuralForge/
 ├── CLAUDE.md               ← you are here
 ├── PROJECT_SPEC.md         ← full design specification
 │
-├── compiler/
-│   ├── lexer/              ← tokenises NFL source
-│   ├── parser/             ← builds typed AST from tokens
-│   ├── ir/                 ← Universal IR (UIR) — computation graph
-│   └── passes/             ← optimisation passes (fusion, tiling, scheduling)
+├── Cargo.toml              ← workspace manifest (members = ["compiler"], more added per milestone)
+│
+├── compiler/               ← `nflc` crate (Cargo workspace member)
+│   ├── Cargo.toml
+│   ├── src/
+│   │   ├── lib.rs          ← public API: `nflc::parse(&str)` etc.
+│   │   ├── main.rs         ← `nflc` CLI binary
+│   │   ├── ast.rs          ← typed AST nodes (Span on every node)
+│   │   ├── lexer/          ← tokeniser + INDENT/DEDENT machine
+│   │   └── parser/         ← recursive-descent parser, one fn per EBNF production
+│   └── tests/              ← integration tests (positive + negative fixtures)
+│
+│   (ir/ and passes/ modules will live under compiler/src/ in M3+)
 │
 ├── profiles/
 │   ├── generic/            ← scalar fallback, any POSIX target
