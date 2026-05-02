@@ -250,3 +250,28 @@ pub(crate) fn parse_operation(p: &mut Parser) -> Result<Operation, ParseError> {
         span: Span::new(line, col),
     })
 }
+
+use crate::ast::PipelineStmt;
+
+pub(crate) fn parse_pipeline_stmt(p: &mut Parser) -> Result<PipelineStmt, ParseError> {
+    let TokenKind::Ident(source) = p.peek_kind().clone() else {
+        return Err(p.error_expected(&["identifier"]));
+    };
+    let (line, col) = (p.peek().line, p.peek().col);
+    p.advance();
+
+    // pipeline_chain = pipeline_step , { pipeline_step } ; — at least one step.
+    let mut steps = Vec::new();
+    p.consume(TokenKind::Arrow, "->")?;
+    steps.push(parse_operation(p)?);
+    while matches!(p.peek_kind(), TokenKind::Arrow) {
+        p.advance();
+        steps.push(parse_operation(p)?);
+    }
+
+    Ok(PipelineStmt {
+        source,
+        steps,
+        span: Span::new(line, col),
+    })
+}

@@ -85,3 +85,29 @@ fn parse_operation_named_before_positional_is_error() {
         err.message
     );
 }
+
+#[test]
+fn parse_pipeline_one_step() {
+    let mut p = parser_of("x -> linear[2]");
+    let ps = parse_pipeline_stmt(&mut p).unwrap();
+    assert_eq!(ps.source, "x");
+    assert_eq!(ps.steps.len(), 1);
+    assert_eq!(ps.steps[0].name, "linear");
+}
+
+#[test]
+fn parse_pipeline_three_steps() {
+    let mut p = parser_of("x -> linear[8] -> relu -> softmax");
+    let ps = parse_pipeline_stmt(&mut p).unwrap();
+    assert_eq!(ps.source, "x");
+    assert_eq!(ps.steps.len(), 3);
+    assert_eq!(ps.steps.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(),
+               vec!["linear", "relu", "softmax"]);
+}
+
+#[test]
+fn parse_pipeline_missing_arrow_after_source_is_error() {
+    let mut p = parser_of("x linear[2]");        // missing "->"
+    let err = parse_pipeline_stmt(&mut p).unwrap_err();
+    assert!(err.message.contains("'->'"), "got: {}", err.message);
+}
