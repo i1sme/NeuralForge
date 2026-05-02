@@ -1,0 +1,15 @@
+[package]
+name = "nflc"
+version = "0.1.0"
+edition = "2021"
+description = "NeuralForge Language Compiler — parser prototype (Milestone 2)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "nflc"
+path = "src/main.rs"
