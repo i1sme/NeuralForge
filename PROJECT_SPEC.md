@@ -42,8 +42,12 @@ model Classifier [batch=32, input=784, output=10]:
       -> dropout[rate=0.2]
       -> linear[256] -> relu
       -> linear[output] -> softmax
-    -> loss: CrossEntropy
 ```
+
+> **Note:** the example above describes the inference (forward) path only. Training syntax —
+> loss specification, optimisers — is intentionally deferred to NFL v0.2 to keep the v0.1
+> grammar focused on a single concept: a pipeline `->` is always a data transformation,
+> never a control statement.
 
 ### 2. Universal Intermediate Representation (UIR)
 
@@ -140,10 +144,10 @@ NeuralForge is designed so that LLMs can write, read, and reason about NFL code 
 
 ## First Milestones
 
-| # | Milestone                                      | Goal                                              |
-|---|------------------------------------------------|---------------------------------------------------|
-| 1 | Language spec v0.1                             | Define NFL syntax formally (EBNF grammar)         |
-| 2 | Parser prototype                               | Parse a simple feedforward network definition     |
+| # | Milestone                                      | Goal                                                                       |
+|---|------------------------------------------------|----------------------------------------------------------------------------|
+| 1 | Language spec v0.1                             | Define NFL syntax formally (EBNF grammar) — inference-only; training in v0.2 |
+| 2 | Parser prototype                               | Parse a simple feedforward network definition                              |
 | 3 | UIR prototype                                  | Produce a computation graph from parsed AST       |
 | 4 | `generic` profile                              | Generate scalar assembly for a matrix multiply    |
 | 5 | Kernel fusion pass                             | Fuse linear+activation in the IR optimiser        |
@@ -156,7 +160,7 @@ NeuralForge is designed so that LLMs can write, read, and reason about NFL code 
 
 - Final syntax decisions for NFL (to be designed incrementally)
 - Memory model: static allocation only, or dynamic?
-- Training support in v1, or inference-only first?
+- Training syntax design: when and how to introduce loss/optimiser constructs (planned for v0.2)
 - How profiles handle quantisation (INT8, FP16, BF16)?
 - Distribution format for compiled binaries
 

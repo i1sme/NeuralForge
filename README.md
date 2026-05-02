@@ -31,7 +31,6 @@ model Classifier [batch=32, input=784, output=10]:
       -> dropout[rate=0.2]
       -> linear[256] -> relu
       -> linear[output] -> softmax
-    -> loss: CrossEntropy
 ```
 
 ---
@@ -73,6 +72,8 @@ Look it up in `DEVLOG.md`. Every significant decision is recorded there with its
 Early design phase. The architecture is defined; implementation has not started yet.
 
 The next concrete step is defining the NFL grammar formally (`language/grammar.ebnf`).
+The v0.1 grammar covers inference (forward pass) only — training syntax (loss, optimizer)
+is planned for v0.2.
 
 ---
 
