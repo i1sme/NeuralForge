@@ -4,11 +4,8 @@
 //! an AST node or a [`ParseError`]. There is no error recovery in v0.1 — the
 //! first error halts parsing.
 
-// Scaffolding lands ahead of its first consumer. The `parse_*` functions
-// added in Task 10 onwards will call into Parser/ParseError/describe_kind/
-// join_alts; until then the dead-code lint would fire. Remove this
-// directive once `parse_arg_value` (Task 10) wires the chain.
-#![allow(dead_code)]
+#[cfg(test)]
+mod tests;
 
 use crate::lexer::tokens::{Token, TokenKind};
 
@@ -145,4 +142,105 @@ fn describe_kind(k: &TokenKind) -> String {
         Dedent => "dedent".into(),
         Eof => "end of file".into(),
     }
+}
+
+use crate::ast::{ArgValue, OpArg, Operation, Span};
+
+pub(crate) fn parse_arg_value(p: &mut Parser) -> Result<ArgValue, ParseError> {
+    match p.peek_kind().clone() {
+        TokenKind::Integer(n) => {
+            p.advance();
+            Ok(ArgValue::Integer(n))
+        }
+        TokenKind::Number(n) => {
+            p.advance();
+            Ok(ArgValue::Float(n))
+        }
+        TokenKind::Ident(s) => {
+            p.advance();
+            Ok(ArgValue::Symbol(s))
+        }
+        _ => Err(p.error_expected(&["integer", "number", "identifier"])),
+    }
+}
+
+pub(crate) fn parse_named_arg(p: &mut Parser) -> Result<(String, ArgValue), ParseError> {
+    let TokenKind::Ident(name) = p.peek_kind().clone() else {
+        return Err(p.error_expected(&["identifier"]));
+    };
+    p.advance();
+    p.consume(TokenKind::Equals, "=")?;
+    let value = parse_arg_value(p)?;
+    Ok((name, value))
+}
+
+/// Parse `op_args = positional_args , [ "," , named_args ] | named_args`.
+/// Returns the list of arguments. Caller has already consumed `[` and is
+/// expected to consume the matching `]` afterwards.
+///
+/// Uses `peek_at(1)` to look one token past the cursor and decide whether
+/// the next item is a `named_arg` (`Ident "="`) or a positional `arg_value`.
+pub(crate) fn parse_op_args(p: &mut Parser) -> Result<Vec<OpArg>, ParseError> {
+    let mut args = Vec::new();
+    let mut seen_named = false;
+
+    loop {
+        // Decide whether the next item is a named_arg (Ident "=" ...) or a
+        // positional arg (any arg_value).
+        let is_named = matches!(p.peek_kind(), TokenKind::Ident(_))
+            && matches!(p.peek_at(1), Some(TokenKind::Equals));
+
+        if is_named {
+            let (name, value) = parse_named_arg(p)?;
+            args.push(OpArg::Named { name, value });
+            seen_named = true;
+        } else {
+            if seen_named {
+                return Err(ParseError {
+                    message: "positional argument cannot follow a named argument".into(),
+                    line: p.peek().line,
+                    col: p.peek().col,
+                    expected: vec!["named argument", "']'"],
+                });
+            }
+            let value = parse_arg_value(p)?;
+            args.push(OpArg::Positional(value));
+        }
+
+        // Either consume a comma and continue, or break.
+        if !p.eat(&TokenKind::Comma) {
+            break;
+        }
+    }
+
+    Ok(args)
+}
+
+pub(crate) fn parse_operation(p: &mut Parser) -> Result<Operation, ParseError> {
+    let TokenKind::Ident(name) = p.peek_kind().clone() else {
+        return Err(p.error_expected(&["identifier"]));
+    };
+    let (line, col) = (p.peek().line, p.peek().col);
+    p.advance();
+
+    let mut args = Vec::new();
+    if p.eat(&TokenKind::LBracket) {
+        // Empty bracket "[]" is invalid per spec.
+        if matches!(p.peek_kind(), TokenKind::RBracket) {
+            return Err(ParseError {
+                message: "operation argument list cannot be empty; omit the brackets if there are no arguments".into(),
+                line: p.peek().line,
+                col: p.peek().col,
+                expected: vec!["argument"],
+            });
+        }
+        args = parse_op_args(p)?;
+        p.consume(TokenKind::RBracket, "]")?;
+    }
+
+    Ok(Operation {
+        name,
+        args,
+        span: Span::new(line, col),
+    })
 }
