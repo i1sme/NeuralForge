@@ -335,3 +335,34 @@ pub(crate) fn parse_variable_decl(p: &mut Parser) -> Result<VariableDecl, ParseE
         span: Span::new(line, col),
     })
 }
+
+use crate::ast::NamedValue;
+
+pub(crate) fn parse_named_value(p: &mut Parser) -> Result<NamedValue, ParseError> {
+    let TokenKind::Ident(name) = p.peek_kind().clone() else {
+        return Err(p.error_expected(&["identifier"]));
+    };
+    let (line, col) = (p.peek().line, p.peek().col);
+    p.advance();
+    p.consume(TokenKind::Equals, "=")?;
+    // `.clone()` here turns the borrowed TokenKind into an owned one so we
+    // can pattern-match without fighting the borrow checker. Integer is a
+    // `u64` (Copy) so the clone is essentially free.
+    let TokenKind::Integer(value) = p.peek_kind().clone() else {
+        return Err(p.error_expected(&["integer literal"]));
+    };
+    p.advance();
+    Ok(NamedValue {
+        name,
+        value,
+        span: Span::new(line, col),
+    })
+}
+
+pub(crate) fn parse_model_params(p: &mut Parser) -> Result<Vec<NamedValue>, ParseError> {
+    let mut params = vec![parse_named_value(p)?];
+    while p.eat(&TokenKind::Comma) {
+        params.push(parse_named_value(p)?);
+    }
+    Ok(params)
+}

@@ -143,3 +143,27 @@ fn parse_variable_decl_basic() {
     assert_eq!(v.name, "x");
     assert_eq!(v.ty.dims.len(), 2);
 }
+
+#[test]
+fn parse_named_value_basic() {
+    let mut p = parser_of("batch=32");
+    let nv = parse_named_value(&mut p).unwrap();
+    assert_eq!(nv.name, "batch");
+    assert_eq!(nv.value, 32);
+}
+
+#[test]
+fn parse_model_params_three() {
+    let mut p = parser_of("batch=32, input=784, output=10");
+    let params = parse_model_params(&mut p).unwrap();
+    assert_eq!(params.len(), 3);
+    assert_eq!(params[0].name, "batch");
+    assert_eq!(params[2].value, 10);
+}
+
+#[test]
+fn parse_model_params_one() {
+    let mut p = parser_of("batch=8");
+    let params = parse_model_params(&mut p).unwrap();
+    assert_eq!(params.len(), 1);
+}
