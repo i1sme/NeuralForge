@@ -1,0 +1,11 @@
+# Canonical demo from README/PROJECT_SPEC.
+# Exercises: model_def with three params, variable_decl with symbolic dims,
+# multi-line pipeline_chain, operations with no/positional/named args.
+
+model Classifier [batch=32, input=784, output=10]:
+    x: Tensor[batch, input]
+
+    x -> linear[512] -> relu
+      -> dropout[rate=0.2]
+      -> linear[256] -> relu
+      -> linear[output] -> softmax

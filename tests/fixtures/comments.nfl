@@ -1,0 +1,14 @@
+# Top-of-file comment.
+# Exercises comments at every legal position the lexer must handle.
+
+# Comment immediately before a model.
+model Commented [batch=4, input=8, output=2]:
+    # Comment as the first line of a model body.
+    x: Tensor[batch, input]      # Trailing comment on a variable_decl.
+
+    # Blank-line comment between declarations.
+
+    x -> linear[16]              # Trailing comment on a pipeline step.
+      -> relu                    # Trailing comment on a continuation line.
+      -> linear[output] -> softmax
+# Trailing top-level comment after the model.

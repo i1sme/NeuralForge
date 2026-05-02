@@ -1,0 +1,11 @@
+# Operation with mixed arguments: one positional then one named.
+# This is the only fixture exercising the `op_args = positional_args , "," , named_args`
+# alternation. (Operations with this signature are hypothetical in v0.1; the stdlib
+# may or may not include them — that's a Milestone 2 decision. Grammatically valid.)
+
+model MixedArgs [batch=4, input=8, output=2]:
+    x: Tensor[batch, input]
+
+    x -> linear[16, bias=true]
+      -> relu
+      -> linear[output] -> softmax
