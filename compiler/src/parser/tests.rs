@@ -196,3 +196,32 @@ fn parse_model_def_missing_colon_is_error() {
     assert!(err.message.contains("':'") || err.message.to_lowercase().contains("colon"),
             "got: {}", err.message);
 }
+
+#[test]
+fn parse_nfl_source_one_model() {
+    let src = "model X [batch=8]:\n    x: Tensor[batch, 4]\n    x -> linear[2]\n";
+    let toks = lex(src).unwrap();
+    let leaked: &'static [Token] = Box::leak(toks.into_boxed_slice());
+    let mut p = Parser::new(leaked);
+    let nfl = parse_nfl_source(&mut p).unwrap();
+    assert_eq!(nfl.models.len(), 1);
+}
+
+#[test]
+fn parse_nfl_source_two_models() {
+    let src = "model A [batch=4]:\n    x: Tensor[batch, 1]\n    x -> linear[1]\n\nmodel B [batch=4]:\n    x: Tensor[batch, 1]\n    x -> linear[1]\n";
+    let toks = lex(src).unwrap();
+    let leaked: &'static [Token] = Box::leak(toks.into_boxed_slice());
+    let mut p = Parser::new(leaked);
+    let nfl = parse_nfl_source(&mut p).unwrap();
+    assert_eq!(nfl.models.len(), 2);
+    assert_eq!(nfl.models[0].name, "A");
+    assert_eq!(nfl.models[1].name, "B");
+}
+
+#[test]
+fn library_parse_round_trip_minimal() {
+    let src = "model X [batch=8]:\n    x: Tensor[batch, 4]\n    x -> softmax\n";
+    let nfl = crate::parse(src).expect("must parse");
+    assert_eq!(nfl.models[0].name, "X");
+}

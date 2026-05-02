@@ -4,12 +4,6 @@
 //! an AST node or a [`ParseError`]. There is no error recovery in v0.1 — the
 //! first error halts parsing.
 
-// All parse_* and Parser items are `pub(crate)` and currently consumed only
-// by `parser::tests`. The library entry `nflc::parse(&str)` (added in Task 15)
-// will call into this chain from non-test code — at that point the dead_code
-// lint stops firing and this directive should be removed.
-#![allow(dead_code)]
-
 #[cfg(test)]
 mod tests;
 
@@ -108,6 +102,7 @@ impl<'t> Parser<'t> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn position(&self) -> (u32, u32) {
         let t = self.peek();
         (t.line, t.col)
@@ -420,4 +415,16 @@ pub(crate) fn parse_model_def(p: &mut Parser) -> Result<ModelDef, ParseError> {
         body,
         span: Span::new(line, col),
     })
+}
+
+use crate::ast::NflSource;
+
+pub(crate) fn parse_nfl_source(p: &mut Parser) -> Result<NflSource, ParseError> {
+    let mut models = Vec::new();
+    p.skip_newlines();
+    while !matches!(p.peek_kind(), TokenKind::Eof) {
+        models.push(parse_model_def(p)?);
+        p.skip_newlines();
+    }
+    Ok(NflSource { models })
 }
