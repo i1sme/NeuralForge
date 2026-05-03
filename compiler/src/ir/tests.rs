@@ -1,6 +1,7 @@
 //! Unit tests for the IR module.
 
 use super::stdlib::*;
+use super::types::{AttrValue, OpAttr, Shape};
 
 #[test]
 fn resolve_known_ops() {
@@ -48,4 +49,34 @@ fn signature_relu_and_softmax_are_empty() {
     let s = signature(StdOp::Softmax);
     assert!(s.positional.is_empty());
     assert!(s.named.is_empty());
+}
+
+#[test]
+fn infer_linear_output_shape() {
+    let input = Shape(vec![8, 4]);
+    let attrs = vec![OpAttr { name: "out_dim".into(), value: AttrValue::Integer(2) }];
+    let out = infer_output_shape(StdOp::Linear, &[input], &attrs).unwrap();
+    assert_eq!(out.0, vec![8, 2]);
+}
+
+#[test]
+fn infer_linear_with_wrong_rank_input() {
+    let input = Shape(vec![8]); // rank 1, linear expects rank 2
+    let attrs = vec![OpAttr { name: "out_dim".into(), value: AttrValue::Integer(2) }];
+    let err = infer_output_shape(StdOp::Linear, &[input], &attrs).unwrap_err();
+    matches!(err, ShapeError::WrongRank { expected: 2, actual: 1, .. });
+}
+
+#[test]
+fn infer_relu_preserves_shape() {
+    let input = Shape(vec![8, 2]);
+    let out = infer_output_shape(StdOp::Relu, &[input.clone()], &[]).unwrap();
+    assert_eq!(out, input);
+}
+
+#[test]
+fn infer_softmax_and_dropout_preserve_shape() {
+    let input = Shape(vec![3, 7, 2]);
+    assert_eq!(infer_output_shape(StdOp::Softmax, &[input.clone()], &[]).unwrap(), input);
+    assert_eq!(infer_output_shape(StdOp::Dropout, &[input.clone()], &[]).unwrap(), input);
 }

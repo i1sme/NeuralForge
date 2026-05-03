@@ -2,6 +2,8 @@
 //! Linear, Relu, Dropout, Softmax). Functions `resolve`, `signature`,
 //! and `infer_output_shape` land in Tasks 2-3.
 
+use super::types::{AttrValue, OpAttr, Shape};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StdOp {
     Linear,
@@ -72,4 +74,50 @@ pub fn signature(op: StdOp) -> Signature {
         },
         StdOp::Softmax => Signature { positional: &[], named: &[] },
     }
+}
+
+pub fn infer_output_shape(
+    op: StdOp,
+    inputs: &[Shape],
+    attrs: &[OpAttr],
+) -> Result<Shape, ShapeError> {
+    match op {
+        StdOp::Linear => {
+            let input = single_input(inputs)?;
+            require_rank(input, 2)?;
+            let out_dim = get_int_attr(attrs, "out_dim")?;
+            Ok(Shape(vec![input.0[0], out_dim]))
+        }
+        StdOp::Relu | StdOp::Softmax | StdOp::Dropout => {
+            let input = single_input(inputs)?;
+            Ok(input.clone())
+        }
+    }
+}
+
+fn single_input(inputs: &[Shape]) -> Result<&Shape, ShapeError> {
+    if inputs.len() == 1 {
+        Ok(&inputs[0])
+    } else {
+        Err(ShapeError::WrongInputCount { expected: 1, actual: inputs.len() })
+    }
+}
+
+fn require_rank(s: &Shape, expected: usize) -> Result<(), ShapeError> {
+    if s.rank() == expected {
+        Ok(())
+    } else {
+        Err(ShapeError::WrongRank { expected, actual: s.rank(), dim_index: None })
+    }
+}
+
+fn get_int_attr(attrs: &[OpAttr], name: &'static str) -> Result<u64, ShapeError> {
+    attrs
+        .iter()
+        .find(|a| a.name == name)
+        .and_then(|a| match a.value {
+            AttrValue::Integer(n) => Some(n),
+            _ => None,
+        })
+        .ok_or(ShapeError::MissingAttr { name })
 }
