@@ -14,6 +14,70 @@ Format for each entry:
 
 ---
 
+## 2026-05-02 — Milestone 3a closed: UIR vertical-slice 1 shipped (tiny_mlp end-to-end)
+
+### What was done
+- Created `compiler/src/ir/` module with `mod`, `types`, `stdlib`, `build`, `error`,
+  `tests` files (6 source files)
+- Implemented index-based DAG (`Uir { models }`, `UirModel { nodes: Vec<Node> }`,
+  `NodeId = usize`) per spec §5.1
+- Defined stdlib for 4 operations (`Linear`, `Relu`, `Dropout`, `Softmax`) with per-op
+  `signature()` and `infer_output_shape()` — all four reachable from `nflc::ir::*`
+- Implemented `nflc::ir::build(&NflSource) -> Result<Uir, BuildError>` covering
+  symbolic-dim resolution, op binding, positional/named arg validation, and per-op
+  shape inference
+- Added integration test for `tests/fixtures/tiny_mlp.nfl` plus 3 negative inline tests
+  (`UnknownOp`, `UnknownDim`, `ModelHasNoPipeline`)
+- Re-exported `Uir`, `UirModel`, `Node`, `NodeId`, `NodeKind`, `OpAttr`, `AttrValue`,
+  `Type`, `Shape`, `StdOp`, `BuildError`, `BuildErrorKind` from the crate root
+- 88 tests passing (72 unit + 12 M2 integration + 4 M3a integration); zero warnings
+
+### Decisions made
+None new. All design decisions were captured in
+`docs/superpowers/specs/2026-05-02-m3a-uir-tiny-mlp-design.md` during brainstorming.
+This session executed the plan in
+`docs/superpowers/plans/2026-05-02-m3a-uir-tiny-mlp.md` (10 tasks, 10 commits).
+
+### Problems encountered
+- **Borrow-checker workaround in `build_model`.** Rust forbids passing both `&nodes`
+  (read-only context for shape lookup in `build_op`) and `&mut nodes` (where `build_op`
+  pushes the new node) simultaneously. Resolved by cloning a `Vec<Node>` snapshot
+  before each `build_op` call. Cheap for tiny_mlp's ≤3 nodes; proper refactor is
+  M3b's job (see tech-debt below).
+- **`AttrValue::Symbol` is genuinely unused in M3a's tests** — only `bias=true` (in
+  `mixed_args.nfl`, M3b territory) ever produces it. Caught and tracked in spec §9.1
+  before implementation; no surprises in execution.
+
+### Known tech debt (carried forward — see spec §9 plus this session's findings)
+1. **`AttrValue::Symbol(String)` is unused in M3a tests.** Will be exercised in M3b
+   when `mixed_args.nfl` is built. No `#[allow(dead_code)]` needed because the variant
+   is reachable through the `pub use` chain at the crate root.
+2. **`OpAttr.name` for positional args reuses `ArgSlot.name` from the signature.**
+   Couples consumers to the slot-name string contract. No action in M3a.
+3. **`Shape(Vec<u64>)` allocates per shape.** Acceptable for v0.1; revisit if
+   profiling shows it matters.
+4. **`Type.name` is always `"Tensor"` in v0.1.** Same tech-debt category as M2's
+   `TypeExpr.name`. Becomes an `enum TypeKind` in v0.2.
+5. **`build_model` clones `Vec<Node>` once per `build_op` call** to satisfy the
+   borrow checker. Cheap for M3a's small graphs (≤3 nodes per model). M3b should
+   refactor `build_op` to take `&Shape` instead of `&[Node]`, eliminating the clone.
+6. **A few `cargo clippy` lints** are present but not blocking (the plan's bar is
+   warning-free `cargo build`). Specifically: `&[input.clone()]` in stdlib tests
+   triggers `cloned_ref_to_slice_refs`, and `match`-as-bool in `check_arg_type`
+   triggers `match_like_matches_macro`. M3c can clean these up alongside the other
+   polish items.
+
+### Next step
+Begin **Milestone 3b — extend UIR to all 5 fixtures.** Adds: multi-pipeline within a
+single model, multi-model files (`pipeline_styles.nfl`), named args in real fixtures
+(`dropout[rate=0.2]` from `classifier.nfl`, `linear[16, bias=true]` from
+`mixed_args.nfl`), Float and Symbol AttrValue exercised by integration tests,
+dropout-rate range validation, plus the `--uir` CLI flag for end-to-end inspection.
+The data model and stdlib enum from M3a should not need extension; this is purely
+incremental wiring + tests + the borrow-checker refactor mentioned in tech-debt #5.
+
+---
+
 ## 2026-05-02 — Milestone 2 closed: NFL Parser prototype shipped (Rust, std-only)
 
 ### What was done
