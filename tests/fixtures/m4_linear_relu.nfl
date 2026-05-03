@@ -1,0 +1,8 @@
+# M4a fixture — minimal lowerable model (no softmax, no bias).
+# All 5 M3 positive fixtures end in softmax (M4b territory).
+# This one exercises the M4a end-to-end path: linear + relu only.
+
+model M4Demo [batch=8]:
+    x: Tensor[batch, 4]
+
+    x -> linear[2] -> relu
