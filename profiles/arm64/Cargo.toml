@@ -6,3 +6,4 @@ description = "NeuralForge arm64 codegen profile"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+compiler = { path = "../../compiler" }
