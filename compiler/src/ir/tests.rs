@@ -381,3 +381,11 @@ fn opattr_displays_name_equals_value() {
     let b = OpAttr { name: "rate".into(), value: AttrValue::Float(0.2) };
     assert_eq!(format!("{}", b), "rate=0.2");
 }
+
+#[test]
+fn stdop_displays_lowercase_name() {
+    assert_eq!(format!("{}", StdOp::Linear), "linear");
+    assert_eq!(format!("{}", StdOp::Relu), "relu");
+    assert_eq!(format!("{}", StdOp::Dropout), "dropout");
+    assert_eq!(format!("{}", StdOp::Softmax), "softmax");
+}

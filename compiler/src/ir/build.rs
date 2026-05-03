@@ -182,7 +182,7 @@ pub(crate) fn build_op(
             stdlib::AttrError::MissingAttr { name } => *name,
         };
         BuildError::invalid_attr_value(
-            &format!("{:?}", std_op),
+            &format!("{}", std_op),
             attr_name,
             &format!("{e}"),
             op_ast.span,

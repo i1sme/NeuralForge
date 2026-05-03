@@ -100,7 +100,7 @@ impl std::fmt::Display for Node {
                     .map(|o| format!("n{}", o))
                     .collect::<Vec<_>>()
                     .join(", ");
-                write!(f, "{:?}           :: {}    operands=[{}]", op, self.ty.shape, ops_s)?;
+                write!(f, "{}           :: {}    operands=[{}]", op, self.ty.shape, ops_s)?;
                 if !attrs.is_empty() {
                     let a = attrs
                         .iter()

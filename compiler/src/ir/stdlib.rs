@@ -167,3 +167,15 @@ fn get_float_attr(attrs: &[OpAttr], name: &'static str) -> Result<f64, AttrError
         })
         .ok_or(AttrError::MissingAttr { name })
 }
+
+impl std::fmt::Display for StdOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            StdOp::Linear => "linear",
+            StdOp::Relu => "relu",
+            StdOp::Dropout => "dropout",
+            StdOp::Softmax => "softmax",
+        };
+        write!(f, "{}", name)
+    }
+}
