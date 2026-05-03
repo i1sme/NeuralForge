@@ -6,7 +6,7 @@
 //! - `nflc parse <file> --tokens` → pretty-print token stream to stdout
 //! - `nflc parse <file> --uir`    → build and pretty-print the UIR
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -37,12 +37,46 @@ fn main() -> ExitCode {
 }
 
 fn print_usage() {
-    println!("nflc — NFL Compiler (Milestone 3b)");
+    println!("nflc — NFL Compiler (Milestone 3c)");
     println!();
     println!("USAGE:");
     println!("  nflc parse <file.nfl>            Parse and pretty-print the AST");
     println!("  nflc parse <file.nfl> --tokens   Print the lexer's token stream");
     println!("  nflc parse <file.nfl> --uir      Build and pretty-print the UIR");
+}
+
+/// Render an error with a source-snippet pointer. Output format mirrors
+/// rustc / cargo:
+///
+/// ```text
+/// error: <message>
+///   --> <path>:<line>:<col>
+///    |
+/// 12 |     x -> dropout[rate=1.5] -> softmax
+///    |                       ^
+/// ```
+fn render_error_with_snippet(
+    source: &str,
+    path: &Path,
+    line: u32,
+    col: u32,
+    message: &str,
+) {
+    eprintln!("error: {}", message);
+    eprintln!("  --> {}:{}:{}", path.display(), line, col);
+    let line_idx = line.saturating_sub(1) as usize;
+    if let Some(src_line) = source.lines().nth(line_idx) {
+        let prefix = line.to_string();
+        let pad = " ".repeat(prefix.len());
+        eprintln!("{}  |", pad);
+        eprintln!("{} | {}", prefix, src_line);
+        let mut underline = String::with_capacity(col as usize);
+        for _ in 1..col {
+            underline.push(' ');
+        }
+        underline.push('^');
+        eprintln!("{}  | {}", pad, underline);
+    }
 }
 
 fn run_parse(path: PathBuf, tokens_only: bool) -> ExitCode {
@@ -64,7 +98,7 @@ fn run_parse(path: PathBuf, tokens_only: bool) -> ExitCode {
             }
             Err(e) => {
                 let (line, col) = e.position();
-                eprintln!("error: {} at {}:{}:{}", e, path.display(), line, col);
+                render_error_with_snippet(&source, &path, line, col, &format!("{}", e));
                 ExitCode::FAILURE
             }
         }
@@ -75,7 +109,7 @@ fn run_parse(path: PathBuf, tokens_only: bool) -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                eprintln!("error: {} at {}:{}:{}", e.message, path.display(), e.line, e.col);
+                render_error_with_snippet(&source, &path, e.line, e.col, &e.message);
                 ExitCode::FAILURE
             }
         }
@@ -152,69 +186,17 @@ fn run_build_uir(path: PathBuf) -> ExitCode {
     match nflc::parse(&source) {
         Ok(ast) => match nflc::ir::build(&ast) {
             Ok(uir) => {
-                print_uir(&uir);
+                print!("{}", uir);
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                eprintln!("error: {} at {}:{}:{}", e.message, path.display(), e.line, e.col);
+                render_error_with_snippet(&source, &path, e.line, e.col, &e.message);
                 ExitCode::FAILURE
             }
         },
         Err(e) => {
-            eprintln!("error: {} at {}:{}:{}", e.message, path.display(), e.line, e.col);
+            render_error_with_snippet(&source, &path, e.line, e.col, &e.message);
             ExitCode::FAILURE
         }
-    }
-}
-
-fn print_uir(uir: &nflc::Uir) {
-    for m in &uir.models {
-        println!("uir-model {}", m.name);
-        println!("  inputs: [{}]",
-            m.inputs.iter().map(|id| format!("n{}", id)).collect::<Vec<_>>().join(", "));
-        println!("  output: n{}", m.output);
-        for (i, node) in m.nodes.iter().enumerate() {
-            print_uir_node(i, node);
-        }
-        println!();
-    }
-}
-
-fn print_uir_node(id: usize, node: &nflc::Node) {
-    let ty = format!("Tensor[{}]", format_uir_shape(&node.ty.shape));
-    match &node.kind {
-        nflc::NodeKind::Input { name } => {
-            println!("  n{}: input {:?}        :: {}", id, name, ty);
-        }
-        nflc::NodeKind::Op { op, operands, attrs } => {
-            let operands_s = operands.iter()
-                .map(|o| format!("n{}", o))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let mut line = format!(
-                "  n{}: {:?}           :: {}    operands=[{}]",
-                id, op, ty, operands_s,
-            );
-            if !attrs.is_empty() {
-                let attrs_s = attrs.iter()
-                    .map(format_uir_attr)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                line.push_str(&format!("    attrs=[{}]", attrs_s));
-            }
-            println!("{}", line);
-        }
-    }
-}
-
-fn format_uir_shape(shape: &nflc::Shape) -> String {
-    shape.0.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ")
-}
-
-fn format_uir_attr(a: &nflc::OpAttr) -> String {
-    match &a.value {
-        nflc::AttrValue::Integer(n) => format!("{}={}", a.name, n),
-        nflc::AttrValue::Float(f) => format!("{}={}", a.name, f),
-        nflc::AttrValue::Symbol(s) => format!("{}={}", a.name, s),
     }
 }
