@@ -64,3 +64,29 @@ fn linear_emits_matmul_loops_with_fmadd() {
     // Sum init.
     assert!(s.contains("fmov    s0, wzr"), "missing sum init in:\n{s}");
 }
+
+#[test]
+fn relu_emits_separate_loop_with_fmov_zero_and_fmax() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> relu\n");
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+
+    // Zero materialisation outside the loop.
+    assert!(s.contains("fmov    s4, wzr"), "missing 'fmov s4, wzr' (zero materialisation) in:\n{s}");
+    // The relu loop body uses fmax against s4.
+    assert!(s.contains("fmax    s3, s3, s4"), "missing relu fmax in:\n{s}");
+    // Loop label and bound (output total = 2*2 = 4).
+    assert!(s.contains(".Lrelu_0:"), "missing relu loop label in:\n{s}");
+    assert!(s.contains("cmp     x9, #4"), "missing relu element-count bound in:\n{s}");
+    // Relu reads + writes via x2 (output buffer).
+    assert!(s.contains("ldr     s3, [x2, x9, lsl #2]"), "missing relu load in:\n{s}");
+    assert!(s.contains("str     s3, [x2, x9, lsl #2]"), "missing relu store in:\n{s}");
+}
+
+#[test]
+fn relu_alone_after_matmul_does_not_break_existing_test() {
+    // Sanity: matmul still emitted alongside relu.
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> relu\n");
+    let asm = lower(&uir).expect("lower");
+    assert!(asm.source.contains("fmadd"));
+}

@@ -66,6 +66,7 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
 
     // Emit per-op asm, in topological (UIR-node) order.
     let mut linear_idx = 0usize;
+    let mut relu_idx = 0usize;
     for node in &model.nodes {
         if let NodeKind::Op { op, operands, .. } = &node.kind {
             match op {
@@ -83,7 +84,12 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
                     linear_idx += 1;
                 }
                 StdOp::Relu => {
-                    // Relu emission lands in Task 5.
+                    // Operates in-place on the producer's output buffer.
+                    // For M4a (terminal-relu only) this is the model output (x2).
+                    let buf_shape = &node.ty.shape;
+                    let total: u64 = buf_shape.0.iter().product();
+                    body.push_str(&emit_relu(total, relu_idx));
+                    relu_idx += 1;
                 }
                 _ => unreachable!("classify_op should have caught this"),
             }
@@ -160,6 +166,35 @@ fn emit_matmul(b: u64, k: u64, n: u64, linear_idx: usize) -> String {
     s.push_str("    add     x3, x3, #1\n");
     s.push_str(&format!("    b       .Lmm_i_{lid}\n"));
     s.push_str(&format!(".Lmm_i_end_{lid}:\n"));
+
+    s
+}
+
+/// Emit AArch64 elementwise relu over a buffer of `total_floats` f32 elements.
+///
+/// Operates in-place on the buffer pointed to by `x2` (the model output buffer).
+/// In M4a this is always the producer's terminal output. M4b will generalise
+/// to intermediate buffers when multi-stage Linear is added.
+///
+/// Uses `s4` for the persistent zero; `s3` for the per-element load/store.
+/// `s4` is chosen because `s0`–`s3` are already used by matmul (sum, ldr × 2).
+/// `relu_idx` is a unique-per-Relu suffix for label naming.
+fn emit_relu(total_floats: u64, relu_idx: usize) -> String {
+    let mut s = String::new();
+    let rid = relu_idx;
+
+    s.push_str(&format!("    ; relu: in-place clamp on output buffer ({total_floats} elements)\n"));
+    s.push_str("    fmov    s4, wzr\n");
+    s.push_str("    mov     x9, #0\n");
+    s.push_str(&format!(".Lrelu_{rid}:\n"));
+    s.push_str(&format!("    cmp     x9, #{total_floats}\n"));
+    s.push_str(&format!("    b.ge    .Lrelu_end_{rid}\n"));
+    s.push_str("    ldr     s3, [x2, x9, lsl #2]\n");
+    s.push_str("    fmax    s3, s3, s4\n");
+    s.push_str("    str     s3, [x2, x9, lsl #2]\n");
+    s.push_str("    add     x9, x9, #1\n");
+    s.push_str(&format!("    b       .Lrelu_{rid}\n"));
+    s.push_str(&format!(".Lrelu_end_{rid}:\n"));
 
     s
 }
