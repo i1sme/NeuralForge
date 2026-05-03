@@ -175,3 +175,18 @@ mod mixed_args {
         assert_eq!(attrs[1].value, AttrValue::Symbol("true".into()));
     }
 }
+
+mod negative {
+    use nflc::*;
+
+    #[test]
+    fn dropout_rate_out_of_range_rejected() {
+        let src = std::fs::read_to_string(
+            "../tests/fixtures/negative/dropout_rate_out_of_range.nfl"
+        ).expect("fixture readable");
+        let ast = parse(&src).expect("parses");
+        let err = ir::build(&ast).expect_err("must fail");
+        assert!(matches!(err.kind, BuildErrorKind::InvalidAttrValue { .. }));
+        assert_eq!(err.line, 6, "dropout call is on line 6 of the fixture");
+    }
+}
