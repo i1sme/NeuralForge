@@ -63,10 +63,105 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
 
     let mut body = String::new();
     body.push_str(&asm::format_function_header(&sig));
-    // Body emission (matmul, relu) lands in Tasks 4 and 5.
+
+    // Emit per-op asm, in topological (UIR-node) order.
+    let mut linear_idx = 0usize;
+    for node in &model.nodes {
+        if let NodeKind::Op { op, operands, .. } = &node.kind {
+            match op {
+                StdOp::Linear => {
+                    let in_shape = &model.nodes[operands[0]].ty.shape;
+                    let out_shape = &node.ty.shape;
+                    // shape is [batch, k] for input and [batch, n] for output
+                    if in_shape.0.len() != 2 || out_shape.0.len() != 2 {
+                        return Err(LowerError::ShapeNotConcrete { span: node.source_span });
+                    }
+                    let b = in_shape.0[0];
+                    let k = in_shape.0[1];
+                    let n = out_shape.0[1];
+                    body.push_str(&emit_matmul(b, k, n, linear_idx));
+                    linear_idx += 1;
+                }
+                StdOp::Relu => {
+                    // Relu emission lands in Task 5.
+                }
+                _ => unreachable!("classify_op should have caught this"),
+            }
+        }
+    }
+
     body.push_str(&asm::format_function_footer());
 
     Ok((body, sig))
+}
+
+/// Emit the AArch64 matmul body for one Linear op.
+///
+/// Per spec §7: input is row-major [B, K], weights row-major [K, N],
+/// output row-major [B, N]. ABI registers: x0=input, x1=weights, x2=output.
+/// `linear_idx` is a unique-per-Linear suffix used in label names so
+/// multiple Linear ops in one model don't collide on labels.
+fn emit_matmul(b: u64, k: u64, n: u64, linear_idx: usize) -> String {
+    let mut s = String::new();
+    let lid = linear_idx;
+
+    s.push_str(&format!("    ; matmul: input [{b},{k}] × weights [{k},{n}] → output [{b},{n}]\n"));
+
+    // Outer i loop
+    s.push_str("    mov     x3, #0\n");
+    s.push_str(&format!(".Lmm_i_{lid}:\n"));
+    s.push_str(&format!("    cmp     x3, #{b}\n"));
+    s.push_str(&format!("    b.ge    .Lmm_i_end_{lid}\n"));
+
+    // j loop
+    s.push_str("    mov     x4, #0\n");
+    s.push_str(&format!(".Lmm_j_{lid}:\n"));
+    s.push_str(&format!("    cmp     x4, #{n}\n"));
+    s.push_str(&format!("    b.ge    .Lmm_j_end_{lid}\n"));
+
+    // sum = 0
+    s.push_str("    fmov    s0, wzr\n");
+
+    // k loop
+    s.push_str("    mov     x5, #0\n");
+    s.push_str(&format!(".Lmm_k_{lid}:\n"));
+    s.push_str(&format!("    cmp     x5, #{k}\n"));
+    s.push_str(&format!("    b.ge    .Lmm_k_end_{lid}\n"));
+
+    // input[i*K + k]
+    s.push_str(&format!("    mov     x8, #{k}\n"));
+    s.push_str("    mul     x6, x3, x8\n");
+    s.push_str("    add     x6, x6, x5\n");
+    s.push_str("    ldr     s1, [x0, x6, lsl #2]\n");
+
+    // weights[k*N + j]
+    s.push_str(&format!("    mov     x8, #{n}\n"));
+    s.push_str("    mul     x7, x5, x8\n");
+    s.push_str("    add     x7, x7, x4\n");
+    s.push_str("    ldr     s2, [x1, x7, lsl #2]\n");
+
+    // sum += s1 * s2
+    s.push_str("    fmadd   s0, s1, s2, s0\n");
+
+    s.push_str("    add     x5, x5, #1\n");
+    s.push_str(&format!("    b       .Lmm_k_{lid}\n"));
+    s.push_str(&format!(".Lmm_k_end_{lid}:\n"));
+
+    // store output[i*N + j]
+    s.push_str(&format!("    mov     x8, #{n}\n"));
+    s.push_str("    mul     x6, x3, x8\n");
+    s.push_str("    add     x6, x6, x4\n");
+    s.push_str("    str     s0, [x2, x6, lsl #2]\n");
+
+    s.push_str("    add     x4, x4, #1\n");
+    s.push_str(&format!("    b       .Lmm_j_{lid}\n"));
+    s.push_str(&format!(".Lmm_j_end_{lid}:\n"));
+
+    s.push_str("    add     x3, x3, #1\n");
+    s.push_str(&format!("    b       .Lmm_i_{lid}\n"));
+    s.push_str(&format!(".Lmm_i_end_{lid}:\n"));
+
+    s
 }
 
 /// Validate that an op is supported in M4a; return error otherwise.

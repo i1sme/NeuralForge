@@ -44,3 +44,23 @@ fn linear_emits_function_with_correct_symbol_and_ret() {
     assert!(s.contains("_nfl_forward_M:"), "missing label in:\n{s}");
     assert!(s.contains("ret"), "missing ret in:\n{s}");
 }
+
+#[test]
+fn linear_emits_matmul_loops_with_fmadd() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n");
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+
+    // Sanity: FMADD is the matmul accumulator.
+    assert!(s.contains("fmadd"), "expected fmadd in:\n{s}");
+    // Three loop labels (i, j, k) for the single Linear (label suffix 0).
+    assert!(s.contains(".Lmm_i_0:"), "missing i-loop label in:\n{s}");
+    assert!(s.contains(".Lmm_j_0:"), "missing j-loop label in:\n{s}");
+    assert!(s.contains(".Lmm_k_0:"), "missing k-loop label in:\n{s}");
+    // Comparison constants come from shapes.
+    assert!(s.contains("cmp     x3, #2"), "missing i-bound (B=2) in:\n{s}");
+    assert!(s.contains("cmp     x4, #2"), "missing j-bound (N=2) in:\n{s}");
+    assert!(s.contains("cmp     x5, #3"), "missing k-bound (K=3) in:\n{s}");
+    // Sum init.
+    assert!(s.contains("fmov    s0, wzr"), "missing sum init in:\n{s}");
+}
