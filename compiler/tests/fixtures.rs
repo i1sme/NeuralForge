@@ -4,7 +4,7 @@
 //! under separate `mod`s for readability.
 
 mod positive {
-    use nflc::*;
+    use compiler::*;
 
     fn read_fixture(name: &str) -> String {
         let path = format!("../tests/fixtures/{name}");
@@ -126,7 +126,7 @@ mod positive {
 }
 
 mod negative {
-    use nflc::*;
+    use compiler::*;
 
     fn read_fixture(name: &str) -> String {
         let path = format!("../tests/fixtures/negative/{name}");

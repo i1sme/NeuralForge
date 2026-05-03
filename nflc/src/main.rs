@@ -89,7 +89,7 @@ fn run_parse(path: PathBuf, tokens_only: bool) -> ExitCode {
     };
 
     if tokens_only {
-        match nflc::lexer::lex(&source) {
+        match compiler::lexer::lex(&source) {
             Ok(tokens) => {
                 for t in tokens {
                     println!("{:>3}:{:<3}  {:?}", t.line, t.col, t.kind);
@@ -103,7 +103,7 @@ fn run_parse(path: PathBuf, tokens_only: bool) -> ExitCode {
             }
         }
     } else {
-        match nflc::parse(&source) {
+        match compiler::parse(&source) {
             Ok(ast) => {
                 print_ast(&ast);
                 ExitCode::SUCCESS
@@ -116,7 +116,7 @@ fn run_parse(path: PathBuf, tokens_only: bool) -> ExitCode {
     }
 }
 
-fn print_ast(nfl: &nflc::NflSource) {
+fn print_ast(nfl: &compiler::NflSource) {
     for m in &nfl.models {
         println!("model {} [", m.name);
         for p in &m.params {
@@ -130,13 +130,13 @@ fn print_ast(nfl: &nflc::NflSource) {
     }
 }
 
-fn print_stmt(s: &nflc::ModelStmt, depth: usize) {
+fn print_stmt(s: &compiler::ModelStmt, depth: usize) {
     let pad = "  ".repeat(depth);
     match s {
-        nflc::ModelStmt::VariableDecl(v) => {
+        compiler::ModelStmt::VariableDecl(v) => {
             println!("{pad}var {} : Tensor[{}]", v.name, format_dims(&v.ty.dims));
         }
-        nflc::ModelStmt::Pipeline(ps) => {
+        compiler::ModelStmt::Pipeline(ps) => {
             print!("{pad}pipeline {}", ps.source);
             for op in &ps.steps {
                 print!(" -> {}", op.name);
@@ -145,8 +145,8 @@ fn print_stmt(s: &nflc::ModelStmt, depth: usize) {
                     for (i, a) in op.args.iter().enumerate() {
                         if i > 0 { print!(", "); }
                         match a {
-                            nflc::OpArg::Positional(v) => print!("{}", format_arg(v)),
-                            nflc::OpArg::Named { name, value } => print!("{name}={}", format_arg(value)),
+                            compiler::OpArg::Positional(v) => print!("{}", format_arg(v)),
+                            compiler::OpArg::Named { name, value } => print!("{name}={}", format_arg(value)),
                         }
                     }
                     print!("]");
@@ -157,21 +157,21 @@ fn print_stmt(s: &nflc::ModelStmt, depth: usize) {
     }
 }
 
-fn format_dims(dims: &[nflc::Dim]) -> String {
+fn format_dims(dims: &[compiler::Dim]) -> String {
     dims.iter()
         .map(|d| match d {
-            nflc::Dim::Integer(n) => n.to_string(),
-            nflc::Dim::Symbol(s) => s.clone(),
+            compiler::Dim::Integer(n) => n.to_string(),
+            compiler::Dim::Symbol(s) => s.clone(),
         })
         .collect::<Vec<_>>()
         .join(", ")
 }
 
-fn format_arg(a: &nflc::ArgValue) -> String {
+fn format_arg(a: &compiler::ArgValue) -> String {
     match a {
-        nflc::ArgValue::Integer(n) => n.to_string(),
-        nflc::ArgValue::Float(f) => format!("{f}"),
-        nflc::ArgValue::Symbol(s) => s.clone(),
+        compiler::ArgValue::Integer(n) => n.to_string(),
+        compiler::ArgValue::Float(f) => format!("{f}"),
+        compiler::ArgValue::Symbol(s) => s.clone(),
     }
 }
 
@@ -183,8 +183,8 @@ fn run_build_uir(path: PathBuf) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match nflc::parse(&source) {
-        Ok(ast) => match nflc::ir::build(&ast) {
+    match compiler::parse(&source) {
+        Ok(ast) => match compiler::ir::build(&ast) {
             Ok(uir) => {
                 print!("{}", uir);
                 ExitCode::SUCCESS

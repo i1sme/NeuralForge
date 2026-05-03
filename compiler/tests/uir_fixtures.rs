@@ -3,7 +3,7 @@
 //! One submodule per fixture; `mod negative` for cross-cutting rejection cases.
 
 mod tiny_mlp {
-    use nflc::*;
+    use compiler::*;
 
     #[test]
     fn tiny_mlp_builds() {
@@ -67,7 +67,7 @@ mod tiny_mlp {
 }
 
 mod classifier {
-    use nflc::*;
+    use compiler::*;
 
     #[test]
     fn classifier_builds() {
@@ -103,7 +103,7 @@ mod classifier {
 }
 
 mod pipeline_styles {
-    use nflc::*;
+    use compiler::*;
 
     #[test]
     fn pipeline_styles_three_models() {
@@ -132,7 +132,7 @@ mod pipeline_styles {
 }
 
 mod comments {
-    use nflc::*;
+    use compiler::*;
 
     #[test]
     fn comments_builds() {
@@ -152,7 +152,7 @@ mod comments {
 }
 
 mod mixed_args {
-    use nflc::*;
+    use compiler::*;
 
     #[test]
     fn mixed_args_builds() {
@@ -177,7 +177,7 @@ mod mixed_args {
 }
 
 mod negative {
-    use nflc::*;
+    use compiler::*;
 
     #[test]
     fn dropout_rate_out_of_range_rejected() {
