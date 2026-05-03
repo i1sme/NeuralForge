@@ -124,3 +124,51 @@ fn resolve_type_unknown_dim_errors() {
     let err = resolve_type(&ty, &params).unwrap_err();
     assert!(matches!(err.kind, BuildErrorKind::UnknownDim { .. }));
 }
+
+use super::build::resolve_args;
+use crate::ast::{ArgValue, OpArg};
+
+#[test]
+fn resolve_args_one_positional_integer() {
+    let args = vec![OpArg::Positional(ArgValue::Integer(512))];
+    let attrs = resolve_args(StdOp::Linear, &args, span()).unwrap();
+    assert_eq!(attrs.len(), 1);
+    assert_eq!(attrs[0].name, "out_dim");
+    assert_eq!(attrs[0].value, AttrValue::Integer(512));
+}
+
+#[test]
+fn resolve_args_missing_required_positional() {
+    let args: Vec<OpArg> = vec![]; // linear needs out_dim
+    let err = resolve_args(StdOp::Linear, &args, span()).unwrap_err();
+    assert!(matches!(
+        err.kind,
+        BuildErrorKind::ArgCountMismatch { .. } | BuildErrorKind::MissingRequiredArg { .. }
+    ));
+}
+
+#[test]
+fn resolve_args_extra_positional() {
+    let args = vec![
+        OpArg::Positional(ArgValue::Integer(2)),
+        OpArg::Positional(ArgValue::Integer(3)),
+    ];
+    let err = resolve_args(StdOp::Linear, &args, span()).unwrap_err();
+    assert!(matches!(err.kind, BuildErrorKind::ArgCountMismatch { .. }));
+}
+
+#[test]
+fn resolve_args_type_mismatch() {
+    let args = vec![OpArg::Positional(ArgValue::Float(2.5))]; // out_dim wants Integer
+    let err = resolve_args(StdOp::Linear, &args, span()).unwrap_err();
+    assert!(matches!(err.kind, BuildErrorKind::ArgTypeMismatch { .. }));
+}
+
+#[test]
+fn resolve_args_named_only_dropout() {
+    let args = vec![OpArg::Named { name: "rate".into(), value: ArgValue::Float(0.2) }];
+    let attrs = resolve_args(StdOp::Dropout, &args, span()).unwrap();
+    assert_eq!(attrs.len(), 1);
+    assert_eq!(attrs[0].name, "rate");
+    assert_eq!(attrs[0].value, AttrValue::Float(0.2));
+}
