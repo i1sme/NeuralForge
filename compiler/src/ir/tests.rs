@@ -80,3 +80,47 @@ fn infer_softmax_and_dropout_preserve_shape() {
     assert_eq!(infer_output_shape(StdOp::Softmax, &[input.clone()], &[]).unwrap(), input);
     assert_eq!(infer_output_shape(StdOp::Dropout, &[input.clone()], &[]).unwrap(), input);
 }
+
+use super::build::resolve_type;
+use super::error::BuildErrorKind;
+use crate::ast::{Dim, Span, TypeExpr};
+use std::collections::HashMap;
+
+fn span() -> Span { Span::new(1, 1) }
+
+#[test]
+fn resolve_type_all_integer_dims() {
+    let ty = TypeExpr {
+        name: "Tensor".into(),
+        dims: vec![Dim::Integer(8), Dim::Integer(4)],
+        span: span(),
+    };
+    let params: HashMap<&str, u64> = HashMap::new();
+    let shape = resolve_type(&ty, &params).unwrap();
+    assert_eq!(shape.0, vec![8, 4]);
+}
+
+#[test]
+fn resolve_type_symbolic_dim_with_lookup() {
+    let ty = TypeExpr {
+        name: "Tensor".into(),
+        dims: vec![Dim::Symbol("batch".into()), Dim::Integer(4)],
+        span: span(),
+    };
+    let mut params: HashMap<&str, u64> = HashMap::new();
+    params.insert("batch", 8);
+    let shape = resolve_type(&ty, &params).unwrap();
+    assert_eq!(shape.0, vec![8, 4]);
+}
+
+#[test]
+fn resolve_type_unknown_dim_errors() {
+    let ty = TypeExpr {
+        name: "Tensor".into(),
+        dims: vec![Dim::Symbol("zzz".into())],
+        span: span(),
+    };
+    let params: HashMap<&str, u64> = HashMap::new();
+    let err = resolve_type(&ty, &params).unwrap_err();
+    assert!(matches!(err.kind, BuildErrorKind::UnknownDim { .. }));
+}
