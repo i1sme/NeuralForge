@@ -47,3 +47,29 @@ impl std::fmt::Display for ShapeError {
         }
     }
 }
+
+pub fn resolve(name: &str) -> Option<StdOp> {
+    match name {
+        "linear" => Some(StdOp::Linear),
+        "relu" => Some(StdOp::Relu),
+        "dropout" => Some(StdOp::Dropout),
+        "softmax" => Some(StdOp::Softmax),
+        _ => None,
+    }
+}
+
+pub fn signature(op: StdOp) -> Signature {
+    use ArgType::*;
+    match op {
+        StdOp::Linear => Signature {
+            positional: &[ArgSlot { name: "out_dim", ty: Integer, required: true }],
+            named: &[ArgSlot { name: "bias", ty: Symbol, required: false }],
+        },
+        StdOp::Relu => Signature { positional: &[], named: &[] },
+        StdOp::Dropout => Signature {
+            positional: &[],
+            named: &[ArgSlot { name: "rate", ty: Float, required: true }],
+        },
+        StdOp::Softmax => Signature { positional: &[], named: &[] },
+    }
+}
