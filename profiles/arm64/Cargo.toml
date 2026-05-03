@@ -1,0 +1,12 @@
+[package]
+name = "profiles-arm64"
+version = "0.1.0"
+edition = "2021"
+description = "NeuralForge arm64 codegen profile"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+compiler = { path = "../../compiler" }
+
+[dev-dependencies]
+libloading = "0.8"

@@ -14,6 +14,110 @@ Format for each entry:
 
 ---
 
+## 2026-05-03 — Milestone 4a closed: arm64 scalar codegen — first machine-executable output
+
+### What was done
+- Workspace restructured into 3 crates: `compiler/` (lib only), `nflc/` (bin
+  only), `profiles/arm64/` (lib only). Empty placeholder dirs
+  `profiles/{generic,x86_64,riscv64}/` deleted. `compiler` package renamed
+  from `nflc` to `compiler`. 25 mechanical `nflc::` → `compiler::` import
+  rewrites across `nflc/src/main.rs`, `compiler/tests/uir_fixtures.rs`,
+  `compiler/tests/fixtures.rs`. Stale `.gitkeep` markers removed.
+- `profiles/arm64` lib crate. Public surface: `pub fn lower(uir: &Uir) ->
+  Result<Asm, LowerError>`. Types: `Asm`, `FnSig`, `LowerError`
+  (`#[non_exhaustive]`, 4 variants). Internal modules: `codegen.rs` (UIR
+  walker, per-op emitters, classify_op upfront validation), `asm.rs`
+  (function header/footer helpers + Mach-O symbol prefix), `tests.rs` (10
+  unit tests).
+- Lowering covers `linear[N]` without bias (matmul: 3 nested scalar loops
+  with `fmadd`, `mul`-based index arithmetic), `relu` (separate elementwise
+  loop with `fmov s4, wzr` once + `fmax s3, s3, s4` per element, in-place
+  on `x2` output buffer), and `Input` (marker, no code).
+- Errors for `linear[N, bias=true]`, `dropout`, `softmax`, and duplicate
+  model names — all routed through M3c's `render_error_with_snippet` for
+  CLI output.
+- New `nflc compile <file.nfl> --profile <name> [-o <path>]` subcommand.
+  Validates profile strictly (only `arm64` accepted in M4a). Default output
+  goes to stdout; `-o` writes to a file.
+- New fixture `tests/fixtures/m4_linear_relu.nfl` (the only positive
+  fixture that doesn't terminate in `softmax`). UIR-build test mirrors the
+  M3b per-fixture submodule style.
+- End-to-end integration test: builds the M4a fixture's UIR, lowers to asm,
+  assembles + links to a `.dylib` via `cc -shared -arch arm64`, dlopens via
+  `libloading` (dev-dep, justified per spec §11), calls
+  `nfl_forward_M4Demo` with deterministic input + weights, compares output
+  against a pure-Rust matmul+relu reference. **Test passed first time with
+  the planned `1e-5` tolerance — no FMA divergence flake.**
+- New `docs/profile_guide/arm64.md` (217 lines): ABI, buffer layout,
+  supported ops, asm patterns, error variants, recipes for adding new ops
+  and new arch profiles, M4a limitations.
+- `docs/language_reference/uir.md` cross-links to the arm64 guide for the
+  optional-attribute interpretation.
+- `PROJECT_SPEC.md` milestones table M4 row updated; "Architecture Profiles"
+  table loses `generic` row, gains `arm64` row as M4 deliverable.
+
+### Decisions made
+None new. All design decisions captured in
+`docs/superpowers/specs/2026-05-03-m4a-arm64-codegen-design.md` during
+brainstorming. This session executed the plan in
+`docs/superpowers/plans/2026-05-03-m4a-arm64-codegen.md` (12 tasks, 13
+commits — Task 1 split into restructure + cleanup-of-stale-`.gitkeep`).
+
+### Project principle formalised in M4a spec §11
+
+> **Dependency policy.** Production crates (`compiler`, `nflc`,
+> `profiles/arm64` lib-target) — strict **std-only**. Adding a non-std
+> production dep requires a separate explicit decision and PR.
+> **Dev-dependencies** are admissible by need; M4a starts the list with
+> `libloading` (used only in `profiles/arm64`'s integration test).
+
+### Plan-bug discovered + fixed during execution
+- The plan's NFL test strings used `"model M [b=2]: x: Tensor[b, 3]\n    ..."`
+  (no `\n` after `:`). The parser requires `\n` after the model header
+  before any body statement. Task 2 implementer caught this and fixed the
+  test string to `"model M [b=2]:\n    x: Tensor[b, 3]\n    ..."`. Pattern
+  propagated to Tasks 3-6 prompts. Behaviour under test unchanged.
+
+### Problems encountered
+- The empty `profiles/{generic,x86_64,riscv64}/` placeholder dirs each had
+  a `.gitkeep` marker that `rmdir` couldn't remove. Solved with `git rm`
+  on each `.gitkeep` (which also removes the now-empty dir).
+- Two stale `.gitkeep` files (`profiles/.gitkeep`, `profiles/arm64/.gitkeep`)
+  were caught by Task 1's reviewer; cleaned in commit `a317772` before
+  proceeding.
+- No FP divergence flake — `1e-5` tolerance was sufficient first try.
+
+### Known tech debt (carried forward)
+1. Model-name uniqueness check lives in `profiles/arm64::walk_uir` for now;
+   spec §15 says move it up to `compiler::ir::build` in M4b.
+2. Multi-Linear weight layout: M4a `FnSig.weight_floats` reports the total
+   count only. M4b adds `weights_layout: Vec<WeightSlot>` with per-matrix
+   offsets when multi-Linear models become lowerable (and need bias).
+3. Integration test tempdir is left in `/tmp` after the test (no Drop-based
+   cleanup). Acceptable for v0.1; revisit in M4c if it becomes noisy.
+4. CI is still TODO (M3a tech-debt #3).
+5. Performance: scalar code, `mul`-based indexing, no fusion, no SIMD. M5+.
+6. `ShapeNotConcrete` reused for "no inputs" case in walk_model — semantically
+   different from "shape unresolved". Add dedicated variant in M4b cleanup.
+
+### Next step
+**Milestone 4a complete.** First time NeuralForge produces real
+machine-executable code: an `.s` text file → `.dylib` → callable function
+that gives numerically correct output (matmul+relu of f32 inputs).
+
+The immediate next step is **Milestone 4b — softmax + bias + dropout**:
+- Lower `linear[N, bias=true]` (4-th `bias` parameter, `FnSig.weights_layout`).
+- Lower `dropout` (no-op pass-through at inference).
+- Lower `softmax` (scalar `exp` via Taylor series with range reduction OR
+  link `expf` from libm).
+- Result: all 5 M3 positive fixtures lower end-to-end.
+- Move duplicate-model-name check up to `compiler::ir::build`.
+
+Brainstorming for M4b runs in a fresh worktree once main is updated
+post-M4a-merge.
+
+---
+
 ## 2026-05-03 — Milestone 3c closed: UIR polish — Display impls + source-snippets + reference doc + clippy clean
 
 ### What was done

@@ -1,0 +1,14 @@
+[package]
+name = "nflc"
+version = "0.1.0"
+edition = "2021"
+description = "NeuralForge Language Compiler — CLI binary"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+compiler = { path = "../compiler" }
+profiles-arm64 = { path = "../profiles/arm64" }
+
+[[bin]]
+name = "nflc"
+path = "src/main.rs"

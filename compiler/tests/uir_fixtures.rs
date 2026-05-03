@@ -3,7 +3,7 @@
 //! One submodule per fixture; `mod negative` for cross-cutting rejection cases.
 
 mod tiny_mlp {
-    use nflc::*;
+    use compiler::*;
 
     #[test]
     fn tiny_mlp_builds() {
@@ -67,7 +67,7 @@ mod tiny_mlp {
 }
 
 mod classifier {
-    use nflc::*;
+    use compiler::*;
 
     #[test]
     fn classifier_builds() {
@@ -103,7 +103,7 @@ mod classifier {
 }
 
 mod pipeline_styles {
-    use nflc::*;
+    use compiler::*;
 
     #[test]
     fn pipeline_styles_three_models() {
@@ -132,7 +132,7 @@ mod pipeline_styles {
 }
 
 mod comments {
-    use nflc::*;
+    use compiler::*;
 
     #[test]
     fn comments_builds() {
@@ -152,7 +152,7 @@ mod comments {
 }
 
 mod mixed_args {
-    use nflc::*;
+    use compiler::*;
 
     #[test]
     fn mixed_args_builds() {
@@ -176,8 +176,43 @@ mod mixed_args {
     }
 }
 
+mod m4_linear_relu {
+    use compiler::*;
+
+    #[test]
+    fn m4_linear_relu_builds() {
+        let src = std::fs::read_to_string("../tests/fixtures/m4_linear_relu.nfl")
+            .expect("fixture readable");
+        let ast = parse(&src).expect("must parse");
+        let uir = ir::build(&ast).expect("must build");
+
+        assert_eq!(uir.models.len(), 1);
+        let m = &uir.models[0];
+        assert_eq!(m.name, "M4Demo");
+
+        // 1 input + 2 ops (linear, relu) = 3 nodes.
+        assert_eq!(m.nodes.len(), 3);
+        assert_eq!(m.inputs, vec![0]);
+        assert_eq!(m.output, 2);
+
+        // Input shape: Tensor[8, 4] (batch=8, hidden=4).
+        assert_eq!(m.nodes[0].ty.shape.0, vec![8, 4]);
+        // Linear output: Tensor[8, 2].
+        assert_eq!(m.nodes[1].ty.shape.0, vec![8, 2]);
+        // Relu preserves shape.
+        assert_eq!(m.nodes[2].ty.shape.0, vec![8, 2]);
+
+        // Linear has no bias attr.
+        let NodeKind::Op { op, attrs, .. } = &m.nodes[1].kind else { panic!() };
+        assert_eq!(*op, StdOp::Linear);
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs[0].name, "out_dim");
+        assert_eq!(attrs[0].value, AttrValue::Integer(2));
+    }
+}
+
 mod negative {
-    use nflc::*;
+    use compiler::*;
 
     #[test]
     fn dropout_rate_out_of_range_rejected() {

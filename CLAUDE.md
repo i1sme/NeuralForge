@@ -31,40 +31,45 @@ NeuralForge/
 ├── CLAUDE.md               ← you are here
 ├── PROJECT_SPEC.md         ← full design specification
 │
-├── Cargo.toml              ← workspace manifest (members = ["compiler"], more added per milestone)
+├── Cargo.toml              ← workspace manifest (members = ["compiler", "nflc", "profiles/arm64"])
 │
-├── compiler/               ← `nflc` crate (Cargo workspace member)
+├── compiler/               ← `compiler` crate (lib only)
 │   ├── Cargo.toml
 │   ├── src/
-│   │   ├── lib.rs          ← public API: `nflc::parse(&str)` etc.
-│   │   ├── main.rs         ← `nflc` CLI binary
+│   │   ├── lib.rs          ← public API: `compiler::parse(&str)`, `compiler::ir::build(&NflSource)`
 │   │   ├── ast.rs          ← typed AST nodes (Span on every node)
 │   │   ├── lexer/          ← tokeniser + INDENT/DEDENT machine
-│   │   └── parser/         ← recursive-descent parser, one fn per EBNF production
+│   │   ├── parser/         ← recursive-descent parser, one fn per EBNF production
+│   │   └── ir/             ← UIR types, builder, stdlib
 │   └── tests/              ← integration tests (positive + negative fixtures)
 │
-│   (ir/ and passes/ modules will live under compiler/src/ in M3+)
+├── nflc/                   ← `nflc` crate (bin only) — CLI dispatcher
+│   ├── Cargo.toml
+│   └── src/main.rs         ← `nflc parse|compile ...`
 │
 ├── profiles/
-│   ├── generic/            ← scalar fallback, any POSIX target
-│   ├── x86_64/             ← Intel/AMD with AVX-512
-│   ├── arm64/              ← Apple M-series, mobile (NEON/SVE/AMX)
-│   └── riscv64/            ← RISC-V with RVV
+│   └── arm64/              ← `profiles-arm64` crate (lib only) — first concrete codegen profile
+│       ├── Cargo.toml
+│       ├── src/
+│       │   ├── lib.rs      ← `pub fn lower(&Uir) -> Result<Asm, LowerError>`
+│       │   ├── types.rs    ← Asm, FnSig, LowerError
+│       │   ├── asm.rs      ← low-level asm building blocks
+│       │   ├── codegen.rs  ← UIR walker + per-op emitters
+│       │   └── tests.rs    ← unit tests
+│       └── tests/
+│           ├── integration.rs    ← end-to-end FFI test (cc + libloading)
+│           └── common/mod.rs     ← cc + tempdir helpers
 │
 ├── language/
 │   ├── grammar.ebnf        ← formal NFL grammar
-│   └── stdlib/             ← built-in operations (linear, conv, attention…)
-│
-├── viewer/                 ← human-readable renderer for UIR and assembly
+│   └── stdlib/             ← (placeholder — operations live in compiler/src/ir/stdlib.rs for v0.1)
 │
 ├── tests/
-│   ├── unit/               ← per-module unit tests
-│   ├── integration/        ← end-to-end compile-and-run tests
 │   └── fixtures/           ← sample .nfl files used in tests
 │
 └── docs/
-    ├── language_reference/ ← NFL syntax reference
-    └── profile_guide/      ← how to write a new architecture profile
+    ├── language_reference/ ← NFL syntax reference (grammar.md, uir.md)
+    └── profile_guide/      ← per-profile docs (arm64.md)
 ```
 
 ---
@@ -137,21 +142,21 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-**Milestone 3 fully complete.** The UIR pipeline is production-shaped:
-`nflc::ir::build(&NflSource)` turns parsed AST into a typed Universal IR,
-`nflc parse <file> --uir` renders it via `Display` impls, and errors carry
-source-snippet pointers with `^` markers (rustc-style). All 5 M1 positive
-fixtures build to UIR; the M3b negative fixture correctly fails at the right
-stage. 106 tests passing across lexer, parser, IR, and integration. Both
-`cargo build` and `cargo clippy --all-targets -- -D warnings` are clean.
-`docs/language_reference/uir.md` documents UIR semantics for contributors.
+**Milestone 4a complete.** First architecture profile shipped: `profiles/arm64`
+lowers `input → linear[N] → relu` UIR to native AArch64 assembly callable as
+a C function. End-to-end pipeline `NFL → AST → UIR → asm → .dylib → FFI` works
+on Apple Silicon. New CLI subcommand `nflc compile <file> --profile arm64`.
+3-crate workspace (`compiler` lib, `nflc` bin, `profiles/arm64` lib) with no
+dependency cycles. Production code stays std-only; `libloading` is a test-only
+dev-dep. **118 tests passing** across lexer, parser, IR, profile codegen, and
+the FFI integration test (which numerically matched the pure-Rust reference
+within `1e-5` first try). Both `cargo build --workspace` and
+`cargo clippy --workspace --all-targets -- -D warnings` are clean.
+`docs/profile_guide/arm64.md` documents the profile for users and contributors.
 
-The immediate next step is **Milestone 4 — generic profile**: implement the
-first architecture profile that consumes the UIR and emits scalar assembly for
-any POSIX target. This is the first time NeuralForge produces real
-machine-executable output. The first M4 decision is the assembly flavour
-(AT&T `as`, NASM, or LLVM textual IR as a stepping stone) — to be resolved via
-a fresh `superpowers:brainstorming` cycle.
+The immediate next step is **Milestone 4b** — add `bias=true` to linear,
+implement `dropout` (inference no-op) and `softmax` (scalar `exp`). After
+M4b all 5 M3 positive fixtures lower end-to-end.
 
 ---
 
