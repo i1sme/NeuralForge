@@ -194,7 +194,8 @@ fn build_op_linear_produces_correct_node() {
         span: span(),
     };
     let mut out_nodes = nodes.clone();
-    let id = build_op(&op_ast, 0, &nodes, &mut out_nodes).unwrap();
+    let input_shape = nodes[0].ty.shape.clone();
+    let id = build_op(&op_ast, 0, &input_shape, &mut out_nodes).unwrap();
     assert_eq!(id, 1);
     assert_eq!(out_nodes.len(), 2);
     let NodeKind::Op { op, operands, attrs } = &out_nodes[1].kind else {
@@ -215,7 +216,8 @@ fn build_op_softmax_preserves_input_shape() {
         span: span(),
     };
     let mut out_nodes = nodes.clone();
-    let id = build_op(&op_ast, 0, &nodes, &mut out_nodes).unwrap();
+    let input_shape = nodes[0].ty.shape.clone();
+    let id = build_op(&op_ast, 0, &input_shape, &mut out_nodes).unwrap();
     assert_eq!(out_nodes[id].ty.shape.0, vec![8, 2]);
 }
 
@@ -224,7 +226,8 @@ fn build_op_unknown_op_errors() {
     let nodes = vec![input_node(vec![8, 4])];
     let op_ast = Operation { name: "mystery".into(), args: vec![], span: span() };
     let mut out_nodes = nodes.clone();
-    let err = build_op(&op_ast, 0, &nodes, &mut out_nodes).unwrap_err();
+    let input_shape = nodes[0].ty.shape.clone();
+    let err = build_op(&op_ast, 0, &input_shape, &mut out_nodes).unwrap_err();
     assert!(matches!(err.kind, BuildErrorKind::UnknownOp { .. }));
 }
 

@@ -141,14 +141,13 @@ use crate::ast::Operation;
 pub(crate) fn build_op(
     op_ast: &Operation,
     input_id: NodeId,
-    existing_nodes: &[Node],
+    input_shape: &Shape,
     out_nodes: &mut Vec<Node>,
 ) -> Result<NodeId, BuildError> {
     let std_op = stdlib::resolve(&op_ast.name)
         .ok_or_else(|| BuildError::unknown_op(&op_ast.name, op_ast.span))?;
     let attrs = resolve_args(std_op, &op_ast.args, op_ast.span)?;
-    let input_shape = existing_nodes[input_id].ty.shape.clone();
-    let out_shape = stdlib::infer_output_shape(std_op, &[input_shape], &attrs)
+    let out_shape = stdlib::infer_output_shape(std_op, &[input_shape.clone()], &attrs)
         .map_err(|e| BuildError::shape(format!("{e}"), op_ast.span))?;
     let id = out_nodes.len();
     out_nodes.push(Node {
@@ -209,11 +208,8 @@ pub(crate) fn build_model(ast_model: &ModelDef) -> Result<UirModel, BuildError> 
                     .get(&p.source)
                     .ok_or_else(|| BuildError::unknown_variable(&p.source, p.span))?;
                 for op_ast in &p.steps {
-                    // Borrow-checker workaround: read_view is a clone of the current
-                    // nodes slice for shape lookup, separately from the &mut nodes
-                    // we push into. Cheap for tiny_mlp's ≤3 nodes; refactor in M3b.
-                    let read_view: Vec<Node> = nodes.clone();
-                    current = build_op(op_ast, current, &read_view, &mut nodes)?;
+                    let input_shape = nodes[current].ty.shape.clone();
+                    current = build_op(op_ast, current, &input_shape, &mut nodes)?;
                 }
                 last_pipeline_output = Some(current);
             }
