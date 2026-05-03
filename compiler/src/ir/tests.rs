@@ -264,3 +264,45 @@ fn build_model_with_no_pipeline_errors() {
     let err = super::build(&ast).unwrap_err();
     assert!(matches!(err.kind, BuildErrorKind::ModelHasNoPipeline { .. }));
 }
+
+use super::stdlib::{validate_attrs, AttrError};
+
+#[test]
+fn validate_attrs_dropout_in_range_succeeds() {
+    let attrs = vec![OpAttr { name: "rate".into(), value: AttrValue::Float(0.0) }];
+    assert!(validate_attrs(StdOp::Dropout, &attrs).is_ok());
+    let attrs = vec![OpAttr { name: "rate".into(), value: AttrValue::Float(0.5) }];
+    assert!(validate_attrs(StdOp::Dropout, &attrs).is_ok());
+    let attrs = vec![OpAttr { name: "rate".into(), value: AttrValue::Float(1.0) }];
+    assert!(validate_attrs(StdOp::Dropout, &attrs).is_ok());
+}
+
+#[test]
+fn validate_attrs_dropout_out_of_range_errors() {
+    let attrs = vec![OpAttr { name: "rate".into(), value: AttrValue::Float(1.5) }];
+    let err = validate_attrs(StdOp::Dropout, &attrs).unwrap_err();
+    assert!(matches!(err, AttrError::OutOfRange { name: "rate", .. }));
+    let attrs = vec![OpAttr { name: "rate".into(), value: AttrValue::Float(-0.1) }];
+    let err = validate_attrs(StdOp::Dropout, &attrs).unwrap_err();
+    assert!(matches!(err, AttrError::OutOfRange { name: "rate", .. }));
+}
+
+#[test]
+fn validate_attrs_dropout_missing_rate_errors() {
+    let err = validate_attrs(StdOp::Dropout, &[]).unwrap_err();
+    assert!(matches!(err, AttrError::MissingAttr { name: "rate" }));
+}
+
+#[test]
+fn validate_attrs_other_ops_no_op() {
+    assert!(validate_attrs(StdOp::Linear, &[]).is_ok());
+    assert!(validate_attrs(StdOp::Relu, &[]).is_ok());
+    assert!(validate_attrs(StdOp::Softmax, &[]).is_ok());
+}
+
+#[test]
+fn attr_error_displays_human_message() {
+    let err = AttrError::OutOfRange { name: "rate", value: 1.5, min: 0.0, max: 1.0 };
+    let msg = format!("{err}");
+    assert!(msg.contains("rate") && msg.contains("1.5"), "got: {msg}");
+}
