@@ -172,3 +172,58 @@ fn resolve_args_named_only_dropout() {
     assert_eq!(attrs[0].name, "rate");
     assert_eq!(attrs[0].value, AttrValue::Float(0.2));
 }
+
+use super::build::build_op;
+use super::types::{Node, NodeKind, Type};
+use crate::ast::Operation;
+
+fn input_node(shape: Vec<u64>) -> Node {
+    Node {
+        kind: NodeKind::Input { name: "x".into() },
+        ty: Type { name: "Tensor".into(), shape: Shape(shape) },
+        source_span: span(),
+    }
+}
+
+#[test]
+fn build_op_linear_produces_correct_node() {
+    let nodes = vec![input_node(vec![8, 4])];
+    let op_ast = Operation {
+        name: "linear".into(),
+        args: vec![OpArg::Positional(ArgValue::Integer(2))],
+        span: span(),
+    };
+    let mut out_nodes = nodes.clone();
+    let id = build_op(&op_ast, 0, &nodes, &mut out_nodes).unwrap();
+    assert_eq!(id, 1);
+    assert_eq!(out_nodes.len(), 2);
+    let NodeKind::Op { op, operands, attrs } = &out_nodes[1].kind else {
+        panic!("expected Op node");
+    };
+    assert_eq!(*op, StdOp::Linear);
+    assert_eq!(operands, &[0]);
+    assert_eq!(attrs[0].value, AttrValue::Integer(2));
+    assert_eq!(out_nodes[1].ty.shape.0, vec![8, 2]);
+}
+
+#[test]
+fn build_op_softmax_preserves_input_shape() {
+    let nodes = vec![input_node(vec![8, 2])];
+    let op_ast = Operation {
+        name: "softmax".into(),
+        args: vec![],
+        span: span(),
+    };
+    let mut out_nodes = nodes.clone();
+    let id = build_op(&op_ast, 0, &nodes, &mut out_nodes).unwrap();
+    assert_eq!(out_nodes[id].ty.shape.0, vec![8, 2]);
+}
+
+#[test]
+fn build_op_unknown_op_errors() {
+    let nodes = vec![input_node(vec![8, 4])];
+    let op_ast = Operation { name: "mystery".into(), args: vec![], span: span() };
+    let mut out_nodes = nodes.clone();
+    let err = build_op(&op_ast, 0, &nodes, &mut out_nodes).unwrap_err();
+    assert!(matches!(err.kind, BuildErrorKind::UnknownOp { .. }));
+}

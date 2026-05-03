@@ -134,3 +134,34 @@ fn describe_slot_type(ty: ArgType) -> &'static str {
         ArgType::Symbol => "identifier",
     }
 }
+
+use super::types::{Node, NodeId, NodeKind, Type};
+use crate::ast::Operation;
+
+pub(crate) fn build_op(
+    op_ast: &Operation,
+    input_id: NodeId,
+    existing_nodes: &[Node],
+    out_nodes: &mut Vec<Node>,
+) -> Result<NodeId, BuildError> {
+    let std_op = stdlib::resolve(&op_ast.name)
+        .ok_or_else(|| BuildError::unknown_op(&op_ast.name, op_ast.span))?;
+    let attrs = resolve_args(std_op, &op_ast.args, op_ast.span)?;
+    let input_shape = existing_nodes[input_id].ty.shape.clone();
+    let out_shape = stdlib::infer_output_shape(std_op, &[input_shape], &attrs)
+        .map_err(|e| BuildError::shape(format!("{e}"), op_ast.span))?;
+    let id = out_nodes.len();
+    out_nodes.push(Node {
+        kind: NodeKind::Op {
+            op: std_op,
+            operands: vec![input_id],
+            attrs,
+        },
+        ty: Type {
+            name: "Tensor".to_string(),
+            shape: out_shape,
+        },
+        source_span: op_ast.span,
+    });
+    Ok(id)
+}
