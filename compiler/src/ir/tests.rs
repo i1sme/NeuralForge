@@ -360,3 +360,24 @@ fn build_op_dropout_in_range_succeeds() {
     let id = build_op(&op_ast, 0, &input_shape, &HashMap::new(), &mut out_nodes).unwrap();
     assert_eq!(out_nodes[id].ty.shape.0, vec![8, 4]);
 }
+
+#[test]
+fn shape_displays_as_tensor_with_dims() {
+    let s = Shape(vec![32, 784]);
+    assert_eq!(format!("{}", s), "Tensor[32, 784]");
+}
+
+#[test]
+fn attrvalue_displays_each_variant() {
+    assert_eq!(format!("{}", AttrValue::Integer(42)), "42");
+    assert_eq!(format!("{}", AttrValue::Float(0.5)), "0.5");
+    assert_eq!(format!("{}", AttrValue::Symbol("true".into())), "true");
+}
+
+#[test]
+fn opattr_displays_name_equals_value() {
+    let a = OpAttr { name: "out_dim".into(), value: AttrValue::Integer(512) };
+    assert_eq!(format!("{}", a), "out_dim=512");
+    let b = OpAttr { name: "rate".into(), value: AttrValue::Float(0.2) };
+    assert_eq!(format!("{}", b), "rate=0.2");
+}
