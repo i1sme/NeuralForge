@@ -70,15 +70,15 @@ fn infer_linear_with_wrong_rank_input() {
 #[test]
 fn infer_relu_preserves_shape() {
     let input = Shape(vec![8, 2]);
-    let out = infer_output_shape(StdOp::Relu, &[input.clone()], &[]).unwrap();
+    let out = infer_output_shape(StdOp::Relu, std::slice::from_ref(&input), &[]).unwrap();
     assert_eq!(out, input);
 }
 
 #[test]
 fn infer_softmax_and_dropout_preserve_shape() {
     let input = Shape(vec![3, 7, 2]);
-    assert_eq!(infer_output_shape(StdOp::Softmax, &[input.clone()], &[]).unwrap(), input);
-    assert_eq!(infer_output_shape(StdOp::Dropout, &[input.clone()], &[]).unwrap(), input);
+    assert_eq!(infer_output_shape(StdOp::Softmax, std::slice::from_ref(&input), &[]).unwrap(), input);
+    assert_eq!(infer_output_shape(StdOp::Dropout, std::slice::from_ref(&input), &[]).unwrap(), input);
 }
 
 use super::build::resolve_type;
@@ -359,4 +359,33 @@ fn build_op_dropout_in_range_succeeds() {
     let input_shape = nodes[0].ty.shape.clone();
     let id = build_op(&op_ast, 0, &input_shape, &HashMap::new(), &mut out_nodes).unwrap();
     assert_eq!(out_nodes[id].ty.shape.0, vec![8, 4]);
+}
+
+#[test]
+fn shape_displays_as_tensor_with_dims() {
+    let s = Shape(vec![32, 784]);
+    assert_eq!(format!("{}", s), "Tensor[32, 784]");
+}
+
+#[test]
+fn attrvalue_displays_each_variant() {
+    assert_eq!(format!("{}", AttrValue::Integer(42)), "42");
+    assert_eq!(format!("{}", AttrValue::Float(0.5)), "0.5");
+    assert_eq!(format!("{}", AttrValue::Symbol("true".into())), "true");
+}
+
+#[test]
+fn opattr_displays_name_equals_value() {
+    let a = OpAttr { name: "out_dim".into(), value: AttrValue::Integer(512) };
+    assert_eq!(format!("{}", a), "out_dim=512");
+    let b = OpAttr { name: "rate".into(), value: AttrValue::Float(0.2) };
+    assert_eq!(format!("{}", b), "rate=0.2");
+}
+
+#[test]
+fn stdop_displays_lowercase_name() {
+    assert_eq!(format!("{}", StdOp::Linear), "linear");
+    assert_eq!(format!("{}", StdOp::Relu), "relu");
+    assert_eq!(format!("{}", StdOp::Dropout), "dropout");
+    assert_eq!(format!("{}", StdOp::Softmax), "softmax");
 }

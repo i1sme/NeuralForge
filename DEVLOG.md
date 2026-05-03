@@ -14,6 +14,87 @@ Format for each entry:
 
 ---
 
+## 2026-05-03 — Milestone 3c closed: UIR polish — Display impls + source-snippets + reference doc + clippy clean
+
+### What was done
+- Added `Display` impls for all UIR types (`Uir`, `UirModel`, `Node`, `Shape`,
+  `OpAttr`, `AttrValue`) and for `StdOp`. Output content matches M3b's `print_uir`
+  exactly apart from lowercase op names.
+- Removed `print_uir`, `print_uir_node`, `format_uir_shape`, `format_uir_attr`
+  free functions from `compiler/src/main.rs` (~50 lines deleted; replaced by one
+  `print!("{}", uir)` line).
+- Added `render_error_with_snippet` helper in `main.rs` (~20 lines, hand-rolled
+  std-only). Routes all CLI error paths through it (parse, build, --tokens).
+  Output mirrors rustc/cargo conventions (`error:` line, `--> file:line:col`
+  pointer, `^` underline).
+- Replaced `format!("{:?}", std_op)` with `format!("{}", std_op)` in
+  `BuildError::invalid_attr_value`. Error messages now use lowercase op names
+  (`dropout.rate` not `Dropout.rate`), matching the NFL source token names.
+- Created `docs/language_reference/uir.md` (198 lines): UIR semantics, data
+  shape, node kinds, stdlib ops, implicit semantics (incl. multi-pipeline
+  convention from M3b open-Q4), CLI inspection format, v0.1 omissions list.
+- Cleared all `cargo clippy` warnings: 4× `cloned_ref_to_slice_refs` →
+  `std::slice::from_ref` (3 in tests.rs, 1 in build.rs — the build.rs site
+  was discovered during the audit and not in the original plan), 1×
+  `match_like_matches_macro` → `matches!`. M3a tech-debt #6 closed.
+- Audited all enum variants for dead code by briefly enabling
+  `#![deny(dead_code)]` at the crate root. Findings logged below.
+
+### Decisions made
+None new. All design decisions captured in
+`docs/superpowers/specs/2026-05-02-m3c-uir-polish-design.md` during brainstorming.
+This session executed the plan in
+`docs/superpowers/plans/2026-05-02-m3c-uir-polish.md` (7 tasks, 7 commits).
+
+### Project principle formalised in M3c spec §2
+
+> **Add code only when there's a real consumer.** Do not retain "for-future-use"
+> variants/functions/types via `#[allow(dead_code)]`. Remove unused items when
+> discovered; re-introduce with the first real use (with tests).
+
+**Nuance:** "no real consumer" means *no caller at all*, not "unreached in current
+tests". Defensively reachable code (constructed by guard helpers that protect
+against future caller bugs) IS used and should be kept — documented with a
+comment explaining the defensive role.
+
+### Audit results
+- `ShapeError::WrongInputCount` — KEPT. The audit (with `#![deny(dead_code)]`)
+  did NOT flag it: `single_input()` constructs the variant, so it is genuinely
+  reachable, not dead. The spec's prescription to add `#[allow(dead_code)]` was
+  empirically unnecessary — would have been a no-op. Added a doc comment to the
+  variant explaining its defensive role (catches the class of caller bug where a
+  multi-input op slips into single-input shape inference; will be exercised for
+  real in M5 when `add`/`concat` arrive).
+- No other dead-code findings across the entire crate.
+
+### Problems encountered
+- The plan expected 4 clippy warnings; running clippy surfaced 5 (the extra one
+  was a `cloned_ref_to_slice_refs` in `build.rs:191` at the `infer_output_shape`
+  call site — not in tests.rs as the plan assumed). Fixed alongside the other 4.
+- No other surprises. Implementation followed the plan closely.
+
+### Known tech debt (carried forward to v0.2 / M4+)
+1. M3a tech-debt items #1–#4 still apply (TypeExpr.name, Span start-only, no CI,
+   crate version policy). v0.2.
+2. AttrError + ShapeError still two enums. Unification is a v0.2 consideration.
+3. Multi-error reporting — first-error-halt continues. v0.2.
+4. No CI yet. Add as a small follow-up before M4 ships.
+5. The `single_input` defensive guard's `WrongInputCount` path becomes
+   exercised-for-real in M5 with multi-input ops.
+
+### Next step
+**Milestone 3 fully complete.** The UIR pipeline (lex → parse → build → CLI render)
+is production-shaped and well-documented.
+
+The immediate next milestone is **Milestone 4 — generic profile (scalar assembly
+codegen)**: implement the first architecture profile that consumes the UIR and
+emits scalar assembly for any POSIX target. This is the first time the project
+produces actual machine-executable output. The first M4 decision is the assembly
+flavour (AT&T x86-64 syntax for `as`, NASM, or LLVM textual IR as a stepping
+stone) — to be resolved via a fresh `superpowers:brainstorming` cycle for M4.
+
+---
+
 ## 2026-05-02 — Milestone 3b closed: UIR extended to all 5 fixtures + dropout validation + --uir CLI
 
 ### What was done

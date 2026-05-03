@@ -113,12 +113,12 @@ pub(crate) fn resolve_args(
 fn check_arg_type(slot: &ArgSlot, value: &ArgValue, op_span: Span) -> Result<(), BuildError> {
     let actual = describe_arg_type(value);
     let expected = describe_slot_type(slot.ty);
-    let ok = match (slot.ty, value) {
-        (ArgType::Integer, ArgValue::Integer(_)) => true,
-        (ArgType::Float, ArgValue::Float(_)) => true,
-        (ArgType::Symbol, ArgValue::Symbol(_)) => true,
-        _ => false,
-    };
+    let ok = matches!(
+        (slot.ty, value),
+        (ArgType::Integer, ArgValue::Integer(_))
+            | (ArgType::Float, ArgValue::Float(_))
+            | (ArgType::Symbol, ArgValue::Symbol(_))
+    );
     if ok {
         Ok(())
     } else {
@@ -182,13 +182,13 @@ pub(crate) fn build_op(
             stdlib::AttrError::MissingAttr { name } => *name,
         };
         BuildError::invalid_attr_value(
-            &format!("{:?}", std_op),
+            &format!("{}", std_op),
             attr_name,
             &format!("{e}"),
             op_ast.span,
         )
     })?;
-    let out_shape = stdlib::infer_output_shape(std_op, &[input_shape.clone()], &attrs)
+    let out_shape = stdlib::infer_output_shape(std_op, std::slice::from_ref(input_shape), &attrs)
         .map_err(|e| BuildError::shape(format!("{e}"), op_ast.span))?;
     let id = out_nodes.len();
     out_nodes.push(Node {

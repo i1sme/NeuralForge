@@ -137,16 +137,21 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-Milestone 3b complete: UIR extended to all 5 M1 fixtures end-to-end. The full UIR
-pipeline (lex + parse + build + optional CLI render) is now production-shaped:
-`nflc::ir::build` covers symbolic dims (in both type-level and arg-level positions),
-named args (Float and Symbol), multi-pipeline, multi-model files, comments, and
-per-op value validation (dropout rate ∈ [0, 1]). `nflc parse <file> --uir` prints a
-compact textual UIR. 102 tests passing.
+**Milestone 3 fully complete.** The UIR pipeline is production-shaped:
+`nflc::ir::build(&NflSource)` turns parsed AST into a typed Universal IR,
+`nflc parse <file> --uir` renders it via `Display` impls, and errors carry
+source-snippet pointers with `^` markers (rustc-style). All 5 M1 positive
+fixtures build to UIR; the M3b negative fixture correctly fails at the right
+stage. 106 tests passing across lexer, parser, IR, and integration. Both
+`cargo build` and `cargo clippy --all-targets -- -D warnings` are clean.
+`docs/language_reference/uir.md` documents UIR semantics for contributors.
 
-The immediate next step is **Milestone 3c — UIR polish**: viewer-friendly Display
-impls, Ariadne-style errors, language-reference doc for the UIR. After M3c the full
-Milestone 3 closes and Milestone 4 (generic profile codegen) begins.
+The immediate next step is **Milestone 4 — generic profile**: implement the
+first architecture profile that consumes the UIR and emits scalar assembly for
+any POSIX target. This is the first time NeuralForge produces real
+machine-executable output. The first M4 decision is the assembly flavour
+(AT&T `as`, NASM, or LLVM textual IR as a stepping stone) — to be resolved via
+a fresh `superpowers:brainstorming` cycle.
 
 ---
 
