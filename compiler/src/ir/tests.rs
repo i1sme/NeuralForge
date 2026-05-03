@@ -131,7 +131,7 @@ use crate::ast::{ArgValue, OpArg};
 #[test]
 fn resolve_args_one_positional_integer() {
     let args = vec![OpArg::Positional(ArgValue::Integer(512))];
-    let attrs = resolve_args(StdOp::Linear, &args, span()).unwrap();
+    let attrs = resolve_args(StdOp::Linear, &args, &HashMap::new(), span()).unwrap();
     assert_eq!(attrs.len(), 1);
     assert_eq!(attrs[0].name, "out_dim");
     assert_eq!(attrs[0].value, AttrValue::Integer(512));
@@ -140,7 +140,7 @@ fn resolve_args_one_positional_integer() {
 #[test]
 fn resolve_args_missing_required_positional() {
     let args: Vec<OpArg> = vec![]; // linear needs out_dim
-    let err = resolve_args(StdOp::Linear, &args, span()).unwrap_err();
+    let err = resolve_args(StdOp::Linear, &args, &HashMap::new(), span()).unwrap_err();
     assert!(matches!(
         err.kind,
         BuildErrorKind::ArgCountMismatch { .. } | BuildErrorKind::MissingRequiredArg { .. }
@@ -153,24 +153,50 @@ fn resolve_args_extra_positional() {
         OpArg::Positional(ArgValue::Integer(2)),
         OpArg::Positional(ArgValue::Integer(3)),
     ];
-    let err = resolve_args(StdOp::Linear, &args, span()).unwrap_err();
+    let err = resolve_args(StdOp::Linear, &args, &HashMap::new(), span()).unwrap_err();
     assert!(matches!(err.kind, BuildErrorKind::ArgCountMismatch { .. }));
 }
 
 #[test]
 fn resolve_args_type_mismatch() {
     let args = vec![OpArg::Positional(ArgValue::Float(2.5))]; // out_dim wants Integer
-    let err = resolve_args(StdOp::Linear, &args, span()).unwrap_err();
+    let err = resolve_args(StdOp::Linear, &args, &HashMap::new(), span()).unwrap_err();
     assert!(matches!(err.kind, BuildErrorKind::ArgTypeMismatch { .. }));
 }
 
 #[test]
 fn resolve_args_named_only_dropout() {
     let args = vec![OpArg::Named { name: "rate".into(), value: ArgValue::Float(0.2) }];
-    let attrs = resolve_args(StdOp::Dropout, &args, span()).unwrap();
+    let attrs = resolve_args(StdOp::Dropout, &args, &HashMap::new(), span()).unwrap();
     assert_eq!(attrs.len(), 1);
     assert_eq!(attrs[0].name, "rate");
     assert_eq!(attrs[0].value, AttrValue::Float(0.2));
+}
+
+#[test]
+fn resolve_args_symbol_resolves_against_params() {
+    // linear[output] where `output` is a model_param (e.g., output=10).
+    // Should resolve Symbol("output") → Integer(10) and pass type-check.
+    let args = vec![OpArg::Positional(ArgValue::Symbol("output".into()))];
+    let mut params: HashMap<&str, u64> = HashMap::new();
+    params.insert("output", 10);
+    let attrs = resolve_args(StdOp::Linear, &args, &params, span()).unwrap();
+    assert_eq!(attrs.len(), 1);
+    assert_eq!(attrs[0].name, "out_dim");
+    assert_eq!(attrs[0].value, AttrValue::Integer(10));
+}
+
+#[test]
+fn resolve_args_symbol_not_in_params_stays_symbol() {
+    // bias=true where `true` is NOT a param: stays as Symbol, passes Symbol slot.
+    let args = vec![
+        OpArg::Positional(ArgValue::Integer(16)),
+        OpArg::Named { name: "bias".into(), value: ArgValue::Symbol("true".into()) },
+    ];
+    let attrs = resolve_args(StdOp::Linear, &args, &HashMap::new(), span()).unwrap();
+    assert_eq!(attrs.len(), 2);
+    assert_eq!(attrs[1].name, "bias");
+    assert_eq!(attrs[1].value, AttrValue::Symbol("true".into()));
 }
 
 use super::build::build_op;
@@ -195,7 +221,7 @@ fn build_op_linear_produces_correct_node() {
     };
     let mut out_nodes = nodes.clone();
     let input_shape = nodes[0].ty.shape.clone();
-    let id = build_op(&op_ast, 0, &input_shape, &mut out_nodes).unwrap();
+    let id = build_op(&op_ast, 0, &input_shape, &HashMap::new(), &mut out_nodes).unwrap();
     assert_eq!(id, 1);
     assert_eq!(out_nodes.len(), 2);
     let NodeKind::Op { op, operands, attrs } = &out_nodes[1].kind else {
@@ -217,7 +243,7 @@ fn build_op_softmax_preserves_input_shape() {
     };
     let mut out_nodes = nodes.clone();
     let input_shape = nodes[0].ty.shape.clone();
-    let id = build_op(&op_ast, 0, &input_shape, &mut out_nodes).unwrap();
+    let id = build_op(&op_ast, 0, &input_shape, &HashMap::new(), &mut out_nodes).unwrap();
     assert_eq!(out_nodes[id].ty.shape.0, vec![8, 2]);
 }
 
@@ -227,7 +253,7 @@ fn build_op_unknown_op_errors() {
     let op_ast = Operation { name: "mystery".into(), args: vec![], span: span() };
     let mut out_nodes = nodes.clone();
     let input_shape = nodes[0].ty.shape.clone();
-    let err = build_op(&op_ast, 0, &input_shape, &mut out_nodes).unwrap_err();
+    let err = build_op(&op_ast, 0, &input_shape, &HashMap::new(), &mut out_nodes).unwrap_err();
     assert!(matches!(err.kind, BuildErrorKind::UnknownOp { .. }));
 }
 
@@ -317,7 +343,7 @@ fn build_op_dropout_out_of_range_errors() {
     };
     let mut out_nodes = nodes.clone();
     let input_shape = nodes[0].ty.shape.clone();
-    let err = build_op(&op_ast, 0, &input_shape, &mut out_nodes).unwrap_err();
+    let err = build_op(&op_ast, 0, &input_shape, &HashMap::new(), &mut out_nodes).unwrap_err();
     assert!(matches!(err.kind, BuildErrorKind::InvalidAttrValue { .. }));
 }
 
@@ -331,6 +357,6 @@ fn build_op_dropout_in_range_succeeds() {
     };
     let mut out_nodes = nodes.clone();
     let input_shape = nodes[0].ty.shape.clone();
-    let id = build_op(&op_ast, 0, &input_shape, &mut out_nodes).unwrap();
+    let id = build_op(&op_ast, 0, &input_shape, &HashMap::new(), &mut out_nodes).unwrap();
     assert_eq!(out_nodes[id].ty.shape.0, vec![8, 4]);
 }
