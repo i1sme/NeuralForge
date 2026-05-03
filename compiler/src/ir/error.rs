@@ -19,6 +19,7 @@ pub enum BuildErrorKind {
     UnexpectedNamedArg { name: String },
     ShapeMismatch { detail: String },
     ModelHasNoPipeline { name: String },
+    InvalidAttrValue { op: String, attr: String, reason: String },
 }
 
 impl std::fmt::Display for BuildError {
@@ -112,6 +113,19 @@ impl BuildError {
             line: span.line,
             col: span.col,
             kind: BuildErrorKind::ModelHasNoPipeline { name: name.to_string() },
+        }
+    }
+
+    pub fn invalid_attr_value(op: &str, attr: &str, reason: &str, span: crate::ast::Span) -> Self {
+        Self {
+            message: format!("invalid value for {}.{}: {}", op, attr, reason),
+            line: span.line,
+            col: span.col,
+            kind: BuildErrorKind::InvalidAttrValue {
+                op: op.to_string(),
+                attr: attr.to_string(),
+                reason: reason.to_string(),
+            },
         }
     }
 }

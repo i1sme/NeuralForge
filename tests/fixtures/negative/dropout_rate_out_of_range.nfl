@@ -1,0 +1,6 @@
+# NEGATIVE: dropout rate 1.5 is outside the valid [0, 1] range.
+# Expected: BuildError InvalidAttrValue at line 6.
+
+model X [batch=8]:
+    x: Tensor[batch, 4]
+    x -> linear[2] -> dropout[rate=1.5] -> softmax

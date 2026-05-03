@@ -35,14 +35,29 @@ use super::types::{AttrValue, OpAttr};
 pub(crate) fn resolve_args(
     op: StdOp,
     args: &[OpArg],
+    params: &HashMap<&str, u64>,
     op_span: Span,
 ) -> Result<Vec<OpAttr>, BuildError> {
     let sig = stdlib::signature(op);
 
+    // Pre-resolve Symbol args against model params: if a positional or named arg
+    // is `Symbol(name)` and `name` is a model_param, substitute with `Integer(value)`.
+    // Non-matching symbols (e.g. `bias=true`) stay as Symbol — type-check decides.
+    let resolved: Vec<OpArg> = args
+        .iter()
+        .map(|arg| match arg {
+            OpArg::Positional(v) => OpArg::Positional(resolve_arg_value(v, params)),
+            OpArg::Named { name, value } => OpArg::Named {
+                name: name.clone(),
+                value: resolve_arg_value(value, params),
+            },
+        })
+        .collect();
+
     // Split AST args into positional and named (in source order).
     let mut positionals: Vec<&ArgValue> = Vec::new();
     let mut nameds: Vec<(&str, &ArgValue)> = Vec::new();
-    for arg in args {
+    for arg in &resolved {
         match arg {
             OpArg::Positional(v) => positionals.push(v),
             OpArg::Named { name, value } => nameds.push((name.as_str(), value)),
@@ -119,6 +134,19 @@ fn arg_value_to_attr(v: &ArgValue) -> AttrValue {
     }
 }
 
+/// Pre-resolve a Symbol arg against model_params. If the symbol matches a
+/// param name, return `Integer(value)`; otherwise return a clone (Symbol stays
+/// Symbol — could be a keyword like `true`).
+fn resolve_arg_value(v: &ArgValue, params: &HashMap<&str, u64>) -> ArgValue {
+    match v {
+        ArgValue::Symbol(name) => match params.get(name.as_str()) {
+            Some(&value) => ArgValue::Integer(value),
+            None => ArgValue::Symbol(name.clone()),
+        },
+        other => other.clone(),
+    }
+}
+
 fn describe_arg_type(v: &ArgValue) -> &'static str {
     match v {
         ArgValue::Integer(_) => "integer",
@@ -141,14 +169,26 @@ use crate::ast::Operation;
 pub(crate) fn build_op(
     op_ast: &Operation,
     input_id: NodeId,
-    existing_nodes: &[Node],
+    input_shape: &Shape,
+    params: &HashMap<&str, u64>,
     out_nodes: &mut Vec<Node>,
 ) -> Result<NodeId, BuildError> {
     let std_op = stdlib::resolve(&op_ast.name)
         .ok_or_else(|| BuildError::unknown_op(&op_ast.name, op_ast.span))?;
-    let attrs = resolve_args(std_op, &op_ast.args, op_ast.span)?;
-    let input_shape = existing_nodes[input_id].ty.shape.clone();
-    let out_shape = stdlib::infer_output_shape(std_op, &[input_shape], &attrs)
+    let attrs = resolve_args(std_op, &op_ast.args, params, op_ast.span)?;
+    stdlib::validate_attrs(std_op, &attrs).map_err(|e| {
+        let attr_name = match &e {
+            stdlib::AttrError::OutOfRange { name, .. } => *name,
+            stdlib::AttrError::MissingAttr { name } => *name,
+        };
+        BuildError::invalid_attr_value(
+            &format!("{:?}", std_op),
+            attr_name,
+            &format!("{e}"),
+            op_ast.span,
+        )
+    })?;
+    let out_shape = stdlib::infer_output_shape(std_op, &[input_shape.clone()], &attrs)
         .map_err(|e| BuildError::shape(format!("{e}"), op_ast.span))?;
     let id = out_nodes.len();
     out_nodes.push(Node {
@@ -209,11 +249,8 @@ pub(crate) fn build_model(ast_model: &ModelDef) -> Result<UirModel, BuildError> 
                     .get(&p.source)
                     .ok_or_else(|| BuildError::unknown_variable(&p.source, p.span))?;
                 for op_ast in &p.steps {
-                    // Borrow-checker workaround: read_view is a clone of the current
-                    // nodes slice for shape lookup, separately from the &mut nodes
-                    // we push into. Cheap for tiny_mlp's ≤3 nodes; refactor in M3b.
-                    let read_view: Vec<Node> = nodes.clone();
-                    current = build_op(op_ast, current, &read_view, &mut nodes)?;
+                    let input_shape = nodes[current].ty.shape.clone();
+                    current = build_op(op_ast, current, &input_shape, &params, &mut nodes)?;
                 }
                 last_pipeline_output = Some(current);
             }

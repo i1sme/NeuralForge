@@ -137,14 +137,16 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-Milestone 3a complete: UIR vertical-slice 1 shipped — `nflc::ir::build(&NflSource)`
-turns a parsed AST for `tests/fixtures/tiny_mlp.nfl` into a typed Universal IR (DAG
-of nodes with concrete shapes). All 4 stdlib operations (Linear, Relu, Dropout,
-Softmax) are defined with signatures and shape inference; tiny_mlp exercises Linear
-and Softmax end-to-end. 88 tests passing (72 unit + 16 integration).
+Milestone 3b complete: UIR extended to all 5 M1 fixtures end-to-end. The full UIR
+pipeline (lex + parse + build + optional CLI render) is now production-shaped:
+`nflc::ir::build` covers symbolic dims (in both type-level and arg-level positions),
+named args (Float and Symbol), multi-pipeline, multi-model files, comments, and
+per-op value validation (dropout rate ∈ [0, 1]). `nflc parse <file> --uir` prints a
+compact textual UIR. 102 tests passing.
 
-The immediate next step is **Milestone 3b — extend UIR to all 5 fixtures**: add
-multi-pipeline / multi-model / named-arg coverage, plus the `--uir` CLI flag.
+The immediate next step is **Milestone 3c — UIR polish**: viewer-friendly Display
+impls, Ariadne-style errors, language-reference doc for the UIR. After M3c the full
+Milestone 3 closes and Milestone 4 (generic profile codegen) begins.
 
 ---
 

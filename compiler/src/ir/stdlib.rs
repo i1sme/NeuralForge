@@ -121,3 +121,49 @@ fn get_int_attr(attrs: &[OpAttr], name: &'static str) -> Result<u64, ShapeError>
         })
         .ok_or(ShapeError::MissingAttr { name })
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AttrError {
+    OutOfRange { name: &'static str, value: f64, min: f64, max: f64 },
+    MissingAttr { name: &'static str },
+}
+
+impl std::fmt::Display for AttrError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AttrError::OutOfRange { name, value, min, max } =>
+                write!(f, "attribute '{}' value {} is outside [{}, {}]", name, value, min, max),
+            AttrError::MissingAttr { name } =>
+                write!(f, "missing required attribute: '{}'", name),
+        }
+    }
+}
+
+pub fn validate_attrs(op: StdOp, attrs: &[OpAttr]) -> Result<(), AttrError> {
+    match op {
+        StdOp::Dropout => {
+            let rate = get_float_attr(attrs, "rate")?;
+            if !(0.0..=1.0).contains(&rate) {
+                return Err(AttrError::OutOfRange {
+                    name: "rate",
+                    value: rate,
+                    min: 0.0,
+                    max: 1.0,
+                });
+            }
+            Ok(())
+        }
+        StdOp::Linear | StdOp::Relu | StdOp::Softmax => Ok(()),
+    }
+}
+
+fn get_float_attr(attrs: &[OpAttr], name: &'static str) -> Result<f64, AttrError> {
+    attrs
+        .iter()
+        .find(|a| a.name == name)
+        .and_then(|a| match a.value {
+            AttrValue::Float(f) => Some(f),
+            _ => None,
+        })
+        .ok_or(AttrError::MissingAttr { name })
+}
