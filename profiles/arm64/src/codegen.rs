@@ -52,7 +52,7 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
 
     // Sum weight sizes for all Linear ops in topological (UIR-node) order.
     let mut weight_floats: usize = 0;
-    for (i, node) in model.nodes.iter().enumerate() {
+    for node in &model.nodes {
         if let NodeKind::Op { op: StdOp::Linear, operands, .. } = &node.kind {
             // Input shape of this linear is the operand's shape; output rank-2 col is N.
             let in_shape = &model.nodes[operands[0]].ty.shape;
@@ -60,7 +60,6 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
             let k = in_shape.0[in_shape.0.len() - 1] as usize;
             let n = out_shape.0[out_shape.0.len() - 1] as usize;
             weight_floats += k * n;
-            let _ = i; // index reserved for future weight-layout metadata
         }
     }
 
@@ -124,6 +123,12 @@ fn emit_matmul(b: u64, k: u64, n: u64, linear_idx: usize) -> String {
 
     s.push_str(&format!("    ; matmul: input [{b},{k}] × weights [{k},{n}] → output [{b},{n}]\n"));
 
+    // Hoist loop-invariant stride constants out of the inner loops.
+    // x10 = K (input row stride and weight row count)
+    // x11 = N (weight row stride and output row stride)
+    s.push_str(&format!("    mov     x10, #{k}\n"));
+    s.push_str(&format!("    mov     x11, #{n}\n"));
+
     // Outer i loop
     s.push_str("    mov     x3, #0\n");
     s.push_str(&format!(".Lmm_i_{lid}:\n"));
@@ -146,14 +151,12 @@ fn emit_matmul(b: u64, k: u64, n: u64, linear_idx: usize) -> String {
     s.push_str(&format!("    b.ge    .Lmm_k_end_{lid}\n"));
 
     // input[i*K + k]
-    s.push_str(&format!("    mov     x8, #{k}\n"));
-    s.push_str("    mul     x6, x3, x8\n");
+    s.push_str("    mul     x6, x3, x10\n");
     s.push_str("    add     x6, x6, x5\n");
     s.push_str("    ldr     s1, [x0, x6, lsl #2]\n");
 
     // weights[k*N + j]
-    s.push_str(&format!("    mov     x8, #{n}\n"));
-    s.push_str("    mul     x7, x5, x8\n");
+    s.push_str("    mul     x7, x5, x11\n");
     s.push_str("    add     x7, x7, x4\n");
     s.push_str("    ldr     s2, [x1, x7, lsl #2]\n");
 
@@ -165,8 +168,7 @@ fn emit_matmul(b: u64, k: u64, n: u64, linear_idx: usize) -> String {
     s.push_str(&format!(".Lmm_k_end_{lid}:\n"));
 
     // store output[i*N + j]
-    s.push_str(&format!("    mov     x8, #{n}\n"));
-    s.push_str("    mul     x6, x3, x8\n");
+    s.push_str("    mul     x6, x3, x11\n");
     s.push_str("    add     x6, x6, x4\n");
     s.push_str("    str     s0, [x2, x6, lsl #2]\n");
 
