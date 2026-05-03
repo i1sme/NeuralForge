@@ -137,15 +137,14 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-Milestone 2 complete: NFL Parser prototype shipped (Rust, std-only). The implementation
-is a Cargo workspace at the repo root with member crate `nflc` under `compiler/`,
-hand-written lexer + recursive-descent parser, typed AST, and a `nflc parse <file>`
-CLI. All 5 positive fixtures parse cleanly; 7 new negative fixtures verify rejection
-behaviour at specific (line, col). 62 tests passing (50 unit + 12 integration).
+Milestone 3a complete: UIR vertical-slice 1 shipped — `nflc::ir::build(&NflSource)`
+turns a parsed AST for `tests/fixtures/tiny_mlp.nfl` into a typed Universal IR (DAG
+of nodes with concrete shapes). All 4 stdlib operations (Linear, Relu, Dropout,
+Softmax) are defined with signatures and shape inference; tiny_mlp exercises Linear
+and Softmax end-to-end. 88 tests passing (72 unit + 16 integration).
 
-The immediate next step is **Milestone 3 — UIR prototype**: build the Universal IR
-(computation DAG) from the parsed AST. The AST is the input; the UIR is the foundation
-for every architecture profile from M4 onward.
+The immediate next step is **Milestone 3b — extend UIR to all 5 fixtures**: add
+multi-pipeline / multi-model / named-arg coverage, plus the `--uir` CLI flag.
 
 ---
 

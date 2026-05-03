@@ -24,3 +24,10 @@ pub fn parse(source: &str) -> Result<NflSource, ParseError> {
     let mut p = parser::Parser::new(&tokens);
     parser::parse_nfl_source(&mut p)
 }
+
+pub mod ir;
+
+pub use ir::{
+    AttrValue, BuildError, BuildErrorKind, Node, NodeId, NodeKind,
+    OpAttr, Shape, StdOp, Type, Uir, UirModel,
+};
