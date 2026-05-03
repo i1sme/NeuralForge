@@ -65,12 +65,17 @@ Profiles translate UIR into assembly for a specific hardware target.
 Initial target profiles:
 | Profile     | Architecture       | Key capability              |
 |-------------|--------------------|-----------------------------|
-| `x86-64`    | Intel / AMD        | AVX-512, VNNI instructions  |
-| `arm64`     | Apple M-series, mobile | NEON / SVE / AMX        |
-| `riscv64`   | RISC-V             | RVV vector extension        |
-| `generic`   | Any POSIX system   | Scalar fallback, no SIMD    |
+| `arm64`     | Apple Silicon / AArch64 POSIX | Scalar AArch64 assembly, no SIMD (M4a). NEON / SVE / AMX in later slices. |
+| `x86_64`    | Intel / AMD        | AVX-512, VNNI instructions (M6) |
+| `riscv64`   | RISC-V             | RVV vector extension (future) |
 
 A profile is a self-contained module. Adding support for a new architecture means writing a new profile — the language and compiler core remain unchanged.
+
+> Note: M4 was originally specced as a `generic` profile (LLVM IR or similar
+> portable IR). During M4 brainstorming this was reframed: "generic" survives as
+> the architectural _principle_ (profile isolation, swap-in profiles per target),
+> not as a profile name. The first concrete profile is `arm64`, matching the
+> host architecture for native execution.
 
 ### 4. Compiler Pipeline
 
@@ -149,7 +154,7 @@ NeuralForge is designed so that LLMs can write, read, and reason about NFL code 
 | 1 | Language spec v0.1                             | Define NFL syntax formally (EBNF grammar) — inference-only; training in v0.2 |
 | 2 | Parser prototype                               | Parse a simple feedforward network definition                              |
 | 3 | UIR prototype                                  | Produce a computation graph from parsed AST       |
-| 4 | `generic` profile                              | Generate scalar assembly for a matrix multiply    |
+| 4 | `arm64` profile                                | Generate scalar AArch64 assembly for `linear` + `relu` (host: Apple Silicon) |
 | 5 | Kernel fusion pass                             | Fuse linear+activation in the IR optimiser        |
 | 6 | `x86-64` profile                               | Use AVX-512 for matrix operations                 |
 | 7 | Human-readable viewer v0.1                     | Show UIR in annotated human-readable format       |

@@ -111,6 +111,15 @@ Four operations are recognised:
 Adding a new op = new `StdOp` variant + new arms in `signature()` and
 `infer_output_shape()` in `compiler/src/ir/stdlib.rs`.
 
+### Codegen interpretation of optional attributes
+
+NFL grammar marks some op arguments as optional (e.g. `Linear`'s `bias`).
+Default behaviour is **codegen-profile-specific**: profiles document how they
+treat absent optional attributes. The current arm64 profile (M4a) interprets
+`linear[N]` without an explicit `bias` attribute as **no bias add** (pure
+matmul). To get bias, write `linear[N, bias=true]` explicitly. See
+[`docs/profile_guide/arm64.md`](../profile_guide/arm64.md) for details.
+
 ---
 
 ## 5. Implicit semantics (rules the builder enforces)
