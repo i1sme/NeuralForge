@@ -32,6 +32,10 @@ pub enum ArgType {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShapeError {
+    /// Defensive guard. Emitted by `single_input` if a multi-operand op
+    /// reaches single-input shape inference. No M3 op constructs >1 operand,
+    /// so no test fires this path; the constructor exists so M5+ multi-input
+    /// ops (add/concat) cannot silently misroute through single-input helpers.
     WrongInputCount { expected: usize, actual: usize },
     WrongRank { expected: usize, actual: usize, dim_index: Option<usize> },
     MissingAttr { name: &'static str },
