@@ -14,6 +14,73 @@ Format for each entry:
 
 ---
 
+## 2026-05-02 — Milestone 3b closed: UIR extended to all 5 fixtures + dropout validation + --uir CLI
+
+### What was done
+- Refactored `build_op` to take `&Shape` instead of `&[Node]` — eliminated the
+  `Vec<Node>` clone in `build_model` (closes M3a tech-debt #5)
+- Added `stdlib::validate_attrs` + `AttrError` (`OutOfRange`, `MissingAttr`); validates
+  per-op value constraints (currently: dropout rate must be in [0, 1])
+- Added `BuildErrorKind::InvalidAttrValue { op, attr, reason }` and wired
+  `validate_attrs` into `build_op` between `resolve_args` and `infer_output_shape`
+- Added `nflc parse <file> --uir` CLI flag with a compact textual UIR pretty-printer
+  using `nN`-style node-id notation (matches what the M7 viewer will use)
+- **Fix-up commit `7ad99f6`:** extended `resolve_args` to pre-resolve `Symbol(name)`
+  args against `model_params` so `linear[output]` (where `output=10` is a param) builds
+  to `linear[10]`. M3a missed this gap; classifier.nfl exposed it during Task 4 e2e.
+- Restructured `compiler/tests/uir_tiny_mlp.rs` → `compiler/tests/uir_fixtures.rs`
+  with submodules per fixture (`tiny_mlp`, `classifier`, `pipeline_styles`,
+  `comments`, `mixed_args`, `negative`)
+- 4 new positive integration tests cover the remaining M1 fixtures end-to-end
+- New negative fixture `tests/fixtures/negative/dropout_rate_out_of_range.nfl`
+  + integration test asserting `InvalidAttrValue` at line 6
+- 102 tests passing (81 unit + 12 M2 integration + 9 M3 integration); zero warnings
+
+### Decisions made
+None new. All design decisions were captured in
+`docs/superpowers/specs/2026-05-02-m3b-uir-all-fixtures-design.md` during brainstorming.
+This session executed the plan in
+`docs/superpowers/plans/2026-05-02-m3b-uir-all-fixtures.md` (8 tasks, 9 commits with
+the unplanned Symbol-resolution fix-up).
+
+### Problems encountered
+- **Plan defect found during Task 4 e2e verification.** The plan author (me) only
+  considered M3a's symbolic-dim resolution as covering the params lookup; missed that
+  positional Symbol args (e.g. `linear[output]` where `output` is a param) needed the
+  same resolution. Fix-up commit `7ad99f6` extends `resolve_args` to pre-resolve
+  `Symbol(name)` args against `model_params` HashMap. Caught by the implementer's
+  diligent e2e check on classifier.nfl, not by unit tests (which used integer-only
+  positionals). Two new unit tests added (`resolve_args_symbol_resolves_against_params`,
+  `resolve_args_symbol_not_in_params_stays_symbol`).
+
+### Known tech debt (carried forward — see spec §9)
+1. **M3a tech-debt items #1-#4 still apply** (TypeExpr.name, Span start-only, no CI,
+   crate version policy). M3b doesn't address them.
+2. **AttrError and ShapeError are two separate enums in stdlib.** If the pattern
+   grows, M3c can consider unifying into a single OpError enum.
+3. **`--uir` printer lives in main.rs as free-function logic.** M3c moves it onto
+   the UIR types as Display impls so libraries (test snapshot tools, IDE plugins,
+   the M7 viewer) can consume it.
+4. **Multi-pipeline behaviour in v0.1:** documented here that grammar permits
+   multiple `pipeline_stmt`s but only the last's output becomes the model output.
+   M3c will document this explicitly in `docs/language_reference/uir.md`.
+5. **`format!("{:?}", std_op)` in the InvalidAttrValue message** uses Debug to
+   render `StdOp` as `"Dropout"`. Good enough for v0.1; M3c may add `Display for StdOp`.
+6. **Symbol-resolution placement** — currently in `resolve_args` as a pre-pass.
+   Consider folding into a unified semantic-resolution pass when more symbol kinds
+   appear (v0.2 may add other symbolic identifiers beyond model_params).
+
+### Next step
+Begin **Milestone 3c — UIR polish.** Adds: (1) viewer-friendly `Display` impls for
+all UIR types (move `print_uir` from `main.rs` onto the types); (2) Ariadne-style
+source-snippet error rendering; (3) `docs/language_reference/uir.md` documenting UIR
+semantics including the multi-pipeline convention; (4) cleanup of clippy lints noted
+in M3a tech-debt #6; (5) audit of unused enum variants. After M3c, Milestone 3 is
+fully closed and we can begin **Milestone 4 — generic profile (scalar assembly
+codegen)**.
+
+---
+
 ## 2026-05-02 — Milestone 3a closed: UIR vertical-slice 1 shipped (tiny_mlp end-to-end)
 
 ### What was done
