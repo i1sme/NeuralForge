@@ -8,6 +8,17 @@ use compiler::{NodeKind, StdOp, Uir, UirModel};
 
 /// Walk the entire UIR, returning the combined asm source + per-model FnSigs.
 pub fn walk_uir(uir: &Uir) -> Result<Asm, LowerError> {
+    // First pass: detect duplicate model names.
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for model in &uir.models {
+        if !seen.insert(model.name.as_str()) {
+            return Err(LowerError::DuplicateModelName {
+                name: model.name.clone(),
+                span: model.source_span,
+            });
+        }
+    }
+
     let mut source = String::new();
     let mut functions = Vec::with_capacity(uir.models.len());
 

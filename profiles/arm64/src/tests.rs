@@ -90,3 +90,35 @@ fn relu_alone_after_matmul_does_not_break_existing_test() {
     let asm = lower(&uir).expect("lower");
     assert!(asm.source.contains("fmadd"));
 }
+
+#[test]
+fn linear_with_bias_returns_lower_error() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2, bias=true]\n");
+    let err = lower(&uir).unwrap_err();
+    assert!(matches!(err, LowerError::LinearWithBias { .. }));
+}
+
+#[test]
+fn dropout_returns_unsupported_op() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[3] -> dropout[rate=0.2]\n");
+    let err = lower(&uir).unwrap_err();
+    assert!(matches!(err, LowerError::UnsupportedOp { ref op, .. } if op == "dropout"));
+}
+
+#[test]
+fn softmax_returns_unsupported_op() {
+    // softmax-only path
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> softmax\n");
+    let err = lower(&uir).unwrap_err();
+    assert!(matches!(err, LowerError::UnsupportedOp { ref op, .. } if op == "softmax"));
+}
+
+#[test]
+fn duplicate_model_name_returns_error() {
+    // Two models named "M" in one source.
+    let src = "model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n\
+               model M [b=2]:\n    y: Tensor[b, 3]\n    y -> linear[2]\n";
+    let uir = build_uir(src);
+    let err = lower(&uir).unwrap_err();
+    assert!(matches!(err, LowerError::DuplicateModelName { ref name, .. } if name == "M"));
+}
