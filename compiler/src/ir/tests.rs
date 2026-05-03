@@ -306,3 +306,31 @@ fn attr_error_displays_human_message() {
     let msg = format!("{err}");
     assert!(msg.contains("rate") && msg.contains("1.5"), "got: {msg}");
 }
+
+#[test]
+fn build_op_dropout_out_of_range_errors() {
+    let nodes = vec![input_node(vec![8, 4])];
+    let op_ast = Operation {
+        name: "dropout".into(),
+        args: vec![OpArg::Named { name: "rate".into(), value: ArgValue::Float(1.5) }],
+        span: span(),
+    };
+    let mut out_nodes = nodes.clone();
+    let input_shape = nodes[0].ty.shape.clone();
+    let err = build_op(&op_ast, 0, &input_shape, &mut out_nodes).unwrap_err();
+    assert!(matches!(err.kind, BuildErrorKind::InvalidAttrValue { .. }));
+}
+
+#[test]
+fn build_op_dropout_in_range_succeeds() {
+    let nodes = vec![input_node(vec![8, 4])];
+    let op_ast = Operation {
+        name: "dropout".into(),
+        args: vec![OpArg::Named { name: "rate".into(), value: ArgValue::Float(0.5) }],
+        span: span(),
+    };
+    let mut out_nodes = nodes.clone();
+    let input_shape = nodes[0].ty.shape.clone();
+    let id = build_op(&op_ast, 0, &input_shape, &mut out_nodes).unwrap();
+    assert_eq!(out_nodes[id].ty.shape.0, vec![8, 4]);
+}

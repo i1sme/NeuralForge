@@ -147,6 +147,18 @@ pub(crate) fn build_op(
     let std_op = stdlib::resolve(&op_ast.name)
         .ok_or_else(|| BuildError::unknown_op(&op_ast.name, op_ast.span))?;
     let attrs = resolve_args(std_op, &op_ast.args, op_ast.span)?;
+    stdlib::validate_attrs(std_op, &attrs).map_err(|e| {
+        let attr_name = match &e {
+            stdlib::AttrError::OutOfRange { name, .. } => *name,
+            stdlib::AttrError::MissingAttr { name } => *name,
+        };
+        BuildError::invalid_attr_value(
+            &format!("{:?}", std_op),
+            attr_name,
+            &format!("{e}"),
+            op_ast.span,
+        )
+    })?;
     let out_shape = stdlib::infer_output_shape(std_op, &[input_shape.clone()], &attrs)
         .map_err(|e| BuildError::shape(format!("{e}"), op_ast.span))?;
     let id = out_nodes.len();
