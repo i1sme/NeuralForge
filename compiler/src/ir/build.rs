@@ -165,3 +165,69 @@ pub(crate) fn build_op(
     });
     Ok(id)
 }
+
+use crate::ast::{ModelDef, ModelStmt, NflSource};
+
+use super::types::{Uir, UirModel};
+
+pub fn build(ast: &NflSource) -> Result<Uir, BuildError> {
+    let mut models = Vec::with_capacity(ast.models.len());
+    for ast_model in &ast.models {
+        models.push(build_model(ast_model)?);
+    }
+    Ok(Uir { models })
+}
+
+pub(crate) fn build_model(ast_model: &ModelDef) -> Result<UirModel, BuildError> {
+    // Index params for symbolic dim lookup.
+    let params: HashMap<&str, u64> = ast_model
+        .params
+        .iter()
+        .map(|p| (p.name.as_str(), p.value))
+        .collect();
+
+    let mut nodes: Vec<Node> = Vec::new();
+    let mut env: HashMap<String, NodeId> = HashMap::new();
+    let mut inputs: Vec<NodeId> = Vec::new();
+    let mut last_pipeline_output: Option<NodeId> = None;
+
+    for stmt in &ast_model.body {
+        match stmt {
+            ModelStmt::VariableDecl(v) => {
+                let shape = resolve_type(&v.ty, &params)?;
+                let id = nodes.len();
+                nodes.push(Node {
+                    kind: NodeKind::Input { name: v.name.clone() },
+                    ty: Type { name: v.ty.name.clone(), shape },
+                    source_span: v.span,
+                });
+                env.insert(v.name.clone(), id);
+                inputs.push(id);
+            }
+            ModelStmt::Pipeline(p) => {
+                let mut current = *env
+                    .get(&p.source)
+                    .ok_or_else(|| BuildError::unknown_variable(&p.source, p.span))?;
+                for op_ast in &p.steps {
+                    // Borrow-checker workaround: read_view is a clone of the current
+                    // nodes slice for shape lookup, separately from the &mut nodes
+                    // we push into. Cheap for tiny_mlp's ≤3 nodes; refactor in M3b.
+                    let read_view: Vec<Node> = nodes.clone();
+                    current = build_op(op_ast, current, &read_view, &mut nodes)?;
+                }
+                last_pipeline_output = Some(current);
+            }
+        }
+    }
+
+    let output = last_pipeline_output
+        .ok_or_else(|| BuildError::model_has_no_pipeline(&ast_model.name, ast_model.span))?;
+
+    Ok(UirModel {
+        name: ast_model.name.clone(),
+        nodes,
+        inputs,
+        output,
+        source_span: ast_model.span,
+    })
+}

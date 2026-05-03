@@ -227,3 +227,37 @@ fn build_op_unknown_op_errors() {
     let err = build_op(&op_ast, 0, &nodes, &mut out_nodes).unwrap_err();
     assert!(matches!(err.kind, BuildErrorKind::UnknownOp { .. }));
 }
+
+use crate::lexer::lex;
+use crate::parser;
+
+fn parse_to_ast(src: &str) -> crate::ast::NflSource {
+    let tokens = lex(src).expect("lex");
+    let leaked: &'static [crate::lexer::Token] = Box::leak(tokens.into_boxed_slice());
+    let mut p = parser::Parser::new(leaked);
+    parser::parse_nfl_source(&mut p).expect("parse")
+}
+
+#[test]
+fn build_tiny_mlp_minimal() {
+    let src = "model X [batch=8]:\n    x: Tensor[batch, 4]\n    x -> linear[2] -> softmax\n";
+    let ast = parse_to_ast(src);
+    let uir = super::build(&ast).unwrap();
+    assert_eq!(uir.models.len(), 1);
+    let m = &uir.models[0];
+    assert_eq!(m.name, "X");
+    assert_eq!(m.nodes.len(), 3);
+    assert_eq!(m.inputs, vec![0]);
+    assert_eq!(m.output, 2);
+    assert_eq!(m.nodes[0].ty.shape.0, vec![8, 4]);
+    assert_eq!(m.nodes[1].ty.shape.0, vec![8, 2]);
+    assert_eq!(m.nodes[2].ty.shape.0, vec![8, 2]);
+}
+
+#[test]
+fn build_model_with_no_pipeline_errors() {
+    let src = "model X [a=1]:\n    x: Tensor[a, 1]\n";
+    let ast = parse_to_ast(src);
+    let err = super::build(&ast).unwrap_err();
+    assert!(matches!(err.kind, BuildErrorKind::ModelHasNoPipeline { .. }));
+}

@@ -20,4 +20,4 @@ pub use error::{BuildError, BuildErrorKind};
 pub use stdlib::{ArgSlot, ArgType, Signature, StdOp};
 pub use types::{AttrValue, Node, NodeId, NodeKind, OpAttr, Shape, Type, Uir, UirModel};
 
-// Public entry point lands in Task 7.
+pub use build::build;
