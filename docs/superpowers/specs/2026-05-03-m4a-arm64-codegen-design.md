@@ -124,7 +124,7 @@ pub enum LowerError {
 }
 ```
 
-`#[non_exhaustive]` on `LowerError` is mandatory — variants will be removed as M4b/c add coverage; consumers must keep a `_ => ...` arm.
+`#[non_exhaustive]` on `LowerError` is mandatory: variants representing deferred features (`UnsupportedOp`, `LinearWithBias`) will become unreachable once M4b/c add coverage and may be removed at that point. With `#[non_exhaustive]` such removal is non-breaking for downstream consumers — they're already required to keep a `_ => ...` arm.
 
 `Asm` and `FnSig` carry no `Display` impl in M4a (the asm source is the
 display). M4b/c may add `Display for FnSig` when the multi-Linear case needs
@@ -136,7 +136,7 @@ human-readable layout dumps.
 |----------------------------|-------------|------------------------------------------------------------------|
 | `Linear` (no `bias` attr)  | ✅          | Pure matmul: 3 nested scalar loops, `fmadd s0, s1, s2, s0` accumulator pattern, single-precision throughout. |
 | `Linear` (`bias=true`)     | ❌          | `LowerError::LinearWithBias` (M4b adds bias-add).                |
-| `Relu`                     | ✅          | Separate elementwise loop applying `fmax sN, sN, wzr` per element of its input buffer (operates in-place on the producer's output buffer). No fusion with the preceding op — fusion is M5 territory. |
+| `Relu`                     | ✅          | Separate elementwise loop. Per element: materialise zero into a FP register once outside the loop (`fmov s_zero, wzr` — `wzr` is the integer zero-register; AArch64 `fmax` requires both operands to be FP registers, so passing `wzr` directly is invalid), then `fmax sN, sN, s_zero` inside the loop. Operates in-place on the producer's output buffer. No fusion with the preceding op — fusion is M5 territory. |
 | `Dropout`                  | ❌          | `LowerError::UnsupportedOp` (M4b: identity-pass at inference, +1 case). |
 | `Softmax`                  | ❌          | `LowerError::UnsupportedOp` (M4b: scalar `exp` via Taylor series or libm). |
 | `Input`                    | ✅          | Marker only — no code emitted; maps to the input pointer parameter. |
@@ -220,7 +220,7 @@ Plain-string assertions on generated `.s`. Never invoke `as` / `cc`. Catch regre
 
 - `matmul_emits_three_nested_loops` — checks for `fmadd`, the loop-counter increments, the `ret` epilogue.
 - `function_symbol_format` — verifies `.globl _nfl_forward_M` and the leading underscore (Mach-O).
-- `relu_uses_fmax_against_zero` — checks the emitted `fmax sN, sN, wzr` (or equivalent) when relu follows a linear.
+- `relu_uses_fmax_against_zero` — checks the emitted `fmov s_zero, wzr` (zero materialisation) and `fmax sN, sN, s_zero` (clamp) when relu follows a linear.
 - `linear_with_bias_returns_unsupported` — passes a UIR containing `linear[2, bias=true]`, asserts `Err(LowerError::LinearWithBias { .. })`.
 - `softmax_returns_unsupported` — same shape, for softmax.
 - `dropout_returns_unsupported` — same shape, for dropout.
@@ -402,7 +402,7 @@ This split exists so a future contributor doesn't read `libloading` in `Cargo.to
 1. Workspace has 3 members; `cargo build` from root builds all 3 with zero warnings.
 2. `cargo clippy --workspace --all-targets -- -D warnings` exits 0.
 3. `cargo test --workspace` passes:
-   - All 106 existing tests (unchanged).
+   - All pre-M4a tests still pass (currently 106; the plan should record the actual count at task-start time and assert no regression rather than hard-coding 106).
    - The new fixture's UIR-build test in `compiler/tests/uir_fixtures.rs`.
    - All M4a unit tests in `profiles/arm64`.
    - The M4a integration test (or skipped with a logged reason on non-aarch64 hosts).
@@ -423,7 +423,8 @@ This split exists so a future contributor doesn't read `libloading` in `Cargo.to
 ## 15. Open questions / risks
 
 - **Mach-O calling convention edge cases.** Apple AArch64 is mostly AAPCS64 but with quirks (variadic functions, frame pointer requirements). M4a uses pure leaf functions with non-variadic signatures, so the standard register passing applies and we shouldn't need to set up a frame pointer. If `cc` complains during integration test, fall back to standard prologue (`stp x29, x30, [sp, #-16]!`) at the cost of a few extra instructions per function. Document the choice in `arm64.md`.
-- **`f32` precision.** Reference Rust uses host `f32`; generated asm uses `s` registers (single-precision). They should match bit-exactly given identical operand order and the same FMA semantics. The integration test uses `1e-5` epsilon as a guard against any unexpected reordering — but in practice the test should pass with `0.0` epsilon. If not, investigate.
+- **`f32` precision.** Reference Rust uses host `f32`; generated asm uses `s` registers (single-precision). They should match bit-closely given identical operand order. The integration test uses `1e-5` epsilon as a guard against unexpected reordering or rounding differences.
+- **FMA / non-FMA divergence.** The generated asm uses `fmadd` (fused multiply-add — single rounding step). The pure-Rust reference `sum += input[...] * weights[...]` lowers to separate `fmul` + `fadd` (two rounding steps) unless rustc opts into auto-FMA, which it generally doesn't for f32 in safe code. For the M4a fixture (8×4×2 matmul) the per-element divergence is bounded by ~1 ULP per accumulation, so the worst case across 4 multiply-adds is far below `1e-5`. If the test ever flakes on this boundary, switch the reference to a Rust loop using `f32::mul_add` to match the asm bit-exactly.
 - **Symbol name collisions.** Two NFL models with the same name in the same source would produce duplicate `nfl_forward_X` symbols. The current IR builder doesn't enforce model-name uniqueness. M4a's lowerer detects this case and returns `LowerError::DuplicateModelName { name, span }` (added to the enum in §5). The proper fix — moving the check up to `compiler::ir::build` so it fails at IR-build time before any profile sees the UIR — is M4b's responsibility.
 - **`cc` invocation portability.** macOS `cc` is clang. Linux `cc` is usually gcc but symlinked. Both should accept `-arch arm64` on a Mac, and `-x assembler` is universal. If we ever target Linux on aarch64, we may need to drop `-arch arm64` (Linux cc doesn't take it). M4a tests skip on non-Mac arm64, so this doesn't bite yet.
 
