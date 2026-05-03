@@ -70,15 +70,15 @@ fn infer_linear_with_wrong_rank_input() {
 #[test]
 fn infer_relu_preserves_shape() {
     let input = Shape(vec![8, 2]);
-    let out = infer_output_shape(StdOp::Relu, &[input.clone()], &[]).unwrap();
+    let out = infer_output_shape(StdOp::Relu, std::slice::from_ref(&input), &[]).unwrap();
     assert_eq!(out, input);
 }
 
 #[test]
 fn infer_softmax_and_dropout_preserve_shape() {
     let input = Shape(vec![3, 7, 2]);
-    assert_eq!(infer_output_shape(StdOp::Softmax, &[input.clone()], &[]).unwrap(), input);
-    assert_eq!(infer_output_shape(StdOp::Dropout, &[input.clone()], &[]).unwrap(), input);
+    assert_eq!(infer_output_shape(StdOp::Softmax, std::slice::from_ref(&input), &[]).unwrap(), input);
+    assert_eq!(infer_output_shape(StdOp::Dropout, std::slice::from_ref(&input), &[]).unwrap(), input);
 }
 
 use super::build::resolve_type;
