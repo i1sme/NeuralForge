@@ -5,6 +5,8 @@
 //! - `nflc parse <file>`        → pretty-print AST to stdout, exit 0 (or err to stderr, exit 1)
 //! - `nflc parse <file> --tokens` → pretty-print token stream to stdout
 //! - `nflc parse <file> --uir`    → build and pretty-print the UIR
+//! - `nflc compile <file> --profile <name>` → lower UIR to assembly
+//! - `nflc compile <file> --profile <name> -o <file.s>` → lower UIR to assembly, write to file
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -28,6 +30,19 @@ fn main() -> ExitCode {
         [cmd, path, flag] if cmd == "parse" && flag == "--uir" => {
             run_build_uir(PathBuf::from(path))
         }
+        [cmd, path, p_flag, p_name] if cmd == "compile" && p_flag == "--profile" => {
+            run_compile(PathBuf::from(path), p_name.clone(), None)
+        }
+        [cmd, path, p_flag, p_name, o_flag, o_path]
+            if cmd == "compile" && p_flag == "--profile" && o_flag == "-o" =>
+        {
+            run_compile(PathBuf::from(path), p_name.clone(), Some(PathBuf::from(o_path)))
+        }
+        [cmd] if cmd == "compile" => {
+            eprintln!("error: 'compile' requires a file path and --profile");
+            print_usage();
+            ExitCode::FAILURE
+        }
         _ => {
             eprintln!("error: unknown invocation");
             print_usage();
@@ -37,12 +52,14 @@ fn main() -> ExitCode {
 }
 
 fn print_usage() {
-    println!("nflc — NFL Compiler (Milestone 3c)");
+    println!("nflc — NFL Compiler");
     println!();
     println!("USAGE:");
-    println!("  nflc parse <file.nfl>            Parse and pretty-print the AST");
-    println!("  nflc parse <file.nfl> --tokens   Print the lexer's token stream");
-    println!("  nflc parse <file.nfl> --uir      Build and pretty-print the UIR");
+    println!("  nflc parse   <file.nfl>                    Parse and pretty-print the AST");
+    println!("  nflc parse   <file.nfl> --tokens           Print the lexer's token stream");
+    println!("  nflc parse   <file.nfl> --uir              Build and pretty-print the UIR");
+    println!("  nflc compile <file.nfl> --profile <name>   Lower UIR to assembly");
+    println!("                          [-o <file.s>]      Output path (default: stdout)");
 }
 
 /// Render an error with a source-snippet pointer. Output format mirrors
@@ -196,6 +213,59 @@ fn run_build_uir(path: PathBuf) -> ExitCode {
         },
         Err(e) => {
             render_error_with_snippet(&source, &path, e.line, e.col, &e.message);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_compile(path: PathBuf, profile: String, out_path: Option<PathBuf>) -> ExitCode {
+    let source = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {}", path.display(), e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let ast = match compiler::parse(&source) {
+        Ok(a) => a,
+        Err(e) => {
+            render_error_with_snippet(&source, &path, e.line, e.col, &e.message);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let uir = match compiler::ir::build(&ast) {
+        Ok(u) => u,
+        Err(e) => {
+            render_error_with_snippet(&source, &path, e.line, e.col, &e.message);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if profile != "arm64" {
+        eprintln!("error: unknown profile '{}' (supported: arm64)", profile);
+        return ExitCode::FAILURE;
+    }
+
+    match profiles_arm64::lower(&uir) {
+        Ok(asm) => {
+            if let Some(p) = out_path {
+                match std::fs::write(&p, &asm.source) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(e) => {
+                        eprintln!("error: cannot write {}: {}", p.display(), e);
+                        ExitCode::FAILURE
+                    }
+                }
+            } else {
+                print!("{}", asm.source);
+                ExitCode::SUCCESS
+            }
+        }
+        Err(e) => {
+            let span = e.span();
+            render_error_with_snippet(&source, &path, span.line, span.col, &format!("{e}"));
             ExitCode::FAILURE
         }
     }
