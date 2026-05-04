@@ -5,6 +5,9 @@
 
 use compiler::{NodeId, NodeKind, StdOp, UirModel};
 
+/// Bytes per f32 element. M4b is f32-only project-wide. M5+ may parameterise.
+const BYTES_PER_ELEMENT: usize = 4;
+
 /// Where an Op-node's output buffer lives at run time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BufferLoc {
@@ -15,7 +18,9 @@ pub enum BufferLoc {
 }
 
 /// Result of buffer assignment.
+#[derive(Debug, Clone)]
 pub struct BufferAssignment {
+    /// Per-NodeId placement; index by NodeId.
     pub locs: Vec<BufferLoc>,
     /// Total stack bytes required, rounded up to 16-byte alignment.
     pub stack_bytes: usize,
@@ -36,9 +41,14 @@ pub fn assign_buffers(model: &UirModel) -> BufferAssignment {
                     match op {
                         StdOp::Relu | StdOp::Dropout => BufferLoc::Alias(operands[0]),
                         StdOp::Linear | StdOp::Softmax => {
-                            let size_bytes = node.ty.shape.0.iter().product::<u64>() as usize * 4;
+                            let elements: u64 = node.ty.shape.0.iter().copied().product();
+                            let size_bytes = (elements as usize)
+                                .checked_mul(BYTES_PER_ELEMENT)
+                                .expect("buffer size overflow: shape product * f32 size");
                             let loc = BufferLoc::StackOffset(stack_offset);
-                            stack_offset += size_bytes;
+                            stack_offset = stack_offset
+                                .checked_add(size_bytes)
+                                .expect("stack frame size overflow");
                             loc
                         }
                     }

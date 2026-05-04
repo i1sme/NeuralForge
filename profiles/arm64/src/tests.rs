@@ -237,3 +237,19 @@ fn compute_callee_saved_empty_for_leaf() {
     let regs = compute_callee_saved(&uir.models[0]);
     assert!(!regs.contains_d8_d9());
 }
+
+#[test]
+fn assign_buffers_stack_bytes_rounds_non_aligned_total_up() {
+    // Use a model where the unaligned total is NOT already 16-aligned, so the
+    // round-up math actually does work. Tensor[1, 2] -> linear[3] -> linear[3]:
+    //   n0 input (no slot), n1 linear (1*3=3 floats=12 bytes, non-terminal),
+    //   n2 linear (terminal -> OutputReg, no slot)
+    // Total raw stack = 12 bytes; rounded up to 16.
+    let uir = build_uir("model M [b=1]:\n    x: Tensor[b, 2]\n    x -> linear[3] -> linear[3]\n");
+    let model = &uir.models[0];
+    let assignment = assign_buffers(model);
+    assert_eq!(
+        assignment.stack_bytes, 16,
+        "12 raw bytes should round up to 16"
+    );
+}
