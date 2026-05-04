@@ -114,6 +114,7 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
     // Per-op emission (Tasks 5-8 refactor this dispatch into ops/*).
     let mut linear_idx = 0usize;
     let mut relu_idx = 0usize;
+    let mut softmax_idx = 0usize;
     for (node_idx, node) in model.nodes.iter().enumerate() {
         if let NodeKind::Op { op, operands, .. } = &node.kind {
             match op {
@@ -161,7 +162,21 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
                     // No asm emitted: BufferLoc::Alias(operand) ensures
                     // downstream ops read from the operand's buffer directly.
                 }
-                _ => unreachable!("classify_op should have caught this"),
+                StdOp::Softmax => {
+                    let in_shape = &model.nodes[operands[0]].ty.shape;
+                    let b = in_shape.0[0];
+                    let k = in_shape.0[1];
+                    let src_loc = resolve_loc(&assignment.locs, operands[0]);
+                    let dst_loc = resolve_loc(&assignment.locs, node_idx);
+                    body.push_str(&crate::ops::emit_softmax(
+                        b,
+                        k,
+                        softmax_idx,
+                        src_loc,
+                        dst_loc,
+                    ));
+                    softmax_idx += 1;
+                }
             }
         }
     }
@@ -190,19 +205,16 @@ fn resolve_loc(locs: &[crate::buffer::BufferLoc], id: NodeId) -> crate::buffer::
 }
 
 /// Validate that an op is supported in M4b; return error otherwise.
-/// UnsupportedOp for softmax (Task 8).
+/// All M4b ops are supported; kept as extension point for M5+ ops.
 fn classify_op(
     op: StdOp,
     _attrs: &[compiler::OpAttr],
-    span: compiler::ast::Span,
+    _span: compiler::ast::Span,
 ) -> Result<(), LowerError> {
     match op {
         StdOp::Linear => Ok(()),
         StdOp::Relu => Ok(()),
         StdOp::Dropout => Ok(()),
-        StdOp::Softmax => Err(LowerError::UnsupportedOp {
-            op: "softmax".into(),
-            span,
-        }),
+        StdOp::Softmax => Ok(()),
     }
 }

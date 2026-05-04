@@ -17,14 +17,6 @@ fn empty_uir_lowers_to_empty_asm() {
 }
 
 #[test]
-fn unsupported_op_returns_unsupported() {
-    // tiny_mlp ends in softmax — not supported in M4a
-    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> softmax\n");
-    let err = lower(&uir).unwrap_err();
-    assert!(matches!(err, LowerError::UnsupportedOp { ref op, .. } if op == "softmax"));
-}
-
-#[test]
 fn linear_emits_function_with_correct_symbol_and_ret() {
     let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n");
     let asm = lower(&uir).expect("lower");
@@ -109,11 +101,41 @@ fn dropout_emits_no_code() {
 }
 
 #[test]
-fn softmax_returns_unsupported_op() {
-    // softmax-only path
-    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> softmax\n");
-    let err = lower(&uir).unwrap_err();
-    assert!(matches!(err, LowerError::UnsupportedOp { ref op, .. } if op == "softmax"));
+fn softmax_emits_three_passes() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[3] -> softmax\n");
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+    // Pass 2 has the bl _expf.
+    assert!(s.contains("bl      _expf"), "expected 'bl _expf' in:\n{s}");
+    // Pass 3 has the divide.
+    assert!(
+        s.contains("fdiv"),
+        "expected fdiv (normalize pass) in:\n{s}"
+    );
+}
+
+#[test]
+fn softmax_function_saves_d8_d9() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[3] -> softmax\n");
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+    assert!(
+        s.contains("stp     d8, d9, [sp, #-16]!"),
+        "missing d8/d9 prologue:\n{s}"
+    );
+    assert!(
+        s.contains("ldp     d8, d9, [sp], #16"),
+        "missing d8/d9 epilogue:\n{s}"
+    );
+}
+
+#[test]
+fn non_leaf_function_saves_x29_x30() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[3] -> softmax\n");
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+    assert!(s.contains("stp     x29, x30, [sp, #-16]!"));
+    assert!(s.contains("ldp     x29, x30, [sp], #16"));
 }
 
 // ── buffer analyzer tests ────────────────────────────────────────────────────

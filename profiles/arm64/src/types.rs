@@ -48,18 +48,16 @@ pub enum ParamKind {
 }
 
 /// Errors that can occur during lowering.
-///
-/// `#[non_exhaustive]` — variants representing deferred features
-/// (`UnsupportedOp`) become unreachable as M4b/c add coverage and may be
-/// removed at that point.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum LowerError {
-    /// Op is not supported in the current M4 slice.
-    /// `op` is the lowercase token name (e.g. "softmax", "dropout").
+    /// Defensive: op encountered that the codegen doesn't know how to lower.
+    /// All M4b ops (linear/relu/dropout/softmax with or without bias) are
+    /// supported; this variant exists as a guard for M5+ ops landing before
+    /// codegen catches up.
+    #[allow(dead_code)]
     UnsupportedOp { op: String, span: Span },
     /// Defensive: UIR contained a shape that wasn't fully resolved.
-    /// Should be unreachable if the IR builder did its job.
     ShapeNotConcrete { span: Span },
 }
 
