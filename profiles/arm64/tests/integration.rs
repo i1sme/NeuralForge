@@ -26,6 +26,13 @@ fn m4a_no_softmax_still_runs() {
     assert_eq!(sig.params_floats, 8);
     assert_eq!(sig.output_floats, 16);
 
+    // Verify the params_layout is what we expect for M4a fixture (single LinearWeight slot).
+    assert_eq!(sig.params_layout.len(), 1);
+    let slot = &sig.params_layout[0];
+    assert_eq!(slot.kind, profiles_arm64::ParamKind::LinearWeight);
+    assert_eq!(slot.offset, 0);
+    assert_eq!(slot.size, 8);
+
     let dylib_path = common::compile_to_dylib(&asm.source, "m4a_linear_relu");
 
     let lib = unsafe { libloading::Library::new(&dylib_path) }.expect("open");

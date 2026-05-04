@@ -7,6 +7,13 @@ use crate::types::{ParamKind, ParamSlot};
 use crate::{Asm, FnSig, LowerError};
 use compiler::{NodeKind, StdOp, Uir, UirModel};
 
+/// True iff the Linear op's attribute list includes `bias=true`.
+fn linear_has_bias(attrs: &[compiler::OpAttr]) -> bool {
+    attrs.iter().any(|a| {
+        a.name == "bias" && matches!(&a.value, compiler::AttrValue::Symbol(s) if s == "true")
+    })
+}
+
 /// Walk the entire UIR, returning the combined asm source + per-model FnSigs.
 pub fn walk_uir(uir: &Uir) -> Result<Asm, LowerError> {
     // First pass: detect duplicate model names.
@@ -79,11 +86,7 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
             params_floats += k * n;
 
             // Bias-slot pre-allocation: detection runs now, codegen lands in Task 7.
-            let has_bias = attrs.iter().any(|a| {
-                a.name == "bias"
-                    && matches!(&a.value, compiler::AttrValue::Symbol(s) if s == "true")
-            });
-            if has_bias {
+            if linear_has_bias(attrs) {
                 params_layout.push(ParamSlot {
                     kind: ParamKind::LinearBias,
                     origin_node: node_idx,
@@ -260,17 +263,11 @@ fn classify_op(
 ) -> Result<(), LowerError> {
     match op {
         StdOp::Linear => {
-            // bias=true is not yet supported.
-            for a in attrs {
-                if a.name == "bias" {
-                    if let compiler::AttrValue::Symbol(s) = &a.value {
-                        if s == "true" {
-                            return Err(LowerError::LinearWithBias { span });
-                        }
-                    }
-                }
+            if linear_has_bias(attrs) {
+                Err(LowerError::LinearWithBias { span })
+            } else {
+                Ok(())
             }
-            Ok(())
         }
         StdOp::Relu => Ok(()),
         StdOp::Dropout => Err(LowerError::UnsupportedOp {
