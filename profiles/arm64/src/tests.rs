@@ -486,12 +486,18 @@ fn fused_linear_relu_no_separate_relu_loop() {
 
 #[test]
 fn unfused_linear_still_no_fmax() {
-    // Linear without fused_post_ops: no fmax in asm.
+    // Linear without fused_post_ops: no fmax AND no s4 zero-materialisation.
+    // The two assertions together pin the un-fused asm shape: no post-op
+    // path is taken at all (neither header materialisation nor inline op).
     let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n");
     let asm = lower(&uir).expect("lower");
     let s = &asm.source;
     assert!(
         !s.contains("fmax"),
         "un-fused linear should NOT emit fmax:\n{s}"
+    );
+    assert!(
+        !s.contains("fmov    s4, wzr"),
+        "un-fused linear should NOT materialise s4 zero (only fused-relu needs it):\n{s}"
     );
 }

@@ -105,11 +105,14 @@ pub fn emit_linear(
     for post_op in fused_post_ops {
         match post_op {
             PostOp::Relu => s.push_str("    fmax    s0, s0, s4\n"),
-            // Catch-all for #[non_exhaustive] PostOp future variants.
+            // PostOp is `#[non_exhaustive]` in `compiler::ir::types`, so a
+            // wildcard arm is required even though Relu is currently the
+            // only variant — Rust treats the cross-crate match as inexhaustive.
+            // Drop the `#[allow]` once M5b adds the second PostOp variant.
             #[allow(unreachable_patterns)]
             _ => {
                 return Err(LowerError::UnsupportedPostOp {
-                    op: format!("{post_op:?}").to_lowercase(),
+                    op: post_op.to_string(),
                     span: node_span,
                 });
             }
