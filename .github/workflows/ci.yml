@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'claude/**'
+  pull_request:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  unit:
+    name: Unit + lint (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable + components
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (warnings = errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Test
+        # Integration test in profiles/arm64/tests/integration.rs gates itself
+        # via cfg!(target_arch = "aarch64") + cc presence, so it skips cleanly
+        # on x86_64 ubuntu while the unit tests still run.
+        run: cargo test --workspace
+
+  integration:
+    name: Integration (macos-14, arm64)
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Test (incl. arm64 integration FFI)
+        # On macos-14 (Apple Silicon arm64), the integration test in
+        # profiles/arm64 actually runs: assembles via cc, dlopens the
+        # .dylib, and calls nfl_forward_M4Demo via FFI.
+        run: cargo test --workspace

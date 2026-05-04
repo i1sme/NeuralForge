@@ -1,5 +1,7 @@
 # NeuralForge
 
+[![CI](https://github.com/i1sme/NeuralForge/actions/workflows/ci.yml/badge.svg)](https://github.com/i1sme/NeuralForge/actions/workflows/ci.yml)
+
 A domain-specific language and ahead-of-time compiler for neural networks.
 Write your network in NFL (NeuralForge Language), compile it to assembly, load it directly onto any device.
 

@@ -14,6 +14,48 @@ Format for each entry:
 
 ---
 
+## 2026-05-03 — CI workflow added; closes M3a tech-debt #3
+
+### What was done
+- Added `.github/workflows/ci.yml` with two jobs:
+  - `unit` on `ubuntu-latest`: `cargo fmt --all -- --check`, `cargo clippy
+    --workspace --all-targets -- -D warnings`, `cargo build --workspace`,
+    `cargo test --workspace`. Integration test in `profiles/arm64/tests/`
+    self-skips on x86_64, so unit-test count is just lexer/parser/ir/profile-unit.
+  - `integration` on `macos-14` (Apple Silicon arm64): `cargo build --workspace`
+    + `cargo test --workspace`. The full FFI integration test runs here
+    (assembles via `cc`, dlopens .dylib, calls `nfl_forward_M4Demo` via
+    libloading).
+- Triggers: push to `main`, push to `claude/**`, PR to `main`.
+- Uses `dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache@v2` for
+  toolchain + cache.
+- Added CI badge to `README.md`.
+- Pre-CI: applied `cargo fmt --all` across workspace (117 sites in 20 files).
+  Pure formatting, no semantic changes; committed separately so the CI PR
+  is review-friendly.
+
+### Decisions made
+- **Format check IS in CI** (not just installed). Per the user's note:
+  installing rustfmt but never running it is wasted seconds on every CI run.
+  Project culture is zero-warnings; format is part of that.
+- **Two jobs, not one matrix.** macOS arm64 is paid; ubuntu is free. Splitting
+  jobs lets the cheap one fail-fast on lint/fmt without burning macOS minutes.
+- **No nightly, no msrv matrix.** YAGNI for v0.1. Single `stable` toolchain.
+- **No coverage.** YAGNI for v0.1. Tarpaulin/llvm-cov can come later if needed.
+
+### Problems encountered
+- 117 fmt-drift sites across 20 files when first checked. Resolved by running
+  `cargo fmt --all` and committing as a separate `style:` commit before the
+  CI YAML.
+
+### Next step
+**M3a tech-debt #3 closed.** CI now gates every push to main / `claude/*` and
+every PR. The next milestone is **Milestone 4b** — bias=true in linear,
+dropout (no-op pass-through), softmax (scalar exp). Brainstorming starts in a
+fresh worktree once this CI PR merges to main.
+
+---
+
 ## 2026-05-03 — Milestone 4a closed: arm64 scalar codegen — first machine-executable output
 
 ### What was done
