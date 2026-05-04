@@ -261,11 +261,7 @@ fn run_compile(path: PathBuf, profile: String, out_path: Option<PathBuf>) -> Exi
                 }
                 _ => None,
             };
-            let msg = if e.message.is_empty() {
-                format!("{}", e.kind)
-            } else {
-                e.message.clone()
-            };
+            let msg = e.to_string();
             render_error_with_snippet(&source, &path, e.line, e.col, &msg, first);
             return ExitCode::FAILURE;
         }

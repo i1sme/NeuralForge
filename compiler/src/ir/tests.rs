@@ -470,9 +470,19 @@ fn duplicate_model_name_at_build_time() {
                model M [b=2]:\n    y: Tensor[b, 3]\n    y -> linear[2]\n";
     let ast = crate::parse(src).expect("parse");
     let err = crate::ir::build(&ast).expect_err("must fail");
+    // err.line/col point at the REDEFINITION (line 4 of the source).
+    assert_eq!(err.line, 4, "err.line should point at the redefinition");
     match err.kind {
-        crate::ir::BuildErrorKind::DuplicateModelName { ref name, .. } => {
+        crate::ir::BuildErrorKind::DuplicateModelName {
+            ref name,
+            first_span,
+        } => {
             assert_eq!(name, "M");
+            // first_span points at the ORIGINAL definition (line 1).
+            assert_eq!(
+                first_span.line, 1,
+                "first_span should point at the original"
+            );
         }
         _ => panic!("expected DuplicateModelName, got {:?}", err.kind),
     }

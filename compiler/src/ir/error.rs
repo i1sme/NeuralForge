@@ -8,6 +8,11 @@ pub struct BuildError {
     pub kind: BuildErrorKind,
 }
 
+/// `#[non_exhaustive]` — adding new variants is non-breaking for downstream
+/// `match` consumers. The `nflc` CLI and any future profile crates that
+/// inspect `BuildErrorKind` (e.g. to extract a `first_span` for diagnostics)
+/// must keep a `_ => ...` arm.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum BuildErrorKind {
     UnknownOp {
