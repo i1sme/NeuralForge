@@ -6,13 +6,6 @@ use crate::types::{ParamKind, ParamSlot};
 use crate::{Asm, FnSig, LowerError};
 use compiler::{NodeId, NodeKind, StdOp, Uir, UirModel};
 
-/// True iff the Linear op's attribute list includes `bias=true`.
-fn linear_has_bias(attrs: &[compiler::OpAttr]) -> bool {
-    attrs.iter().any(|a| {
-        a.name == "bias" && matches!(&a.value, compiler::AttrValue::Symbol(s) if s == "true")
-    })
-}
-
 /// Walk the entire UIR, returning the combined asm source + per-model FnSigs.
 pub fn walk_uir(uir: &Uir) -> Result<Asm, LowerError> {
     let mut source = String::new();
@@ -54,6 +47,7 @@ fn walk_model(model_idx: usize, model: &UirModel) -> Result<(String, FnSig), Low
             op: StdOp::Linear,
             operands,
             attrs,
+            ..
         } = &node.kind
         {
             let in_shape = &model.nodes[operands[0]].ty.shape;
@@ -72,7 +66,7 @@ fn walk_model(model_idx: usize, model: &UirModel) -> Result<(String, FnSig), Low
                 size: k * n,
             });
             params_floats += k * n;
-            if linear_has_bias(attrs) {
+            if compiler::ir::linear_has_bias(attrs) {
                 params_layout.push(ParamSlot {
                     kind: ParamKind::LinearBias,
                     origin_node: node_idx,

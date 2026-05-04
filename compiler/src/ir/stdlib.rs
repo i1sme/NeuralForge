@@ -234,3 +234,15 @@ impl std::fmt::Display for StdOp {
         write!(f, "{}", name)
     }
 }
+
+/// True iff the op's attribute list includes `bias=true` (for `Linear`).
+///
+/// Used by the codegen profile to detect bias-add cases and by fusion
+/// passes (M5a) to skip `linear[bias=true]` for Linear→Relu fusion in
+/// the M5a slice.
+pub fn linear_has_bias(attrs: &[crate::ir::types::OpAttr]) -> bool {
+    use crate::ir::types::AttrValue;
+    attrs
+        .iter()
+        .any(|a| a.name == "bias" && matches!(&a.value, AttrValue::Symbol(s) if s == "true"))
+}

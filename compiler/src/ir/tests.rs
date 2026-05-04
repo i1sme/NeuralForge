@@ -258,6 +258,7 @@ fn build_op_linear_produces_correct_node() {
         op,
         operands,
         attrs,
+        ..
     } = &out_nodes[1].kind
     else {
         panic!("expected Op node");

@@ -27,6 +27,7 @@ pub fn parse(source: &str) -> Result<NflSource, ParseError> {
 
 pub mod ir;
 
+pub use ir::types::PostOp;
 pub use ir::{
     AttrValue, BuildError, BuildErrorKind, Node, NodeId, NodeKind, OpAttr, Shape, StdOp, Type, Uir,
     UirModel,
