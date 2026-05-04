@@ -3,6 +3,7 @@
 //! Per-op emitters land here as Tasks 3-5 progress.
 
 use crate::asm;
+use crate::types::{ParamKind, ParamSlot};
 use crate::{Asm, FnSig, LowerError};
 use compiler::{NodeKind, StdOp, Uir, UirModel};
 
@@ -50,21 +51,47 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
     let input_floats: usize = input_shape.0.iter().product::<u64>() as usize;
     let output_floats: usize = output_shape.0.iter().product::<u64>() as usize;
 
-    // Sum weight sizes for all Linear ops in topological (UIR-node) order.
-    let mut weight_floats: usize = 0;
-    for node in &model.nodes {
+    let mut params_layout: Vec<ParamSlot> = Vec::new();
+    let mut params_floats: usize = 0;
+    for (node_idx, node) in model.nodes.iter().enumerate() {
         if let NodeKind::Op {
             op: StdOp::Linear,
             operands,
-            ..
+            attrs,
         } = &node.kind
         {
-            // Input shape of this linear is the operand's shape; output rank-2 col is N.
             let in_shape = &model.nodes[operands[0]].ty.shape;
             let out_shape = &node.ty.shape;
-            let k = in_shape.0[in_shape.0.len() - 1] as usize;
-            let n = out_shape.0[out_shape.0.len() - 1] as usize;
-            weight_floats += k * n;
+            if in_shape.0.len() != 2 || out_shape.0.len() != 2 {
+                return Err(LowerError::ShapeNotConcrete {
+                    span: node.source_span,
+                });
+            }
+            let k = in_shape.0[1] as usize;
+            let n = out_shape.0[1] as usize;
+
+            params_layout.push(ParamSlot {
+                kind: ParamKind::LinearWeight,
+                origin_node: node_idx,
+                offset: params_floats,
+                size: k * n,
+            });
+            params_floats += k * n;
+
+            // Bias-slot pre-allocation: detection runs now, codegen lands in Task 7.
+            let has_bias = attrs.iter().any(|a| {
+                a.name == "bias"
+                    && matches!(&a.value, compiler::AttrValue::Symbol(s) if s == "true")
+            });
+            if has_bias {
+                params_layout.push(ParamSlot {
+                    kind: ParamKind::LinearBias,
+                    origin_node: node_idx,
+                    offset: params_floats,
+                    size: n,
+                });
+                params_floats += n;
+            }
         }
     }
 
@@ -72,8 +99,9 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
         name: format!("nfl_forward_{}", model.name),
         model: model.name.clone(),
         input_floats,
-        weight_floats,
         output_floats,
+        params_floats,
+        params_layout,
     };
 
     let mut body = String::new();

@@ -26,8 +26,6 @@ fn unsupported_op_returns_unsupported() {
 
 #[test]
 fn linear_emits_function_with_correct_symbol_and_ret() {
-    // model M [b=2]: x: Tensor[b, 3]
-    //     x -> linear[2]
     let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n");
     let asm = lower(&uir).expect("lower");
 
@@ -35,17 +33,21 @@ fn linear_emits_function_with_correct_symbol_and_ret() {
     let sig = &asm.functions[0];
     assert_eq!(sig.name, "nfl_forward_M");
     assert_eq!(sig.model, "M");
-    assert_eq!(sig.input_floats, 6); // 2*3
-    assert_eq!(sig.weight_floats, 6); // 3*2
-    assert_eq!(sig.output_floats, 4); // 2*2
+    assert_eq!(sig.input_floats, 6);
+    assert_eq!(sig.params_floats, 6);
+    assert_eq!(sig.output_floats, 4);
+
+    assert_eq!(sig.params_layout.len(), 1);
+    let slot = &sig.params_layout[0];
+    assert_eq!(slot.kind, ParamKind::LinearWeight);
+    assert_eq!(slot.offset, 0);
+    assert_eq!(slot.size, 6);
+    assert_eq!(slot.origin_node, 1);
 
     let s = &asm.source;
-    assert!(
-        s.contains(".globl _nfl_forward_M"),
-        "missing .globl in:\n{s}"
-    );
-    assert!(s.contains("_nfl_forward_M:"), "missing label in:\n{s}");
-    assert!(s.contains("ret"), "missing ret in:\n{s}");
+    assert!(s.contains(".globl _nfl_forward_M"));
+    assert!(s.contains("_nfl_forward_M:"));
+    assert!(s.contains("ret"));
 }
 
 #[test]

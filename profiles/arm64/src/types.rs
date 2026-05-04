@@ -21,12 +21,30 @@ pub struct FnSig {
     pub model: String,
     /// Number of f32 elements in the input buffer.
     pub input_floats: usize,
-    /// Total number of f32 elements across all weight matrices, packed in
-    /// UIR-node order. M4a always single-Linear so this equals the one
-    /// matrix's element count.
-    pub weight_floats: usize,
     /// Number of f32 elements in the output buffer.
     pub output_floats: usize,
+    /// Total number of f32 elements in the packed params buffer.
+    pub params_floats: usize,
+    /// Layout of the packed params buffer, one entry per parameter slot in
+    /// UIR-node order.
+    pub params_layout: Vec<ParamSlot>,
+}
+
+/// One slot within the packed `params` buffer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParamSlot {
+    pub kind: ParamKind,
+    pub origin_node: compiler::NodeId,
+    pub offset: usize,
+    pub size: usize,
+}
+
+/// Type tag for a `ParamSlot`. `#[non_exhaustive]` per spec §5.2.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamKind {
+    LinearWeight,
+    LinearBias,
 }
 
 /// Errors that can occur during lowering.

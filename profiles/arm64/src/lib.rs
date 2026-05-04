@@ -6,7 +6,7 @@ mod asm;
 mod codegen;
 mod types;
 
-pub use types::{Asm, FnSig, LowerError};
+pub use types::{Asm, FnSig, LowerError, ParamKind, ParamSlot};
 
 use compiler::Uir;
 
