@@ -52,12 +52,19 @@ NeuralForge/
 │       ├── Cargo.toml
 │       ├── src/
 │       │   ├── lib.rs      ← `pub fn lower(&Uir) -> Result<Asm, LowerError>`
-│       │   ├── types.rs    ← Asm, FnSig, LowerError
-│       │   ├── asm.rs      ← low-level asm building blocks
-│       │   ├── codegen.rs  ← UIR walker + per-op emitters
-│       │   └── tests.rs    ← unit tests
+│       │   ├── types.rs    ← Asm, FnSig, ParamSlot, ParamKind, LowerError
+│       │   ├── asm.rs      ← prologue/epilogue + emit_sp_* + emit_imm32 helpers
+│       │   ├── buffer.rs   ← BufferLoc, assign_buffers, compute_is_leaf, compute_callee_saved
+│       │   ├── codegen.rs  ← walk_uir/walk_model dispatcher + classify_op
+│       │   ├── ops/
+│       │   │   ├── mod.rs        ← per-op submodule entry + re-exports
+│       │   │   ├── linear.rs     ← emit_linear (matmul ± bias) + materialise_ptr
+│       │   │   ├── relu.rs       ← emit_relu (elementwise copy-clamp)
+│       │   │   ├── softmax.rs    ← emit_softmax (3-pass + bl _expf)
+│       │   │   └── dropout.rs    ← marker (no emitter — aliasing only)
+│       │   └── tests.rs    ← unit tests on asm shape + analyzers
 │       └── tests/
-│           ├── integration.rs    ← end-to-end FFI test (cc + libloading)
+│           ├── integration.rs    ← end-to-end FFI tests for all 5 M3 fixtures + M4a
 │           └── common/mod.rs     ← cc + tempdir helpers
 │
 ├── language/
@@ -148,21 +155,34 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-**Milestone 4a complete.** First architecture profile shipped: `profiles/arm64`
-lowers `input → linear[N] → relu` UIR to native AArch64 assembly callable as
-a C function. End-to-end pipeline `NFL → AST → UIR → asm → .dylib → FFI` works
-on Apple Silicon. New CLI subcommand `nflc compile <file> --profile arm64`.
-3-crate workspace (`compiler` lib, `nflc` bin, `profiles/arm64` lib) with no
-dependency cycles. Production code stays std-only; `libloading` is a test-only
-dev-dep. **118 tests passing** across lexer, parser, IR, profile codegen, and
-the FFI integration test (which numerically matched the pure-Rust reference
-within `1e-5` first try). Both `cargo build --workspace` and
-`cargo clippy --workspace --all-targets -- -D warnings` are clean.
-`docs/profile_guide/arm64.md` documents the profile for users and contributors.
+**Milestone 4 fully complete (4a + 4b).** The `profiles/arm64` codegen
+profile lowers all 5 M3 positive fixtures (`tiny_mlp`, `classifier`,
+`pipeline_styles`, `comments`, `mixed_args`) plus the M4a fixture
+(`m4_linear_relu`) end-to-end to native AArch64 assembly callable as a
+C function on Apple Silicon.
 
-The immediate next step is **Milestone 4b** — add `bias=true` to linear,
-implement `dropout` (inference no-op) and `softmax` (scalar `exp`). After
-M4b all 5 M3 positive fixtures lower end-to-end.
+Op coverage: `linear` (with or without `bias=true`), `relu`, `dropout`
+(no-op pass-through at inference), `softmax` (numerically stable 3-pass
+via libm `expf`). ABI: single packed `params` buffer with typed slot
+metadata (`FnSig.params_layout: Vec<ParamSlot>`). Stack-allocated
+intermediate buffers; conditional non-leaf prologue with d8/d9 + x19-x23
+callee-saved when softmax is present; per-model label namespacing for
+multi-model fixtures.
+
+3-crate workspace (`compiler` lib, `nflc` bin, `profiles/arm64` lib) with
+no dependency cycles. Production code stays std-only; `libloading` is a
+test-only dev-dep. **148 tests passing** across lexer, parser, IR, profile
+codegen, and 6 fixture-driven FFI integration tests + 2 reference-validation
+tests. Both `cargo build --workspace`, `cargo clippy --workspace
+--all-targets -- -D warnings`, and `cargo fmt --all -- --check` are clean.
+CI green on every push. `docs/profile_guide/arm64.md` documents the profile
+for users and contributors.
+
+The immediate next step is **Milestone 5 — kernel fusion pass**: introduce
+optimisation passes that fuse `linear → relu` (and similar elementwise-
+after-matmul patterns) into a single loop, recovering the in-place
+performance the M4a fixture had and setting up the framework for more
+aggressive fusion (matmul→bias→relu→softmax_max etc.).
 
 ---
 

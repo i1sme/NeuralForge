@@ -14,6 +14,138 @@ Format for each entry:
 
 ---
 
+## 2026-05-04 — Milestone 4b closed: arm64 profile covers all 5 M3 fixtures end-to-end
+
+### What was done
+- Redesigned `FnSig` ABI: `weight_floats` removed, replaced by `params_floats`
+  + `params_layout: Vec<ParamSlot>` with typed slots (`LinearWeight`,
+  `LinearBias`). Generated functions take a single packed `params` buffer
+  containing all weights and biases in topological UIR-node order.
+  **This is a deliberate ABI break vs M4a** — see "ABI break callout" below.
+- Added `profiles/arm64/src/buffer.rs`: `assign_buffers` (BufferLoc per node:
+  InputReg / OutputReg / StackOffset / Alias), `compute_is_leaf`,
+  `compute_callee_saved` (RegSet for d8/d9 + x19_x23). `BufferAssignment`
+  carries 16-byte aligned total stack size.
+- New prologue/epilogue helpers in `asm.rs`: `format_function_prologue` /
+  `_epilogue` accept `LeafKind` + `RegSet` + intermediate-bytes. Conditional
+  layers: callee-saved x19-x23 (iff softmax), callee-saved d8/d9 (iff
+  softmax), non-leaf x29/x30 (iff bl present), sub/add sp (iff intermediates
+  > 0). Large-immediate handling via shifted-12 or movz/movk + sub sp, sp,
+  x9. New `emit_imm32` helper for arbitrary 32-bit immediate materialisation.
+- Refactored `codegen.rs` body emission into `profiles/arm64/src/ops/`
+  submodules (mod, linear, relu, softmax, dropout). Per-op emitters take
+  `model_idx` + per-op counter for label namespacing across multi-model
+  fixtures (e.g. pipeline_styles.nfl → labels like `.Lmm_i_<m>_<l>:`).
+- New ops:
+  - `linear[N, bias=true]`: matmul + bias-add inline after k-loop.
+  - `dropout`: zero asm; `BufferLoc::Alias(operand)` propagation.
+  - `softmax`: 3-pass numerically stable (max → exp+sum → normalize),
+    `bl _expf`, callee-saved s8/s9 for max+sum, callee-saved x19-x23 for
+    loop state across `bl _expf` (i, row_base, k, src ptr, dst ptr).
+    `-inf` materialisation via `movz w0, #0x0000; movk w0, #0xFF80, lsl #16;
+    fmov s8, w0` (since `fmov sN, #-inf` is invalid AArch64).
+- Errors for `linear[N, bias=true]`, `dropout`, `softmax`, and duplicate
+  model names are no longer emitted by the lowerer (all paths supported).
+  Duplicate-model-name check moved up to `compiler::ir::build` as
+  `BuildErrorKind::DuplicateModelName { name, first_span }`.
+  `render_error_with_snippet` extended with optional `first_span` →
+  emits trailing `note: previously defined at file:line:col` plain-text
+  (single-snippet for M4b; rustc-style two-snippet upgrade is M4c-or-later).
+- New fixture-driven integration tests via FFI: `tinymlp_full_with_softmax_runs_correctly`,
+  `classifier_runs_correctly`, `pipeline_styles_runs_correctly`,
+  `comments_runs_correctly`, `mixed_args_runs_correctly`. Plus
+  `m4a_no_softmax_still_runs` adapted for the new ABI. All run on
+  aarch64 macOS host; skip cleanly elsewhere.
+- 2 reference-validation tests (`reference_softmax_stable_known_values`,
+  `reference_bias_add_known_values`) pin hand-computed values so an
+  asm-and-reference shared bug can't silently pass integration tests.
+- `docs/profile_guide/arm64.md` extended (~270 lines added) with bias-add,
+  softmax 3-pass, dropout aliasing, intermediate buffer pattern, non-leaf
+  prologue with d8/d9 + x19-x23, per-model label namespacing, libm
+  dependency note. Limitations greatly reduced.
+- `docs/language_reference/uir.md` cross-links to the arm64 guide for both
+  optional-attribute interpretation and dropout-as-noop semantics.
+- `PROJECT_SPEC.md` milestones table M4 row updated to '4a + 4b complete';
+  Architecture Profiles arm64 row expanded.
+
+### ABI break callout
+
+> **M4b deliberately broke the M4a public ABI of `FnSig`.** `weight_floats`
+> field is gone; replaced by `params_floats` + `params_layout: Vec<ParamSlot>`.
+> The generated `nfl_forward_*` C function signature changes the second
+> parameter from `const float* weights` to `const float* params` (semantically
+> the same buffer for M4a-compatible models — single LinearWeight slot — but
+> renamed to reflect the more general layout).
+>
+> **Why deliberately:** the M4a name `weight_floats` would have been a lie
+> the moment any M4b-supported model used `bias=true` (`params` then
+> contains a LinearBias slot too). Renaming + restructuring at M4b is
+> correct; retrofit-compat shims would have been worse.
+>
+> No external consumers exist (project is internal v0.1). Future readers of
+> git history: this break was intentional, see
+> `docs/superpowers/specs/2026-05-04-m4b-arm64-coverage-design.md` §5.4.
+
+### Critical bug caught + fixed during code review
+
+Initial Task 8 (softmax) implementation kept loop state in caller-saved
+registers (x3, x4, x5, x6, x11, x12) across `bl _expf`. Per AAPCS64, x0-x18
+are caller-saved; `_expf` is allowed to clobber them. Apple libm `expf`
+happens to preserve them today, but that's coincidence not contract — non-
+Apple targets or libm updates would silently break.
+
+Fix: moved loop state into callee-saved x19-x23 (i, row_base, k, src, dst);
+x6 (element offset) is recomputed after each call. RegSet gained `x19_x23`
+bit; prologue saves `x19, x20, x21, x22, x23` (two stp pairs + one str)
+when softmax is present.
+
+This is the kind of bug that could pass all integration tests on Apple
+silicon but blow up on first Linux-arm64 CI run. Defensive fix landed in
+the same Task 8 cycle as the spec/quality reviews.
+
+### Decisions made
+None new. All design decisions captured in
+`docs/superpowers/specs/2026-05-04-m4b-arm64-coverage-design.md` during
+brainstorming. This session executed the plan in
+`docs/superpowers/plans/2026-05-04-m4b-arm64-coverage.md` (12 tasks; ~21
+commits including review-polish commits).
+
+### Problems encountered
+- Task 8 critical AAPCS64 violation (caller-saved registers across
+  `bl _expf`) — caught by code review, fixed before integration tests ran.
+- Task 9 implementer made signature changes to emit_linear/emit_relu (added
+  `model_idx` for multi-model label namespacing) but session was
+  interrupted before they could update softmax.rs and codegen.rs's
+  dispatch arms. Resumed inline: completed the model_idx threading
+  through softmax.rs + walk_uir/walk_model + the test assertions on
+  label format.
+
+### Known tech debt (carried forward)
+1. Single-snippet rendering for `DuplicateModelName` (plain-text note for
+   first_span). Two-snippet rustc-style upgrade is M4c-or-later.
+2. Integration test tempdir not cleaned up (carried from M4a).
+3. Performance: scalar code, mul-based indexing, no fusion, no SIMD. M5+.
+4. `LowerError::UnsupportedOp` kept defensively (`#[allow(dead_code)]`);
+   exercised by `unsupported_op_display_and_span_round_trip` to prevent
+   Display/span impl rot.
+5. Bare-metal arm64 target needs a separate profile (Taylor `exp` instead
+   of libm). M7+.
+
+### Next step
+**Milestone 4 fully complete (4a + 4b).** All 5 M3 positive fixtures lower
+end-to-end through the arm64 profile to runnable native code. 148 tests
+pass; build/clippy/fmt/CI all clean.
+
+The next milestone is **Milestone 5 — kernel fusion pass**: introduce an
+optimisation pass on the UIR (or just-before-codegen) that fuses
+`linear → relu` (and similar elementwise-after-matmul patterns) into a
+single loop with the relu inlined into the matmul store. Recovers M4a's
+in-place relu performance and sets up the framework for more aggressive
+fusion (matmul→bias→relu→softmax_max etc.). Brainstorming for M5 runs in a
+fresh worktree once main is updated post-M4b-merge.
+
+---
+
 ## 2026-05-03 — CI workflow added; closes M3a tech-debt #3
 
 ### What was done
