@@ -1,4 +1,8 @@
 //! CLI integration tests for `nflc compile`.
+//!
+//! Cargo runs integration-test binaries with cwd at the package root
+//! (`nflc/`), so paths to workspace-root fixtures are written as
+//! `"../tests/fixtures/<name>.nfl"`.
 
 use std::process::Command;
 
@@ -89,9 +93,13 @@ fn compile_unknown_flag_rejected() {
 
     assert!(!output.status.success(), "expected failure exit");
 
+    // Strict substring: must mention BOTH the diagnostic kind and the
+    // offending flag. A loose `|| contains("error:")` would pass for any
+    // error path (parse error, missing file, unknown profile…), defeating
+    // the test's purpose of pinning unknown-flag detection specifically.
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("unknown flag: --frobnicate") || stderr.contains("error:"),
-        "stderr missing unknown-flag error:\n{stderr}"
+        stderr.contains("unknown flag: --frobnicate"),
+        "stderr missing unknown-flag error for '--frobnicate':\n{stderr}"
     );
 }
