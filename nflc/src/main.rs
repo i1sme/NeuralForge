@@ -74,6 +74,15 @@ fn parse_compile_args(args: &[String]) -> Result<CompileArgs, String> {
         .next()
         .ok_or_else(|| "compile: missing <file.nfl>".to_string())?
         .clone();
+    // The first positional must be a file path. If the user wrote a flag
+    // here (e.g. `nflc compile --no-fuse --profile arm64`), refuse early
+    // with a clear message instead of letting std::fs::read_to_string
+    // produce a confusing "cannot read --no-fuse" later.
+    if path.starts_with('-') {
+        return Err(format!(
+            "compile: expected <file.nfl> as first argument, got flag '{path}'"
+        ));
+    }
 
     let mut profile: Option<String> = None;
     let mut output: Option<PathBuf> = None;
@@ -331,10 +340,15 @@ fn run_compile(args: CompileArgs) -> ExitCode {
         uir
     } else {
         let pipeline = compiler::passes::default_pipeline();
-        let names: Vec<&str> = pipeline.iter().map(|p| p.name()).collect();
-        eprintln!("note: applied passes: {}", names.join(", "));
         match compiler::passes::run_pipeline(&uir, &pipeline) {
-            Ok(u) => u,
+            Ok(u) => {
+                // Emit the "applied" note only after the pipeline succeeds
+                // so an error path doesn't show a misleading success line
+                // ("applied passes: X" followed by "error: pass X failed").
+                let names: Vec<&str> = pipeline.iter().map(|p| p.name()).collect();
+                eprintln!("note: applied passes: {}", names.join(", "));
+                u
+            }
             Err(e) => {
                 let span = e.span();
                 render_error_with_snippet(
