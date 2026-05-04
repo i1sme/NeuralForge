@@ -2,10 +2,10 @@
 //! the parsed AST. Consumed by architecture profiles (M4+) and optimisation
 //! passes (M5+).
 
-pub mod types;
-pub mod stdlib;
-pub mod error;
 mod build;
+pub mod error;
+pub mod stdlib;
+pub mod types;
 
 #[cfg(test)]
 mod tests;

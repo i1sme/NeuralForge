@@ -27,7 +27,9 @@ pub struct Node {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeKind {
-    Input { name: String },
+    Input {
+        name: String,
+    },
     Op {
         op: super::stdlib::StdOp,
         operands: Vec<NodeId>,
@@ -94,13 +96,21 @@ impl std::fmt::Display for Node {
             NodeKind::Input { name } => {
                 write!(f, "input {:?}        :: {}", name, self.ty.shape)
             }
-            NodeKind::Op { op, operands, attrs } => {
+            NodeKind::Op {
+                op,
+                operands,
+                attrs,
+            } => {
                 let ops_s = operands
                     .iter()
                     .map(|o| format!("n{}", o))
                     .collect::<Vec<_>>()
                     .join(", ");
-                write!(f, "{}           :: {}    operands=[{}]", op, self.ty.shape, ops_s)?;
+                write!(
+                    f,
+                    "{}           :: {}    operands=[{}]",
+                    op, self.ty.shape, ops_s
+                )?;
                 if !attrs.is_empty() {
                     let a = attrs
                         .iter()

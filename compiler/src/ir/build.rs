@@ -122,7 +122,9 @@ fn check_arg_type(slot: &ArgSlot, value: &ArgValue, op_span: Span) -> Result<(),
     if ok {
         Ok(())
     } else {
-        Err(BuildError::arg_type_mismatch(slot.name, expected, actual, op_span))
+        Err(BuildError::arg_type_mismatch(
+            slot.name, expected, actual, op_span,
+        ))
     }
 }
 
@@ -237,8 +239,13 @@ pub(crate) fn build_model(ast_model: &ModelDef) -> Result<UirModel, BuildError> 
                 let shape = resolve_type(&v.ty, &params)?;
                 let id = nodes.len();
                 nodes.push(Node {
-                    kind: NodeKind::Input { name: v.name.clone() },
-                    ty: Type { name: v.ty.name.clone(), shape },
+                    kind: NodeKind::Input {
+                        name: v.name.clone(),
+                    },
+                    ty: Type {
+                        name: v.ty.name.clone(),
+                        shape,
+                    },
                     source_span: v.span,
                 });
                 env.insert(v.name.clone(), id);

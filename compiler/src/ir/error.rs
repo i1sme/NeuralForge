@@ -10,16 +10,41 @@ pub struct BuildError {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BuildErrorKind {
-    UnknownOp { name: String },
-    UnknownDim { name: String },
-    UnknownVariable { name: String },
-    ArgCountMismatch { expected: usize, actual: usize },
-    ArgTypeMismatch { slot: String, expected: String, actual: String },
-    MissingRequiredArg { slot: String },
-    UnexpectedNamedArg { name: String },
-    ShapeMismatch { detail: String },
-    ModelHasNoPipeline { name: String },
-    InvalidAttrValue { op: String, attr: String, reason: String },
+    UnknownOp {
+        name: String,
+    },
+    UnknownDim {
+        name: String,
+    },
+    UnknownVariable {
+        name: String,
+    },
+    ArgCountMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    ArgTypeMismatch {
+        slot: String,
+        expected: String,
+        actual: String,
+    },
+    MissingRequiredArg {
+        slot: String,
+    },
+    UnexpectedNamedArg {
+        name: String,
+    },
+    ShapeMismatch {
+        detail: String,
+    },
+    ModelHasNoPipeline {
+        name: String,
+    },
+    InvalidAttrValue {
+        op: String,
+        attr: String,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for BuildError {
@@ -36,16 +61,23 @@ impl BuildError {
             message: format!("unknown operation: '{}'", name),
             line: span.line,
             col: span.col,
-            kind: BuildErrorKind::UnknownOp { name: name.to_string() },
+            kind: BuildErrorKind::UnknownOp {
+                name: name.to_string(),
+            },
         }
     }
 
     pub fn unknown_dim(name: &str, span: crate::ast::Span) -> Self {
         Self {
-            message: format!("unknown symbolic dimension: '{}' (not declared in model_params)", name),
+            message: format!(
+                "unknown symbolic dimension: '{}' (not declared in model_params)",
+                name
+            ),
             line: span.line,
             col: span.col,
-            kind: BuildErrorKind::UnknownDim { name: name.to_string() },
+            kind: BuildErrorKind::UnknownDim {
+                name: name.to_string(),
+            },
         }
     }
 
@@ -54,20 +86,30 @@ impl BuildError {
             message: format!("unknown variable: '{}'", name),
             line: span.line,
             col: span.col,
-            kind: BuildErrorKind::UnknownVariable { name: name.to_string() },
+            kind: BuildErrorKind::UnknownVariable {
+                name: name.to_string(),
+            },
         }
     }
 
     pub fn arg_count_mismatch(expected: usize, actual: usize, span: crate::ast::Span) -> Self {
         Self {
-            message: format!("operation expects {} positional argument(s), got {}", expected, actual),
+            message: format!(
+                "operation expects {} positional argument(s), got {}",
+                expected, actual
+            ),
             line: span.line,
             col: span.col,
             kind: BuildErrorKind::ArgCountMismatch { expected, actual },
         }
     }
 
-    pub fn arg_type_mismatch(slot: &str, expected: &str, actual: &str, span: crate::ast::Span) -> Self {
+    pub fn arg_type_mismatch(
+        slot: &str,
+        expected: &str,
+        actual: &str,
+        span: crate::ast::Span,
+    ) -> Self {
         Self {
             message: format!("argument '{}' expects {}, got {}", slot, expected, actual),
             line: span.line,
@@ -85,7 +127,9 @@ impl BuildError {
             message: format!("missing required argument: '{}'", slot),
             line: span.line,
             col: span.col,
-            kind: BuildErrorKind::MissingRequiredArg { slot: slot.to_string() },
+            kind: BuildErrorKind::MissingRequiredArg {
+                slot: slot.to_string(),
+            },
         }
     }
 
@@ -94,7 +138,9 @@ impl BuildError {
             message: format!("operation does not accept named argument: '{}'", name),
             line: span.line,
             col: span.col,
-            kind: BuildErrorKind::UnexpectedNamedArg { name: name.to_string() },
+            kind: BuildErrorKind::UnexpectedNamedArg {
+                name: name.to_string(),
+            },
         }
     }
 
@@ -109,10 +155,15 @@ impl BuildError {
 
     pub fn model_has_no_pipeline(name: &str, span: crate::ast::Span) -> Self {
         Self {
-            message: format!("model '{}' has no pipeline_stmt — output is undefined", name),
+            message: format!(
+                "model '{}' has no pipeline_stmt — output is undefined",
+                name
+            ),
             line: span.line,
             col: span.col,
-            kind: BuildErrorKind::ModelHasNoPipeline { name: name.to_string() },
+            kind: BuildErrorKind::ModelHasNoPipeline {
+                name: name.to_string(),
+            },
         }
     }
 

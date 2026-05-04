@@ -23,7 +23,9 @@ fn parse_arg_value_integer() {
 fn parse_arg_value_float() {
     let mut p = parser_of("0.2");
     let v = parse_arg_value(&mut p).unwrap();
-    let ArgValue::Float(f) = v else { panic!("expected Float") };
+    let ArgValue::Float(f) = v else {
+        panic!("expected Float")
+    };
     assert!((f - 0.2).abs() < 1e-12);
 }
 
@@ -56,7 +58,11 @@ fn parse_operation_named_only() {
     let mut p = parser_of("dropout[rate=0.2]");
     let op = parse_operation(&mut p).unwrap();
     assert_eq!(op.args.len(), 1);
-    let OpArg::Named { name, value: ArgValue::Float(f) } = &op.args[0] else {
+    let OpArg::Named {
+        name,
+        value: ArgValue::Float(f),
+    } = &op.args[0]
+    else {
         panic!("expected named float arg");
     };
     assert_eq!(name, "rate");
@@ -69,7 +75,9 @@ fn parse_operation_mixed_positional_then_named() {
     let op = parse_operation(&mut p).unwrap();
     assert_eq!(op.args.len(), 2);
     assert_eq!(op.args[0], OpArg::Positional(ArgValue::Integer(16)));
-    let OpArg::Named { name, value } = &op.args[1] else { panic!() };
+    let OpArg::Named { name, value } = &op.args[1] else {
+        panic!()
+    };
     assert_eq!(name, "bias");
     assert_eq!(*value, ArgValue::Symbol("true".into()));
 }
@@ -101,13 +109,15 @@ fn parse_pipeline_three_steps() {
     let ps = parse_pipeline_stmt(&mut p).unwrap();
     assert_eq!(ps.source, "x");
     assert_eq!(ps.steps.len(), 3);
-    assert_eq!(ps.steps.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(),
-               vec!["linear", "relu", "softmax"]);
+    assert_eq!(
+        ps.steps.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(),
+        vec!["linear", "relu", "softmax"]
+    );
 }
 
 #[test]
 fn parse_pipeline_missing_arrow_after_source_is_error() {
-    let mut p = parser_of("x linear[2]");        // missing "->"
+    let mut p = parser_of("x linear[2]"); // missing "->"
     let err = parse_pipeline_stmt(&mut p).unwrap_err();
     assert!(err.message.contains("'->'"), "got: {}", err.message);
 }
@@ -124,16 +134,21 @@ fn parse_type_expr_integer_dims() {
 fn parse_type_expr_symbolic_dims() {
     let mut p = parser_of("Tensor[batch, input]");
     let t = parse_type_expr(&mut p).unwrap();
-    assert_eq!(t.dims, vec![Dim::Symbol("batch".into()), Dim::Symbol("input".into())]);
+    assert_eq!(
+        t.dims,
+        vec![Dim::Symbol("batch".into()), Dim::Symbol("input".into())]
+    );
 }
 
 #[test]
 fn parse_type_expr_empty_brackets_is_error() {
     let mut p = parser_of("Tensor[]");
     let err = parse_type_expr(&mut p).unwrap_err();
-    assert!(err.message.to_lowercase().contains("dim")
-            || err.message.to_lowercase().contains("empty"),
-            "got: {}", err.message);
+    assert!(
+        err.message.to_lowercase().contains("dim") || err.message.to_lowercase().contains("empty"),
+        "got: {}",
+        err.message
+    );
 }
 
 #[test]
@@ -170,7 +185,9 @@ fn parse_model_params_one() {
 
 #[test]
 fn parse_model_def_minimal() {
-    let mut p = parser_of("model TinyMLP [batch=8]:\n    x: Tensor[batch, 4]\n    x -> linear[2] -> softmax\n");
+    let mut p = parser_of(
+        "model TinyMLP [batch=8]:\n    x: Tensor[batch, 4]\n    x -> linear[2] -> softmax\n",
+    );
     let m = parse_model_def(&mut p).unwrap();
     assert_eq!(m.name, "TinyMLP");
     assert_eq!(m.params.len(), 1);
@@ -185,7 +202,9 @@ fn parse_model_def_three_params() {
     let mut p = parser_of(src);
     let m = parse_model_def(&mut p).unwrap();
     assert_eq!(m.params.len(), 3);
-    let ModelStmt::Pipeline(ps) = &m.body[1] else { panic!() };
+    let ModelStmt::Pipeline(ps) = &m.body[1] else {
+        panic!()
+    };
     assert_eq!(ps.steps.len(), 2);
 }
 
@@ -193,8 +212,11 @@ fn parse_model_def_three_params() {
 fn parse_model_def_missing_colon_is_error() {
     let mut p = parser_of("model X [batch=8]\n    x: Tensor[batch, 4]\n    x -> linear[2]\n");
     let err = parse_model_def(&mut p).unwrap_err();
-    assert!(err.message.contains("':'") || err.message.to_lowercase().contains("colon"),
-            "got: {}", err.message);
+    assert!(
+        err.message.contains("':'") || err.message.to_lowercase().contains("colon"),
+        "got: {}",
+        err.message
+    );
 }
 
 #[test]

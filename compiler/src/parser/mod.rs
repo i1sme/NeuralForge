@@ -64,7 +64,11 @@ impl<'t> Parser<'t> {
 
     /// If the current token's kind matches `expected`, consume it; otherwise
     /// return a ParseError naming what was expected.
-    pub fn consume(&mut self, expected: TokenKind, label: &'static str) -> Result<&Token, ParseError> {
+    pub fn consume(
+        &mut self,
+        expected: TokenKind,
+        label: &'static str,
+    ) -> Result<&Token, ParseError> {
         if self.peek_kind() == &expected {
             Ok(self.advance())
         } else {
@@ -314,7 +318,8 @@ pub(crate) fn parse_type_expr(p: &mut Parser) -> Result<TypeExpr, ParseError> {
     p.consume(TokenKind::LBracket, "[")?;
     if matches!(p.peek_kind(), TokenKind::RBracket) {
         return Err(ParseError {
-            message: "Tensor type requires at least one dimension; empty dim_list is invalid".into(),
+            message: "Tensor type requires at least one dimension; empty dim_list is invalid"
+                .into(),
             line: p.peek().line,
             col: p.peek().col,
             expected: vec!["integer", "identifier"],

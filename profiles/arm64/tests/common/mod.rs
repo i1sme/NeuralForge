@@ -18,14 +18,12 @@ pub fn cc_available() -> bool {
 pub fn compile_to_dylib(asm_source: &str, name: &str) -> PathBuf {
     let pid = std::process::id();
     let dir = std::env::temp_dir().join(format!("nflc-test-{pid}"));
-    std::fs::create_dir_all(&dir).unwrap_or_else(|e| {
-        panic!("cannot create test tempdir {}: {e}", dir.display())
-    });
+    std::fs::create_dir_all(&dir)
+        .unwrap_or_else(|e| panic!("cannot create test tempdir {}: {e}", dir.display()));
 
     let s_path = dir.join(format!("{name}.s"));
-    std::fs::write(&s_path, asm_source).unwrap_or_else(|e| {
-        panic!("cannot write {}: {e}", s_path.display())
-    });
+    std::fs::write(&s_path, asm_source)
+        .unwrap_or_else(|e| panic!("cannot write {}: {e}", s_path.display()));
 
     let dylib_path = dir.join(format!("lib{name}.dylib"));
     let status = std::process::Command::new("cc")
