@@ -132,6 +132,11 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
                         .find(|s| s.kind == ParamKind::LinearWeight && s.origin_node == node_idx)
                         .expect("LinearWeight slot must exist for this Linear")
                         .offset;
+                    let bias_offset = sig
+                        .params_layout
+                        .iter()
+                        .find(|s| s.kind == ParamKind::LinearBias && s.origin_node == node_idx)
+                        .map(|s| s.offset);
                     body.push_str(&crate::ops::emit_linear(
                         b,
                         k,
@@ -140,6 +145,7 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
                         src_loc,
                         dst_loc,
                         weight_offset,
+                        bias_offset,
                     ));
                     linear_idx += 1;
                 }
@@ -184,20 +190,14 @@ fn resolve_loc(locs: &[crate::buffer::BufferLoc], id: NodeId) -> crate::buffer::
 }
 
 /// Validate that an op is supported in M4b; return error otherwise.
-/// Linear with `bias=true` rejected (Task 7 will accept it); UnsupportedOp for softmax (Task 8).
+/// UnsupportedOp for softmax (Task 8).
 fn classify_op(
     op: StdOp,
-    attrs: &[compiler::OpAttr],
+    _attrs: &[compiler::OpAttr],
     span: compiler::ast::Span,
 ) -> Result<(), LowerError> {
     match op {
-        StdOp::Linear => {
-            if linear_has_bias(attrs) {
-                Err(LowerError::LinearWithBias { span })
-            } else {
-                Ok(())
-            }
-        }
+        StdOp::Linear => Ok(()),
         StdOp::Relu => Ok(()),
         StdOp::Dropout => Ok(()),
         StdOp::Softmax => Err(LowerError::UnsupportedOp {

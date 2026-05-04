@@ -2,6 +2,7 @@
 
 use crate::buffer::BufferLoc;
 
+#[allow(clippy::too_many_arguments)]
 pub fn emit_linear(
     b: u64,
     k: u64,
@@ -10,11 +11,13 @@ pub fn emit_linear(
     src_loc: BufferLoc,
     dst_loc: BufferLoc,
     weight_offset: usize,
+    bias_offset: Option<usize>,
 ) -> String {
     let lid = linear_idx;
     let mut s = String::new();
     s.push_str(&format!(
-        "    ; matmul: input [{b},{k}] x weights [{k},{n}] -> output [{b},{n}]\n"
+        "    ; matmul: input [{b},{k}] x weights [{k},{n}] -> output [{b},{n}]{}\n",
+        if bias_offset.is_some() { " + bias" } else { "" }
     ));
 
     s.push_str(&materialise_ptr("x11", src_loc));
@@ -24,6 +27,14 @@ pub fn emit_linear(
     } else {
         s.push_str(&format!("    mov     x9, #{}\n", weight_offset));
         s.push_str("    add     x13, x1, x9, lsl #2\n");
+    }
+    if let Some(boff) = bias_offset {
+        if boff == 0 {
+            s.push_str("    mov     x14, x1\n");
+        } else {
+            s.push_str(&format!("    mov     x9, #{}\n", boff));
+            s.push_str("    add     x14, x1, x9, lsl #2\n");
+        }
     }
 
     s.push_str("    mov     x3, #0\n");
@@ -57,6 +68,12 @@ pub fn emit_linear(
     s.push_str("    add     x5, x5, #1\n");
     s.push_str(&format!("    b       .Lmm_k_{lid}\n"));
     s.push_str(&format!(".Lmm_k_end_{lid}:\n"));
+
+    // Bias-add (if present) before the store: load bias[j], fadd into s0.
+    if bias_offset.is_some() {
+        s.push_str("    ldr     s5, [x14, x4, lsl #2]\n");
+        s.push_str("    fadd    s0, s0, s5\n");
+    }
 
     s.push_str(&format!("    mov     x8, #{n}\n"));
     s.push_str("    mul     x6, x3, x8\n");

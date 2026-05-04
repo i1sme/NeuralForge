@@ -90,13 +90,6 @@ fn relu_alone_after_matmul_does_not_break_existing_test() {
 }
 
 #[test]
-fn linear_with_bias_returns_lower_error() {
-    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2, bias=true]\n");
-    let err = lower(&uir).unwrap_err();
-    assert!(matches!(err, LowerError::LinearWithBias { .. }));
-}
-
-#[test]
 fn dropout_emits_no_code() {
     // input → linear → dropout → linear (terminal-linear). Dropout has no
     // dispatch arm that emits asm; its BufferLoc::Alias(operand) propagates.
@@ -248,6 +241,33 @@ fn intermediate_buffers_allocated_on_stack() {
     let s = &asm.source;
     assert!(s.contains("sub     sp, sp,"), "expected sub sp in:\n{s}");
     assert!(s.contains("add     sp, sp,"), "expected add sp in:\n{s}");
+}
+
+#[test]
+fn linear_with_bias_emits_bias_add() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2, bias=true]\n");
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+    // After the k-loop end, before the store, expect bias load + fadd.
+    assert!(
+        s.contains("fadd    s0, s0,"),
+        "expected fadd s0, s0, ... in:\n{s}"
+    );
+}
+
+#[test]
+fn linear_bias_packed_layout() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2, bias=true]\n");
+    let asm = lower(&uir).expect("lower");
+    let sig = &asm.functions[0];
+    // Two slots: LinearWeight (size 6) then LinearBias (size 2) immediately after.
+    assert_eq!(sig.params_layout.len(), 2);
+    assert_eq!(sig.params_layout[0].kind, ParamKind::LinearWeight);
+    assert_eq!(sig.params_layout[0].size, 6);
+    assert_eq!(sig.params_layout[1].kind, ParamKind::LinearBias);
+    assert_eq!(sig.params_layout[1].size, 2);
+    assert_eq!(sig.params_layout[1].offset, 6);
+    assert_eq!(sig.params_floats, 8);
 }
 
 // ── emit_sp_sub / emit_sp_add branch coverage ────────────────────────────────

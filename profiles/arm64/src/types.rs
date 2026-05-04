@@ -50,16 +50,14 @@ pub enum ParamKind {
 /// Errors that can occur during lowering.
 ///
 /// `#[non_exhaustive]` — variants representing deferred features
-/// (`UnsupportedOp`, `LinearWithBias`) become unreachable as M4b/c add
-/// coverage and may be removed at that point.
+/// (`UnsupportedOp`) become unreachable as M4b/c add coverage and may be
+/// removed at that point.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum LowerError {
     /// Op is not supported in the current M4 slice.
     /// `op` is the lowercase token name (e.g. "softmax", "dropout").
     UnsupportedOp { op: String, span: Span },
-    /// `linear[N, bias=true]` is not yet implemented (M4b).
-    LinearWithBias { span: Span },
     /// Defensive: UIR contained a shape that wasn't fully resolved.
     /// Should be unreachable if the IR builder did its job.
     ShapeNotConcrete { span: Span },
@@ -73,9 +71,6 @@ impl std::fmt::Display for LowerError {
                 "operation '{}' is not supported by the arm64 profile in M4a",
                 op
             ),
-            LowerError::LinearWithBias { .. } => {
-                write!(f, "linear[..., bias=true] is not yet implemented (M4b)")
-            }
             LowerError::ShapeNotConcrete { .. } => write!(
                 f,
                 "internal: UIR shape was not fully resolved before lowering"
@@ -89,7 +84,6 @@ impl LowerError {
     pub fn span(&self) -> Span {
         match self {
             LowerError::UnsupportedOp { span, .. } => *span,
-            LowerError::LinearWithBias { span } => *span,
             LowerError::ShapeNotConcrete { span } => *span,
         }
     }
