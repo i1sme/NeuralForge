@@ -217,6 +217,20 @@ pub fn build(ast: &NflSource) -> Result<Uir, BuildError> {
     for ast_model in &ast.models {
         models.push(build_model(ast_model)?);
     }
+
+    // Reject duplicate model names — would produce conflicting symbols at codegen time.
+    let mut seen: HashMap<String, crate::ast::Span> = HashMap::new();
+    for model in &models {
+        if let Some(prev_span) = seen.get(&model.name) {
+            return Err(BuildError::duplicate_model_name(
+                model.name.clone(),
+                *prev_span,
+                model.source_span,
+            ));
+        }
+        seen.insert(model.name.clone(), model.source_span);
+    }
+
     Ok(Uir { models })
 }
 

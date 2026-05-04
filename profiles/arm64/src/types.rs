@@ -63,9 +63,6 @@ pub enum LowerError {
     /// Defensive: UIR contained a shape that wasn't fully resolved.
     /// Should be unreachable if the IR builder did its job.
     ShapeNotConcrete { span: Span },
-    /// Two `UirModel`s share the same `name` — would emit duplicate
-    /// `nfl_forward_<name>` symbols. M4b moves this check into `ir::build`.
-    DuplicateModelName { name: String, span: Span },
 }
 
 impl std::fmt::Display for LowerError {
@@ -83,11 +80,6 @@ impl std::fmt::Display for LowerError {
                 f,
                 "internal: UIR shape was not fully resolved before lowering"
             ),
-            LowerError::DuplicateModelName { name, .. } => write!(
-                f,
-                "duplicate model name '{}': would emit conflicting symbols",
-                name
-            ),
         }
     }
 }
@@ -99,7 +91,6 @@ impl LowerError {
             LowerError::UnsupportedOp { span, .. } => *span,
             LowerError::LinearWithBias { span } => *span,
             LowerError::ShapeNotConcrete { span } => *span,
-            LowerError::DuplicateModelName { span, .. } => *span,
         }
     }
 }

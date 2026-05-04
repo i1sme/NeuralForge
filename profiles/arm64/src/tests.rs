@@ -112,16 +112,6 @@ fn softmax_returns_unsupported_op() {
     assert!(matches!(err, LowerError::UnsupportedOp { ref op, .. } if op == "softmax"));
 }
 
-#[test]
-fn duplicate_model_name_returns_error() {
-    // Two models named "M" in one source.
-    let src = "model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n\
-               model M [b=2]:\n    y: Tensor[b, 3]\n    y -> linear[2]\n";
-    let uir = build_uir(src);
-    let err = lower(&uir).unwrap_err();
-    assert!(matches!(err, LowerError::DuplicateModelName { ref name, .. } if name == "M"));
-}
-
 // ── buffer analyzer tests ────────────────────────────────────────────────────
 
 use super::buffer::{assign_buffers, compute_callee_saved, compute_is_leaf, BufferLoc};

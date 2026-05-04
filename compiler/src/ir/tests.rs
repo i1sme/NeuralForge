@@ -463,3 +463,17 @@ fn stdop_displays_lowercase_name() {
     assert_eq!(format!("{}", StdOp::Dropout), "dropout");
     assert_eq!(format!("{}", StdOp::Softmax), "softmax");
 }
+
+#[test]
+fn duplicate_model_name_at_build_time() {
+    let src = "model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n\
+               model M [b=2]:\n    y: Tensor[b, 3]\n    y -> linear[2]\n";
+    let ast = crate::parse(src).expect("parse");
+    let err = crate::ir::build(&ast).expect_err("must fail");
+    match err.kind {
+        crate::ir::BuildErrorKind::DuplicateModelName { ref name, .. } => {
+            assert_eq!(name, "M");
+        }
+        _ => panic!("expected DuplicateModelName, got {:?}", err.kind),
+    }
+}
