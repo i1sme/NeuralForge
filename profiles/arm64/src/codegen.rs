@@ -184,7 +184,10 @@ fn resolve_loc(locs: &[crate::buffer::BufferLoc], id: NodeId) -> crate::buffer::
     let mut cur = id;
     loop {
         match locs[cur] {
-            BufferLoc::Alias(next) => cur = next,
+            BufferLoc::Alias(next) => {
+                debug_assert!(next < cur, "alias must point backward (cycle defense)");
+                cur = next;
+            }
             other => return other,
         }
     }
@@ -298,10 +301,17 @@ fn materialise_ptr(reg: &str, loc: crate::buffer::BufferLoc) -> String {
         BufferLoc::InputReg => format!("    mov     {}, x0\n", reg),
         BufferLoc::OutputReg => format!("    mov     {}, x2\n", reg),
         BufferLoc::StackOffset(off) => {
+            assert!(
+                off <= u32::MAX as usize,
+                "stack offset > 4 GiB unsupported in M4b (got {} bytes)",
+                off
+            );
             if off == 0 {
                 format!("    mov     {}, sp\n", reg)
             } else if off <= 4095 {
                 format!("    add     {}, sp, #{}\n", reg, off)
+            } else if off <= 16_773_120 && off.is_multiple_of(4096) {
+                format!("    add     {}, sp, #{}, lsl #12\n", reg, off / 4096)
             } else {
                 let lo = (off & 0xFFFF) as u16;
                 let hi = ((off >> 16) & 0xFFFF) as u16;

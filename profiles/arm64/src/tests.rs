@@ -248,3 +248,49 @@ fn intermediate_buffers_allocated_on_stack() {
     assert!(s.contains("sub     sp, sp,"), "expected sub sp in:\n{s}");
     assert!(s.contains("add     sp, sp,"), "expected add sp in:\n{s}");
 }
+
+// ── emit_sp_sub / emit_sp_add branch coverage ────────────────────────────────
+
+use super::asm::{emit_sp_add, emit_sp_sub};
+
+#[test]
+fn emit_sp_sub_small_immediate() {
+    let s = emit_sp_sub(80);
+    assert_eq!(s, "    sub     sp, sp, #80\n");
+}
+
+#[test]
+fn emit_sp_sub_shifted_12_for_4096_multiple() {
+    let s = emit_sp_sub(8192);
+    // 8192 = 2*4096 → "sub sp, sp, #2, lsl #12"
+    assert_eq!(s, "    sub     sp, sp, #2, lsl #12\n");
+}
+
+#[test]
+fn emit_sp_sub_movz_movk_for_general_case() {
+    // 99584 = 0x18500 → lo=0x8500, hi=0x0001
+    let s = emit_sp_sub(99584);
+    assert!(s.contains("movz    w9, #0x8500"));
+    assert!(s.contains("movk    w9, #0x0001, lsl #16"));
+    assert!(s.contains("sub     sp, sp, x9"));
+}
+
+#[test]
+fn emit_sp_add_small_immediate() {
+    let s = emit_sp_add(80);
+    assert_eq!(s, "    add     sp, sp, #80\n");
+}
+
+#[test]
+fn emit_sp_add_shifted_12_for_4096_multiple() {
+    let s = emit_sp_add(8192);
+    assert_eq!(s, "    add     sp, sp, #2, lsl #12\n");
+}
+
+#[test]
+fn emit_sp_add_movz_movk_for_general_case() {
+    let s = emit_sp_add(99584);
+    assert!(s.contains("movz    w9, #0x8500"));
+    assert!(s.contains("movk    w9, #0x0001, lsl #16"));
+    assert!(s.contains("add     sp, sp, x9"));
+}

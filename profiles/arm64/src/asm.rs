@@ -63,6 +63,11 @@ pub fn format_function_epilogue(leaf: LeafKind, regs: RegSet, intermediate_bytes
 /// `sub` immediate is 12-bit (0..4095) optionally shifted by 12 (0..16,773,120
 /// in steps of 4096). For sizes that don't fit, materialise N into x9 first.
 pub fn emit_sp_sub(n_bytes: usize) -> String {
+    assert!(
+        n_bytes <= u32::MAX as usize,
+        "frame > 4 GiB unsupported in M4b (got {} bytes)",
+        n_bytes
+    );
     if n_bytes <= 4095 {
         format!("    sub     sp, sp, #{}\n", n_bytes)
     } else if n_bytes <= 16_773_120 && n_bytes.is_multiple_of(4096) {
@@ -82,6 +87,11 @@ pub fn emit_sp_sub(n_bytes: usize) -> String {
 
 /// Symmetric `add sp, sp, #N`.
 pub fn emit_sp_add(n_bytes: usize) -> String {
+    assert!(
+        n_bytes <= u32::MAX as usize,
+        "frame > 4 GiB unsupported in M4b (got {} bytes)",
+        n_bytes
+    );
     if n_bytes <= 4095 {
         format!("    add     sp, sp, #{}\n", n_bytes)
     } else if n_bytes <= 16_773_120 && n_bytes.is_multiple_of(4096) {
