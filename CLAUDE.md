@@ -117,6 +117,12 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Development Workflow
 
+### Before any commit (zero-warnings culture):
+1. `cargo fmt --all` — keep formatting in canonical form. CI gates on `--check`,
+   so drift accumulates into noisy "style:" commits if not done per-session.
+2. `cargo clippy --workspace --all-targets -- -D warnings` — must exit 0.
+3. `cargo test --workspace` — must pass (test count goes up monotonically).
+
 ### When implementing a new feature:
 1. Write a failing test first (red)
 2. Write the minimum code to make it pass (green)
