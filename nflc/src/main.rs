@@ -7,6 +7,7 @@
 //! - `nflc parse <file> --uir`    → build and pretty-print the UIR
 //! - `nflc compile <file> --profile <name>` → lower UIR to assembly
 //! - `nflc compile <file> --profile <name> -o <file.s>` → lower UIR to assembly, write to file
+//! - `nflc compile <file> --profile <name> [--no-fuse]` → skip optimisation passes
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -30,23 +31,14 @@ fn main() -> ExitCode {
         [cmd, path, flag] if cmd == "parse" && flag == "--uir" => {
             run_build_uir(PathBuf::from(path))
         }
-        [cmd, path, p_flag, p_name] if cmd == "compile" && p_flag == "--profile" => {
-            run_compile(PathBuf::from(path), p_name.clone(), None)
-        }
-        [cmd, path, p_flag, p_name, o_flag, o_path]
-            if cmd == "compile" && p_flag == "--profile" && o_flag == "-o" =>
-        {
-            run_compile(
-                PathBuf::from(path),
-                p_name.clone(),
-                Some(PathBuf::from(o_path)),
-            )
-        }
-        [cmd] if cmd == "compile" => {
-            eprintln!("error: 'compile' requires a file path and --profile");
-            print_usage();
-            ExitCode::FAILURE
-        }
+        [cmd, rest @ ..] if cmd == "compile" => match parse_compile_args(rest) {
+            Ok(parsed) => run_compile(parsed),
+            Err(msg) => {
+                eprintln!("error: {}", msg);
+                print_usage();
+                ExitCode::FAILURE
+            }
+        },
         _ => {
             eprintln!("error: unknown invocation");
             print_usage();
@@ -64,6 +56,60 @@ fn print_usage() {
     println!("  nflc parse   <file.nfl> --uir              Build and pretty-print the UIR");
     println!("  nflc compile <file.nfl> --profile <name>   Lower UIR to assembly");
     println!("                          [-o <file.s>]      Output path (default: stdout)");
+    println!("                          [--no-fuse]        Skip optimisation passes (debugging)");
+}
+
+struct CompileArgs {
+    path: PathBuf,
+    profile: String,
+    output: Option<PathBuf>,
+    no_fuse: bool,
+}
+
+fn parse_compile_args(args: &[String]) -> Result<CompileArgs, String> {
+    // args here is everything AFTER the "compile" subcommand keyword.
+    // First positional: path. Then sweep flags.
+    let mut iter = args.iter();
+    let path = iter
+        .next()
+        .ok_or_else(|| "compile: missing <file.nfl>".to_string())?
+        .clone();
+
+    let mut profile: Option<String> = None;
+    let mut output: Option<PathBuf> = None;
+    let mut no_fuse = false;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--profile" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| "--profile requires a value".to_string())?;
+                profile = Some(v.clone());
+            }
+            "-o" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| "-o requires a value".to_string())?;
+                output = Some(PathBuf::from(v));
+            }
+            "--no-fuse" => {
+                no_fuse = true;
+            }
+            other => {
+                return Err(format!("unknown flag: {other}"));
+            }
+        }
+    }
+
+    let profile = profile.ok_or_else(|| "compile: missing --profile <name>".to_string())?;
+
+    Ok(CompileArgs {
+        path: PathBuf::from(path),
+        profile,
+        output,
+        no_fuse,
+    })
 }
 
 /// Render an error with a source-snippet pointer. Output format mirrors
@@ -235,7 +281,14 @@ fn run_build_uir(path: PathBuf) -> ExitCode {
     }
 }
 
-fn run_compile(path: PathBuf, profile: String, out_path: Option<PathBuf>) -> ExitCode {
+fn run_compile(args: CompileArgs) -> ExitCode {
+    let CompileArgs {
+        path,
+        profile,
+        output: out_path,
+        no_fuse,
+    } = args;
+
     let source = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) => {
@@ -272,24 +325,48 @@ fn run_compile(path: PathBuf, profile: String, out_path: Option<PathBuf>) -> Exi
         return ExitCode::FAILURE;
     }
 
-    match profiles_arm64::lower(&uir) {
-        Ok(asm) => {
-            if let Some(p) = out_path {
-                match std::fs::write(&p, &asm.source) {
-                    Ok(()) => ExitCode::SUCCESS,
-                    Err(e) => {
-                        eprintln!("error: cannot write {}: {}", p.display(), e);
-                        ExitCode::FAILURE
-                    }
+    // M5a: run UIR-passes pipeline (default), or skip if --no-fuse.
+    let post_pass_uir = if no_fuse {
+        eprintln!("note: passes skipped (--no-fuse)");
+        uir
+    } else {
+        let pipeline = compiler::passes::default_pipeline();
+        let names: Vec<&str> = pipeline.iter().map(|p| p.name()).collect();
+        eprintln!("note: applied passes: {}", names.join(", "));
+        match compiler::passes::run_pipeline(&uir, &pipeline) {
+            Ok(u) => u,
+            Err(e) => {
+                let span = e.span();
+                render_error_with_snippet(
+                    &source,
+                    &path,
+                    span.line,
+                    span.col,
+                    &format!("{}", e),
+                    None,
+                );
+                return ExitCode::FAILURE;
+            }
+        }
+    };
+
+    match profiles_arm64::lower(&post_pass_uir) {
+        Ok(asm) => match out_path {
+            Some(p) => match std::fs::write(&p, &asm.source) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("error: cannot write {}: {}", p.display(), e);
+                    ExitCode::FAILURE
                 }
-            } else {
+            },
+            None => {
                 print!("{}", asm.source);
                 ExitCode::SUCCESS
             }
-        }
+        },
         Err(e) => {
             let span = e.span();
-            render_error_with_snippet(&source, &path, span.line, span.col, &format!("{e}"), None);
+            render_error_with_snippet(&source, &path, span.line, span.col, &format!("{}", e), None);
             ExitCode::FAILURE
         }
     }
