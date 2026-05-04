@@ -43,6 +43,15 @@ pub enum PostOp {
     Relu,
 }
 
+impl std::fmt::Display for PostOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            PostOp::Relu => "relu",
+        };
+        write!(f, "{}", name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeKind {
     Input {
@@ -129,7 +138,7 @@ impl std::fmt::Display for Node {
                 op,
                 operands,
                 attrs,
-                ..
+                fused_post_ops,
             } => {
                 let ops_s = operands
                     .iter()
@@ -148,6 +157,14 @@ impl std::fmt::Display for Node {
                         .collect::<Vec<_>>()
                         .join(", ");
                     write!(f, "    attrs=[{}]", a)?;
+                }
+                if !fused_post_ops.is_empty() {
+                    let f_s = fused_post_ops
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    write!(f, "    fused=[{}]", f_s)?;
                 }
                 Ok(())
             }

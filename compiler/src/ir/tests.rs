@@ -488,3 +488,64 @@ fn duplicate_model_name_at_build_time() {
         _ => panic!("expected DuplicateModelName, got {:?}", err.kind),
     }
 }
+
+#[test]
+fn display_for_postop_lowercase() {
+    use crate::ir::PostOp;
+    assert_eq!(format!("{}", PostOp::Relu), "relu");
+}
+
+#[test]
+fn display_for_node_renders_fused_post_ops_when_present() {
+    use crate::ast::Span;
+    use crate::ir::stdlib::StdOp;
+    use crate::ir::types::{AttrValue, Node, NodeKind, OpAttr, PostOp, Shape, Type};
+
+    let n = Node {
+        kind: NodeKind::Op {
+            op: StdOp::Linear,
+            operands: vec![0],
+            attrs: vec![OpAttr {
+                name: "out_dim".into(),
+                value: AttrValue::Integer(2),
+            }],
+            fused_post_ops: vec![PostOp::Relu],
+        },
+        ty: Type {
+            name: "Tensor".into(),
+            shape: Shape(vec![8, 2]),
+        },
+        source_span: Span::new(1, 1),
+    };
+    let rendered = format!("{}", n);
+    assert!(rendered.contains("linear"));
+    assert!(rendered.contains("operands=[n0]"));
+    assert!(rendered.contains("attrs=[out_dim=2]"));
+    assert!(rendered.contains("fused=[relu]"));
+}
+
+#[test]
+fn display_for_node_omits_fused_when_empty() {
+    use crate::ast::Span;
+    use crate::ir::stdlib::StdOp;
+    use crate::ir::types::{Node, NodeKind, Shape, Type};
+
+    let n = Node {
+        kind: NodeKind::Op {
+            op: StdOp::Linear,
+            operands: vec![0],
+            attrs: vec![],
+            fused_post_ops: vec![],
+        },
+        ty: Type {
+            name: "Tensor".into(),
+            shape: Shape(vec![8, 2]),
+        },
+        source_span: Span::new(1, 1),
+    };
+    let rendered = format!("{}", n);
+    assert!(
+        !rendered.contains("fused"),
+        "empty fused_post_ops should NOT render 'fused' substring; got: {rendered}"
+    );
+}
