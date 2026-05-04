@@ -33,6 +33,11 @@ impl UirPass for FuseLinearRelu {
     }
 }
 
+/// Precondition: `model.nodes` is in topological order — every operand
+/// NodeId is strictly less than the consumer's NodeId. `ir::build`
+/// guarantees this. Violations cause `id_map[…]` panics in step 3,
+/// not a `PassError` — defensive checks would be belt-and-suspenders
+/// for an invariant the type system can't (yet) express.
 fn fuse_one_model(model: &UirModel) -> Result<UirModel, PassError> {
     // Step 1: consumer counts.
     let mut consumer_count: HashMap<NodeId, usize> = HashMap::new();
@@ -83,6 +88,11 @@ fn fuse_one_model(model: &UirModel) -> Result<UirModel, PassError> {
     }
 
     let victims: HashSet<NodeId> = victim_to_producer.keys().copied().collect();
+    // M5a invariant: each Linear in `victim_to_producer.values()` appears
+    // exactly once (each Linear has at most one consuming Relu, by the
+    // single-consumer guard). Hence pushing one `PostOp::Relu` per
+    // matched producer is correct. M5b multi-victim fusion will need a
+    // count-per-producer to push the right number of post-ops.
     let producers_of_victims: HashSet<NodeId> = victim_to_producer.values().copied().collect();
 
     // Step 3: build new model.
