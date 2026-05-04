@@ -132,6 +132,12 @@ fn walk_model(model_idx: usize, model: &UirModel) -> Result<(String, FnSig), Low
                         .iter()
                         .find(|s| s.kind == ParamKind::LinearBias && s.origin_node == node_idx)
                         .map(|s| s.offset);
+
+                    // M5a: read fused_post_ops from the node and pass through.
+                    let NodeKind::Op { fused_post_ops, .. } = &node.kind else {
+                        unreachable!("walk_model already matched NodeKind::Op")
+                    };
+
                     body.push_str(&crate::ops::emit_linear(
                         b,
                         k,
@@ -142,7 +148,9 @@ fn walk_model(model_idx: usize, model: &UirModel) -> Result<(String, FnSig), Low
                         dst_loc,
                         weight_offset,
                         bias_offset,
-                    ));
+                        node.source_span,
+                        fused_post_ops,
+                    )?);
                     linear_idx += 1;
                 }
                 StdOp::Relu => {

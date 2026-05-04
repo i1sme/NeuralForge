@@ -2,12 +2,17 @@
 
 use crate::asm::emit_imm32;
 use crate::buffer::BufferLoc;
+use crate::types::LowerError;
+use compiler::ast::Span;
+use compiler::PostOp;
 
 /// Emit AArch64 asm for a linear layer (matmul + optional bias-add).
 ///
 /// `model_idx` and `linear_idx` together uniquely name every label in the
 /// output file, which is critical when multiple models share one assembly
 /// source (e.g. pipeline_styles.nfl with 3 model definitions).
+///
+/// Task 5 added node_span + fused_post_ops; Task 6 wires PostOp dispatch.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_linear(
     b: u64,
@@ -19,7 +24,9 @@ pub fn emit_linear(
     dst_loc: BufferLoc,
     weight_offset: usize,
     bias_offset: Option<usize>,
-) -> String {
+    node_span: Span,
+    fused_post_ops: &[PostOp],
+) -> Result<String, LowerError> {
     let lid = format!("{model_idx}_{linear_idx}");
     let mut s = String::new();
     s.push_str(&format!(
@@ -95,7 +102,11 @@ pub fn emit_linear(
     s.push_str(&format!("    b       .Lmm_i_{lid}\n"));
     s.push_str(&format!(".Lmm_i_end_{lid}:\n"));
 
-    s
+    // Unused in Task 5 (plumbing-only). Task 6 wires real PostOp dispatch.
+    let _ = fused_post_ops;
+    let _ = node_span;
+
+    Ok(s)
 }
 
 /// Materialise a `BufferLoc` into a GPR (e.g. x11, x12). pub(crate) so relu.rs uses it too.
