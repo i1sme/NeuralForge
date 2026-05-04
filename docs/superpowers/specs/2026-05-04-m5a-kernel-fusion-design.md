@@ -408,6 +408,7 @@ In `compiler/src/passes/fuse_linear_relu.rs` inline `#[cfg(test)] mod tests`:
 | `fuses_simple_linear_relu` | Terminal `linear → relu` → fused Linear with `fused_post_ops: [Relu]`, Relu node gone, NodeIds 0..N-1 dense. |
 | `does_not_fuse_when_linear_has_multiple_consumers` | `linear → [relu, softmax]` → no fusion (Linear has 2 consumers). |
 | `fuses_chain_independently` | `linear[8] → relu → linear[2] → relu` → both Linears fused. |
+| `fuses_when_relu_has_multiple_consumers` | `linear → relu → [op1, op2]` where Relu's output is consumed by two distinct downstream nodes (and Linear has only Relu as consumer) → Linear fuses; both op1 and op2 are remapped to point at the fused Linear's new NodeId. Verifies the asymmetric rule: we check Linear's consumer count, NOT Relu's. |
 | `does_not_fuse_when_relu_not_after_linear` | `softmax → relu` (synthetic UIR; grammar may not allow) → not fusable. |
 | `does_not_fuse_when_linear_already_fused` | Linear already with `fused_post_ops: [Relu]` followed by another Relu → no double-fusion. |
 | `does_not_fuse_when_linear_has_bias` | `linear[bias=true] → relu` → no fusion (M5a scope). |
@@ -712,14 +713,35 @@ M5c-or-later territory.
    (`tinymlp_full_with_softmax_runs_correctly`, `classifier_runs_correctly`,
    `pipeline_styles_runs_correctly`, `comments_runs_correctly`,
    `mixed_args_runs_correctly`, `m4a_no_softmax_still_runs`) switch to
-   default-fused path and continue numerically passing.
-   **Implication:** for softmax-terminal models (tiny_mlp, classifier,
-   pipeline_styles, comments, mixed_args), no Linear→Relu fusion
-   candidate exists at the terminal — softmax is the terminal — so
-   those models' `fused_post_ops` lists stay empty. Their asm outputs
-   in default-fused mode are bit-identical to M4b. Only the M4a fixture
-   (`m4_linear_relu.nfl`, terminal Relu) actually differs in default-fused
-   mode (recovers M4a's inline relu).
+   default-fused path and continue **numerically passing** (results
+   bit-identical between fused and unfused; the existing assertions
+   continue to hold).
+
+   **Asm structure changes** (NOT bit-identical to M4b) for fixtures
+   containing internal `linear → relu` patterns where Linear has bias=false
+   and a single consumer:
+   - `m4_linear_relu.nfl` — terminal `linear → relu` fuses (recovers M4a's
+     inline relu).
+   - `classifier.nfl` — two internal fusions: `linear[512] → relu` (n1→n2)
+     and `linear[256] → relu` (n4→n5). Final `linear[10] → softmax` is
+     not a fusion candidate (softmax is not Relu).
+   - `pipeline_styles.nfl` — three internal fusions, one per model
+     (`linear[8] → relu` in each of SingleLine / PerStepWrap / MixedWrap).
+
+   **Asm structure unchanged** vs M4b for fixtures without a fusable
+   pattern:
+   - `tiny_mlp.nfl` — `linear → softmax`, no relu. Empty `fused_post_ops`.
+   - `mixed_args.nfl` — first Linear has `bias=true` (excluded by M5a's
+     scope condition); second Linear's only consumer is softmax. No
+     fusion in either.
+   - `comments.nfl` — same shape as the simpler fixtures; depends on its
+     specific pipeline content but follows the same rules. The plan's
+     task that runs the smoke tests should record actual pre/post asm
+     diffs per fixture.
+
+   The integration test `fused_vs_unfused_classifier_match_numerically`
+   directly verifies the bit-identical numerical contract for the most
+   complex fusion case (2 internal fusions in one function).
 10. **Module-level doc-comment in `compiler::passes`** explains: what
     passes are, how to add a new one, why functional, what `default_pipeline()`
     contains.
