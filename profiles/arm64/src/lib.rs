@@ -5,6 +5,7 @@
 mod asm;
 mod buffer;
 mod codegen;
+mod ops;
 mod types;
 
 pub use types::{Asm, FnSig, LowerError, ParamKind, ParamSlot};

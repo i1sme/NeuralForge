@@ -124,9 +124,7 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
                     let k = in_shape.0[1];
                     let n = out_shape.0[1];
 
-                    // Resolve buffer pointers via assignment.
                     let src_loc = resolve_loc(&assignment.locs, operands[0]);
-                    // Linear never gets Alias, but resolve defensively.
                     let dst_loc = resolve_loc(&assignment.locs, node_idx);
                     let weight_offset = sig
                         .params_layout
@@ -134,7 +132,7 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
                         .find(|s| s.kind == ParamKind::LinearWeight && s.origin_node == node_idx)
                         .expect("LinearWeight slot must exist for this Linear")
                         .offset;
-                    body.push_str(&emit_matmul_with_locs(
+                    body.push_str(&crate::ops::emit_linear(
                         b,
                         k,
                         n,
@@ -149,9 +147,8 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
                     let buf_shape = &node.ty.shape;
                     let total: u64 = buf_shape.0.iter().product();
                     let src_loc = resolve_loc(&assignment.locs, operands[0]);
-                    // Relu may be Alias(operand) when intermediate; resolve the chain.
                     let dst_loc = resolve_loc(&assignment.locs, node_idx);
-                    body.push_str(&emit_relu_with_locs(total, relu_idx, src_loc, dst_loc));
+                    body.push_str(&crate::ops::emit_relu(total, relu_idx, src_loc, dst_loc));
                     relu_idx += 1;
                 }
                 _ => unreachable!("classify_op should have caught this"),
@@ -179,141 +176,6 @@ fn resolve_loc(locs: &[crate::buffer::BufferLoc], id: NodeId) -> crate::buffer::
             }
             other => return other,
         }
-    }
-}
-
-fn emit_matmul_with_locs(
-    b: u64,
-    k: u64,
-    n: u64,
-    linear_idx: usize,
-    src_loc: crate::buffer::BufferLoc,
-    dst_loc: crate::buffer::BufferLoc,
-    weight_offset: usize,
-) -> String {
-    let lid = linear_idx;
-    let mut s = String::new();
-    s.push_str(&format!(
-        "    ; matmul: input [{b},{k}] x weights [{k},{n}] -> output [{b},{n}]\n"
-    ));
-
-    // Materialise src and dst pointers into x_src, x_dst registers.
-    s.push_str(&materialise_ptr("x11", src_loc));
-    s.push_str(&materialise_ptr("x12", dst_loc));
-    // Weight pointer = x1 (params) + weight_offset*4
-    if weight_offset == 0 {
-        s.push_str("    mov     x13, x1\n");
-    } else {
-        s.push_str(&format!("    mov     x9, #{}\n", weight_offset));
-        s.push_str("    add     x13, x1, x9, lsl #2\n");
-    }
-
-    s.push_str("    mov     x3, #0\n");
-    s.push_str(&format!(".Lmm_i_{lid}:\n"));
-    s.push_str(&format!("    cmp     x3, #{b}\n"));
-    s.push_str(&format!("    b.ge    .Lmm_i_end_{lid}\n"));
-
-    s.push_str("    mov     x4, #0\n");
-    s.push_str(&format!(".Lmm_j_{lid}:\n"));
-    s.push_str(&format!("    cmp     x4, #{n}\n"));
-    s.push_str(&format!("    b.ge    .Lmm_j_end_{lid}\n"));
-
-    s.push_str("    fmov    s0, wzr\n");
-    s.push_str("    mov     x5, #0\n");
-    s.push_str(&format!(".Lmm_k_{lid}:\n"));
-    s.push_str(&format!("    cmp     x5, #{k}\n"));
-    s.push_str(&format!("    b.ge    .Lmm_k_end_{lid}\n"));
-
-    s.push_str(&format!("    mov     x8, #{k}\n"));
-    s.push_str("    mul     x6, x3, x8\n");
-    s.push_str("    add     x6, x6, x5\n");
-    s.push_str("    ldr     s1, [x11, x6, lsl #2]\n");
-
-    s.push_str(&format!("    mov     x8, #{n}\n"));
-    s.push_str("    mul     x7, x5, x8\n");
-    s.push_str("    add     x7, x7, x4\n");
-    s.push_str("    ldr     s2, [x13, x7, lsl #2]\n");
-
-    s.push_str("    fmadd   s0, s1, s2, s0\n");
-
-    s.push_str("    add     x5, x5, #1\n");
-    s.push_str(&format!("    b       .Lmm_k_{lid}\n"));
-    s.push_str(&format!(".Lmm_k_end_{lid}:\n"));
-
-    s.push_str(&format!("    mov     x8, #{n}\n"));
-    s.push_str("    mul     x6, x3, x8\n");
-    s.push_str("    add     x6, x6, x4\n");
-    s.push_str("    str     s0, [x12, x6, lsl #2]\n");
-
-    s.push_str("    add     x4, x4, #1\n");
-    s.push_str(&format!("    b       .Lmm_j_{lid}\n"));
-    s.push_str(&format!(".Lmm_j_end_{lid}:\n"));
-
-    s.push_str("    add     x3, x3, #1\n");
-    s.push_str(&format!("    b       .Lmm_i_{lid}\n"));
-    s.push_str(&format!(".Lmm_i_end_{lid}:\n"));
-
-    s
-}
-
-fn emit_relu_with_locs(
-    total_floats: u64,
-    relu_idx: usize,
-    src_loc: crate::buffer::BufferLoc,
-    dst_loc: crate::buffer::BufferLoc,
-) -> String {
-    let rid = relu_idx;
-    let mut s = String::new();
-    s.push_str(&format!(
-        "    ; relu: copy-clamp from src to dst ({total_floats} elements)\n"
-    ));
-    s.push_str(&materialise_ptr("x11", src_loc));
-    s.push_str(&materialise_ptr("x12", dst_loc));
-    s.push_str("    fmov    s4, wzr\n");
-    s.push_str("    mov     x9, #0\n");
-    s.push_str(&format!(".Lrelu_{rid}:\n"));
-    s.push_str(&format!("    cmp     x9, #{total_floats}\n"));
-    s.push_str(&format!("    b.ge    .Lrelu_end_{rid}\n"));
-    s.push_str("    ldr     s3, [x11, x9, lsl #2]\n");
-    s.push_str("    fmax    s3, s3, s4\n");
-    s.push_str("    str     s3, [x12, x9, lsl #2]\n");
-    s.push_str("    add     x9, x9, #1\n");
-    s.push_str(&format!("    b       .Lrelu_{rid}\n"));
-    s.push_str(&format!(".Lrelu_end_{rid}:\n"));
-    s
-}
-
-/// Materialise a `BufferLoc` into a GPR (e.g. x11, x12).
-fn materialise_ptr(reg: &str, loc: crate::buffer::BufferLoc) -> String {
-    use crate::buffer::BufferLoc;
-    match loc {
-        BufferLoc::InputReg => format!("    mov     {}, x0\n", reg),
-        BufferLoc::OutputReg => format!("    mov     {}, x2\n", reg),
-        BufferLoc::StackOffset(off) => {
-            assert!(
-                off <= u32::MAX as usize,
-                "stack offset > 4 GiB unsupported in M4b (got {} bytes)",
-                off
-            );
-            if off == 0 {
-                format!("    mov     {}, sp\n", reg)
-            } else if off <= 4095 {
-                format!("    add     {}, sp, #{}\n", reg, off)
-            } else if off <= 16_773_120 && off.is_multiple_of(4096) {
-                format!("    add     {}, sp, #{}, lsl #12\n", reg, off / 4096)
-            } else {
-                let lo = (off & 0xFFFF) as u16;
-                let hi = ((off >> 16) & 0xFFFF) as u16;
-                let mut s = String::new();
-                s.push_str(&format!("    movz    w10, #0x{:04x}\n", lo));
-                if hi != 0 {
-                    s.push_str(&format!("    movk    w10, #0x{:04x}, lsl #16\n", hi));
-                }
-                s.push_str(&format!("    add     {}, sp, x10\n", reg));
-                s
-            }
-        }
-        BufferLoc::Alias(_) => unreachable!("alias must be resolved by caller"),
     }
 }
 
