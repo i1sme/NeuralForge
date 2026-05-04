@@ -55,28 +55,16 @@ fn linear_emits_matmul_loops_with_fmadd() {
     let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n");
     let asm = lower(&uir).expect("lower");
     let s = &asm.source;
-
-    // Sanity: FMADD is the matmul accumulator.
     assert!(s.contains("fmadd"), "expected fmadd in:\n{s}");
-    // Three loop labels (i, j, k) for the single Linear (label suffix 0).
-    assert!(s.contains(".Lmm_i_0:"), "missing i-loop label in:\n{s}");
-    assert!(s.contains(".Lmm_j_0:"), "missing j-loop label in:\n{s}");
-    assert!(s.contains(".Lmm_k_0:"), "missing k-loop label in:\n{s}");
-    // Comparison constants come from shapes.
-    assert!(
-        s.contains("cmp     x3, #2"),
-        "missing i-bound (B=2) in:\n{s}"
-    );
-    assert!(
-        s.contains("cmp     x4, #2"),
-        "missing j-bound (N=2) in:\n{s}"
-    );
-    assert!(
-        s.contains("cmp     x5, #3"),
-        "missing k-bound (K=3) in:\n{s}"
-    );
-    // Sum init.
-    assert!(s.contains("fmov    s0, wzr"), "missing sum init in:\n{s}");
+    assert!(s.contains(".Lmm_i_0:"));
+    assert!(s.contains(".Lmm_j_0:"));
+    assert!(s.contains(".Lmm_k_0:"));
+    assert!(s.contains("cmp     x3, #2"));
+    assert!(s.contains("cmp     x4, #2"));
+    assert!(s.contains("cmp     x5, #3"));
+    assert!(s.contains("fmov    s0, wzr"));
+    // Destination is x12 (materialised dst pointer), not raw x2.
+    assert!(s.contains("str     s0, [x12,"));
 }
 
 #[test]
@@ -84,32 +72,13 @@ fn relu_emits_separate_loop_with_fmov_zero_and_fmax() {
     let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> relu\n");
     let asm = lower(&uir).expect("lower");
     let s = &asm.source;
-
-    // Zero materialisation outside the loop.
-    assert!(
-        s.contains("fmov    s4, wzr"),
-        "missing 'fmov s4, wzr' (zero materialisation) in:\n{s}"
-    );
-    // The relu loop body uses fmax against s4.
-    assert!(
-        s.contains("fmax    s3, s3, s4"),
-        "missing relu fmax in:\n{s}"
-    );
-    // Loop label and bound (output total = 2*2 = 4).
-    assert!(s.contains(".Lrelu_0:"), "missing relu loop label in:\n{s}");
-    assert!(
-        s.contains("cmp     x9, #4"),
-        "missing relu element-count bound in:\n{s}"
-    );
-    // Relu reads + writes via x2 (output buffer).
-    assert!(
-        s.contains("ldr     s3, [x2, x9, lsl #2]"),
-        "missing relu load in:\n{s}"
-    );
-    assert!(
-        s.contains("str     s3, [x2, x9, lsl #2]"),
-        "missing relu store in:\n{s}"
-    );
+    assert!(s.contains("fmov    s4, wzr"));
+    assert!(s.contains("fmax    s3, s3, s4"));
+    assert!(s.contains(".Lrelu_0:"));
+    assert!(s.contains("cmp     x9, #4"));
+    // Relu now uses materialised src/dst pointers.
+    assert!(s.contains("ldr     s3, [x11,"));
+    assert!(s.contains("str     s3, [x12,"));
 }
 
 #[test]
@@ -252,4 +221,30 @@ fn assign_buffers_stack_bytes_rounds_non_aligned_total_up() {
         assignment.stack_bytes, 16,
         "12 raw bytes should round up to 16"
     );
+}
+
+#[test]
+fn leaf_function_no_prologue() {
+    // input → linear (terminal): leaf, no intermediates.
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n");
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+    // Leaf, no intermediates → no stp, no sub sp, no ldp.
+    assert!(
+        !s.contains("stp"),
+        "leaf-no-intermediates should have no stp:\n{s}"
+    );
+    assert!(!s.contains("ldp"));
+    assert!(!s.contains("sub     sp"));
+}
+
+#[test]
+fn intermediate_buffers_allocated_on_stack() {
+    let uir = build_uir(
+        "model M [b=2]:\n    x: Tensor[b, 4]\n    x -> linear[8] -> relu -> linear[2] -> relu\n",
+    );
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+    assert!(s.contains("sub     sp, sp,"), "expected sub sp in:\n{s}");
+    assert!(s.contains("add     sp, sp,"), "expected add sp in:\n{s}");
 }

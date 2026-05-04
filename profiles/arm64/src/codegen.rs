@@ -2,10 +2,9 @@
 //!
 //! Per-op emitters land here as Tasks 3-5 progress.
 
-use crate::asm;
 use crate::types::{ParamKind, ParamSlot};
 use crate::{Asm, FnSig, LowerError};
-use compiler::{NodeKind, StdOp, Uir, UirModel};
+use compiler::{NodeId, NodeKind, StdOp, Uir, UirModel};
 
 /// True iff the Linear op's attribute list includes `bias=true`.
 fn linear_has_bias(attrs: &[compiler::OpAttr]) -> bool {
@@ -41,22 +40,23 @@ pub fn walk_uir(uir: &Uir) -> Result<Asm, LowerError> {
 }
 
 fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
-    // Validate: every Op node must be a supported op. Walk first to surface
-    // errors before emitting any asm.
+    use crate::asm::{format_function_epilogue, format_function_prologue, LeafKind};
+    use crate::buffer::{assign_buffers, compute_callee_saved, compute_is_leaf};
+
+    // 1. Validate ops upfront.
     for node in &model.nodes {
         if let NodeKind::Op { op, attrs, .. } = &node.kind {
             classify_op(*op, attrs, node.source_span)?;
         }
     }
 
-    // Compute ABI sizes from input + output shapes.
+    // 2. Compute layout, ABI sizes (kept from Task 1).
     let input_id = *model.inputs.first().ok_or(LowerError::ShapeNotConcrete {
         span: model.source_span,
     })?;
-    let input_shape = &model.nodes[input_id].ty.shape;
-    let output_shape = &model.nodes[model.output].ty.shape;
-    let input_floats: usize = input_shape.0.iter().product::<u64>() as usize;
-    let output_floats: usize = output_shape.0.iter().product::<u64>() as usize;
+    let input_floats: usize = model.nodes[input_id].ty.shape.0.iter().product::<u64>() as usize;
+    let output_floats: usize =
+        model.nodes[model.output].ty.shape.0.iter().product::<u64>() as usize;
 
     let mut params_layout: Vec<ParamSlot> = Vec::new();
     let mut params_floats: usize = 0;
@@ -76,7 +76,6 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
             }
             let k = in_shape.0[1] as usize;
             let n = out_shape.0[1] as usize;
-
             params_layout.push(ParamSlot {
                 kind: ParamKind::LinearWeight,
                 origin_node: node_idx,
@@ -84,8 +83,6 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
                 size: k * n,
             });
             params_floats += k * n;
-
-            // Bias-slot pre-allocation: detection runs now, codegen lands in Task 7.
             if linear_has_bias(attrs) {
                 params_layout.push(ParamSlot {
                     kind: ParamKind::LinearBias,
@@ -107,36 +104,65 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
         params_layout,
     };
 
-    let mut body = String::new();
-    body.push_str(&asm::format_function_header(&sig));
+    // 3. Buffer assignment + leaf analysis.
+    let assignment = assign_buffers(model);
+    let leaf = if compute_is_leaf(model) {
+        LeafKind::Leaf
+    } else {
+        LeafKind::NonLeaf
+    };
+    let regs = compute_callee_saved(model);
 
-    // Emit per-op asm, in topological (UIR-node) order.
+    // 4. Emit prologue + body + epilogue.
+    let mut body = String::new();
+    body.push_str(&format_function_prologue(
+        &sig,
+        leaf,
+        regs,
+        assignment.stack_bytes,
+    ));
+
+    // Per-op emission (Tasks 5-8 refactor this dispatch into ops/*).
     let mut linear_idx = 0usize;
     let mut relu_idx = 0usize;
-    for node in &model.nodes {
+    for (node_idx, node) in model.nodes.iter().enumerate() {
         if let NodeKind::Op { op, operands, .. } = &node.kind {
             match op {
                 StdOp::Linear => {
                     let in_shape = &model.nodes[operands[0]].ty.shape;
                     let out_shape = &node.ty.shape;
-                    // shape is [batch, k] for input and [batch, n] for output
-                    if in_shape.0.len() != 2 || out_shape.0.len() != 2 {
-                        return Err(LowerError::ShapeNotConcrete {
-                            span: node.source_span,
-                        });
-                    }
                     let b = in_shape.0[0];
                     let k = in_shape.0[1];
                     let n = out_shape.0[1];
-                    body.push_str(&emit_matmul(b, k, n, linear_idx));
+
+                    // Resolve buffer pointers via assignment.
+                    let src_loc = resolve_loc(&assignment.locs, operands[0]);
+                    // Linear never gets Alias, but resolve defensively.
+                    let dst_loc = resolve_loc(&assignment.locs, node_idx);
+                    let weight_offset = sig
+                        .params_layout
+                        .iter()
+                        .find(|s| s.kind == ParamKind::LinearWeight && s.origin_node == node_idx)
+                        .expect("LinearWeight slot must exist for this Linear")
+                        .offset;
+                    body.push_str(&emit_matmul_with_locs(
+                        b,
+                        k,
+                        n,
+                        linear_idx,
+                        src_loc,
+                        dst_loc,
+                        weight_offset,
+                    ));
                     linear_idx += 1;
                 }
                 StdOp::Relu => {
-                    // Operates in-place on the producer's output buffer.
-                    // For M4a (terminal-relu only) this is the model output (x2).
                     let buf_shape = &node.ty.shape;
                     let total: u64 = buf_shape.0.iter().product();
-                    body.push_str(&emit_relu(total, relu_idx));
+                    let src_loc = resolve_loc(&assignment.locs, operands[0]);
+                    // Relu may be Alias(operand) when intermediate; resolve the chain.
+                    let dst_loc = resolve_loc(&assignment.locs, node_idx);
+                    body.push_str(&emit_relu_with_locs(total, relu_idx, src_loc, dst_loc));
                     relu_idx += 1;
                 }
                 _ => unreachable!("classify_op should have caught this"),
@@ -144,73 +170,88 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
         }
     }
 
-    body.push_str(&asm::format_function_footer());
-
+    body.push_str(&format_function_epilogue(
+        leaf,
+        regs,
+        assignment.stack_bytes,
+    ));
     Ok((body, sig))
 }
 
-/// Emit the AArch64 matmul body for one Linear op.
-///
-/// Per spec §7: input is row-major [B, K], weights row-major [K, N],
-/// output row-major [B, N]. ABI registers: x0=input, x1=weights, x2=output.
-/// `linear_idx` is a unique-per-Linear suffix used in label names so
-/// multiple Linear ops in one model don't collide on labels.
-fn emit_matmul(b: u64, k: u64, n: u64, linear_idx: usize) -> String {
-    let mut s = String::new();
-    let lid = linear_idx;
+/// Resolve `Alias` chains to a concrete BufferLoc.
+fn resolve_loc(locs: &[crate::buffer::BufferLoc], id: NodeId) -> crate::buffer::BufferLoc {
+    use crate::buffer::BufferLoc;
+    let mut cur = id;
+    loop {
+        match locs[cur] {
+            BufferLoc::Alias(next) => cur = next,
+            other => return other,
+        }
+    }
+}
 
+fn emit_matmul_with_locs(
+    b: u64,
+    k: u64,
+    n: u64,
+    linear_idx: usize,
+    src_loc: crate::buffer::BufferLoc,
+    dst_loc: crate::buffer::BufferLoc,
+    weight_offset: usize,
+) -> String {
+    let lid = linear_idx;
+    let mut s = String::new();
     s.push_str(&format!(
-        "    ; matmul: input [{b},{k}] × weights [{k},{n}] → output [{b},{n}]\n"
+        "    ; matmul: input [{b},{k}] x weights [{k},{n}] -> output [{b},{n}]\n"
     ));
 
-    // Hoist loop-invariant stride constants out of the inner loops.
-    // x10 = K (input row stride and weight row count)
-    // x11 = N (weight row stride and output row stride)
-    s.push_str(&format!("    mov     x10, #{k}\n"));
-    s.push_str(&format!("    mov     x11, #{n}\n"));
+    // Materialise src and dst pointers into x_src, x_dst registers.
+    s.push_str(&materialise_ptr("x11", src_loc));
+    s.push_str(&materialise_ptr("x12", dst_loc));
+    // Weight pointer = x1 (params) + weight_offset*4
+    if weight_offset == 0 {
+        s.push_str("    mov     x13, x1\n");
+    } else {
+        s.push_str(&format!("    mov     x9, #{}\n", weight_offset));
+        s.push_str("    add     x13, x1, x9, lsl #2\n");
+    }
 
-    // Outer i loop
     s.push_str("    mov     x3, #0\n");
     s.push_str(&format!(".Lmm_i_{lid}:\n"));
     s.push_str(&format!("    cmp     x3, #{b}\n"));
     s.push_str(&format!("    b.ge    .Lmm_i_end_{lid}\n"));
 
-    // j loop
     s.push_str("    mov     x4, #0\n");
     s.push_str(&format!(".Lmm_j_{lid}:\n"));
     s.push_str(&format!("    cmp     x4, #{n}\n"));
     s.push_str(&format!("    b.ge    .Lmm_j_end_{lid}\n"));
 
-    // sum = 0
     s.push_str("    fmov    s0, wzr\n");
-
-    // k loop
     s.push_str("    mov     x5, #0\n");
     s.push_str(&format!(".Lmm_k_{lid}:\n"));
     s.push_str(&format!("    cmp     x5, #{k}\n"));
     s.push_str(&format!("    b.ge    .Lmm_k_end_{lid}\n"));
 
-    // input[i*K + k]
-    s.push_str("    mul     x6, x3, x10\n");
+    s.push_str(&format!("    mov     x8, #{k}\n"));
+    s.push_str("    mul     x6, x3, x8\n");
     s.push_str("    add     x6, x6, x5\n");
-    s.push_str("    ldr     s1, [x0, x6, lsl #2]\n");
+    s.push_str("    ldr     s1, [x11, x6, lsl #2]\n");
 
-    // weights[k*N + j]
-    s.push_str("    mul     x7, x5, x11\n");
+    s.push_str(&format!("    mov     x8, #{n}\n"));
+    s.push_str("    mul     x7, x5, x8\n");
     s.push_str("    add     x7, x7, x4\n");
-    s.push_str("    ldr     s2, [x1, x7, lsl #2]\n");
+    s.push_str("    ldr     s2, [x13, x7, lsl #2]\n");
 
-    // sum += s1 * s2
     s.push_str("    fmadd   s0, s1, s2, s0\n");
 
     s.push_str("    add     x5, x5, #1\n");
     s.push_str(&format!("    b       .Lmm_k_{lid}\n"));
     s.push_str(&format!(".Lmm_k_end_{lid}:\n"));
 
-    // store output[i*N + j]
-    s.push_str("    mul     x6, x3, x11\n");
+    s.push_str(&format!("    mov     x8, #{n}\n"));
+    s.push_str("    mul     x6, x3, x8\n");
     s.push_str("    add     x6, x6, x4\n");
-    s.push_str("    str     s0, [x2, x6, lsl #2]\n");
+    s.push_str("    str     s0, [x12, x6, lsl #2]\n");
 
     s.push_str("    add     x4, x4, #1\n");
     s.push_str(&format!("    b       .Lmm_j_{lid}\n"));
@@ -223,35 +264,58 @@ fn emit_matmul(b: u64, k: u64, n: u64, linear_idx: usize) -> String {
     s
 }
 
-/// Emit AArch64 elementwise relu over a buffer of `total_floats` f32 elements.
-///
-/// Operates in-place on the buffer pointed to by `x2` (the model output buffer).
-/// In M4a this is always the producer's terminal output. M4b will generalise
-/// to intermediate buffers when multi-stage Linear is added.
-///
-/// Uses `s4` for the persistent zero; `s3` for the per-element load/store.
-/// `s4` is chosen because `s0`–`s3` are already used by matmul (sum, ldr × 2).
-/// `relu_idx` is a unique-per-Relu suffix for label naming.
-fn emit_relu(total_floats: u64, relu_idx: usize) -> String {
-    let mut s = String::new();
+fn emit_relu_with_locs(
+    total_floats: u64,
+    relu_idx: usize,
+    src_loc: crate::buffer::BufferLoc,
+    dst_loc: crate::buffer::BufferLoc,
+) -> String {
     let rid = relu_idx;
-
+    let mut s = String::new();
     s.push_str(&format!(
-        "    ; relu: in-place clamp on output buffer ({total_floats} elements)\n"
+        "    ; relu: copy-clamp from src to dst ({total_floats} elements)\n"
     ));
+    s.push_str(&materialise_ptr("x11", src_loc));
+    s.push_str(&materialise_ptr("x12", dst_loc));
     s.push_str("    fmov    s4, wzr\n");
     s.push_str("    mov     x9, #0\n");
     s.push_str(&format!(".Lrelu_{rid}:\n"));
     s.push_str(&format!("    cmp     x9, #{total_floats}\n"));
     s.push_str(&format!("    b.ge    .Lrelu_end_{rid}\n"));
-    s.push_str("    ldr     s3, [x2, x9, lsl #2]\n");
+    s.push_str("    ldr     s3, [x11, x9, lsl #2]\n");
     s.push_str("    fmax    s3, s3, s4\n");
-    s.push_str("    str     s3, [x2, x9, lsl #2]\n");
+    s.push_str("    str     s3, [x12, x9, lsl #2]\n");
     s.push_str("    add     x9, x9, #1\n");
     s.push_str(&format!("    b       .Lrelu_{rid}\n"));
     s.push_str(&format!(".Lrelu_end_{rid}:\n"));
-
     s
+}
+
+/// Materialise a `BufferLoc` into a GPR (e.g. x11, x12).
+fn materialise_ptr(reg: &str, loc: crate::buffer::BufferLoc) -> String {
+    use crate::buffer::BufferLoc;
+    match loc {
+        BufferLoc::InputReg => format!("    mov     {}, x0\n", reg),
+        BufferLoc::OutputReg => format!("    mov     {}, x2\n", reg),
+        BufferLoc::StackOffset(off) => {
+            if off == 0 {
+                format!("    mov     {}, sp\n", reg)
+            } else if off <= 4095 {
+                format!("    add     {}, sp, #{}\n", reg, off)
+            } else {
+                let lo = (off & 0xFFFF) as u16;
+                let hi = ((off >> 16) & 0xFFFF) as u16;
+                let mut s = String::new();
+                s.push_str(&format!("    movz    w10, #0x{:04x}\n", lo));
+                if hi != 0 {
+                    s.push_str(&format!("    movk    w10, #0x{:04x}, lsl #16\n", hi));
+                }
+                s.push_str(&format!("    add     {}, sp, x10\n", reg));
+                s
+            }
+        }
+        BufferLoc::Alias(_) => unreachable!("alias must be resolved by caller"),
+    }
 }
 
 /// Validate that an op is supported in M4a; return error otherwise.

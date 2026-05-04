@@ -3,8 +3,6 @@
 //! Lowers a [`compiler::Uir`] to AArch64 Mach-O assembly text via [`lower`].
 
 mod asm;
-// Task 3 will wire buffer into codegen; allow dead_code until then.
-#[allow(dead_code)]
 mod buffer;
 mod codegen;
 mod types;
