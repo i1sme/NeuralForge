@@ -544,8 +544,9 @@ fn display_for_node_omits_fused_when_empty() {
         source_span: Span::new(1, 1),
     };
     let rendered = format!("{}", n);
-    assert!(
-        !rendered.contains("fused"),
+    assert_eq!(
+        rendered.find("fused"),
+        None,
         "empty fused_post_ops should NOT render 'fused' substring; got: {rendered}"
     );
 }

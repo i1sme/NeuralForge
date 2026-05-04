@@ -159,12 +159,12 @@ impl std::fmt::Display for Node {
                     write!(f, "    attrs=[{}]", a)?;
                 }
                 if !fused_post_ops.is_empty() {
-                    let f_s = fused_post_ops
+                    let fused_s = fused_post_ops
                         .iter()
                         .map(|p| p.to_string())
                         .collect::<Vec<_>>()
                         .join(", ");
-                    write!(f, "    fused=[{}]", f_s)?;
+                    write!(f, "    fused=[{}]", fused_s)?;
                 }
                 Ok(())
             }
