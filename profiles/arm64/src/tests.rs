@@ -152,3 +152,88 @@ fn duplicate_model_name_returns_error() {
     let err = lower(&uir).unwrap_err();
     assert!(matches!(err, LowerError::DuplicateModelName { ref name, .. } if name == "M"));
 }
+
+// ── buffer analyzer tests ────────────────────────────────────────────────────
+
+use super::buffer::{assign_buffers, compute_callee_saved, compute_is_leaf, BufferLoc};
+
+#[test]
+fn assign_buffers_input_node_is_input_reg() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n");
+    let model = &uir.models[0];
+    let assignment = assign_buffers(model);
+    assert!(matches!(assignment.locs[0], BufferLoc::InputReg));
+}
+
+#[test]
+fn assign_buffers_terminal_node_is_output_reg() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n");
+    let model = &uir.models[0];
+    let assignment = assign_buffers(model);
+    let last = assignment.locs.last().unwrap();
+    assert!(matches!(last, BufferLoc::OutputReg));
+}
+
+#[test]
+fn assign_buffers_relu_aliases_operand() {
+    // input → linear → relu (terminal-relu)
+    // n0 input, n1 linear (non-terminal), n2 relu (terminal)
+    // Expected: n2 → OutputReg (terminal wins over alias rule); n1 → StackOffset
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> relu\n");
+    let model = &uir.models[0];
+    let assignment = assign_buffers(model);
+    assert!(matches!(assignment.locs[1], BufferLoc::StackOffset(_)));
+    assert!(matches!(assignment.locs[2], BufferLoc::OutputReg));
+}
+
+#[test]
+fn assign_buffers_intermediate_relu_aliases_operand() {
+    // input → linear → relu → linear → relu (terminal). Intermediate relu (n2)
+    // aliases linear (n1). The terminal relu (n4) is OutputReg.
+    let uir = build_uir(
+        "model M [b=2]:\n    x: Tensor[b, 4]\n    x -> linear[8] -> relu -> linear[2] -> relu\n",
+    );
+    let model = &uir.models[0];
+    let assignment = assign_buffers(model);
+    assert!(matches!(assignment.locs[1], BufferLoc::StackOffset(_)));
+    assert!(matches!(assignment.locs[2], BufferLoc::Alias(1)));
+    assert!(matches!(assignment.locs[3], BufferLoc::StackOffset(_)));
+    assert!(matches!(assignment.locs[4], BufferLoc::OutputReg));
+}
+
+#[test]
+fn assign_buffers_stack_bytes_is_aligned() {
+    let uir = build_uir(
+        "model M [b=2]:\n    x: Tensor[b, 4]\n    x -> linear[8] -> relu -> linear[2] -> relu\n",
+    );
+    let model = &uir.models[0];
+    let assignment = assign_buffers(model);
+    assert!(assignment.stack_bytes > 0);
+    assert_eq!(assignment.stack_bytes % 16, 0, "stack must be 16-aligned");
+}
+
+#[test]
+fn compute_is_leaf_true_for_no_softmax() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> relu\n");
+    assert!(compute_is_leaf(&uir.models[0]));
+}
+
+#[test]
+fn compute_is_leaf_false_when_softmax_present() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> softmax\n");
+    assert!(!compute_is_leaf(&uir.models[0]));
+}
+
+#[test]
+fn compute_callee_saved_includes_d8_d9_when_softmax() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> softmax\n");
+    let regs = compute_callee_saved(&uir.models[0]);
+    assert!(regs.contains_d8_d9());
+}
+
+#[test]
+fn compute_callee_saved_empty_for_leaf() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> relu\n");
+    let regs = compute_callee_saved(&uir.models[0]);
+    assert!(!regs.contains_d8_d9());
+}
