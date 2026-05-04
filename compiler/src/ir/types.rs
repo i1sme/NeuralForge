@@ -38,8 +38,8 @@ pub struct Node {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PostOp {
-    /// Clamp negative values to zero (max(x, 0)). Equivalent to fusing a
-    /// terminal-or-single-consumer Relu node into its producer.
+    /// Clamp negative values to zero (`max(x, 0)`), applied per-element to
+    /// the producer's output before store.
     Relu,
 }
 
