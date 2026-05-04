@@ -155,34 +155,40 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-**Milestone 4 fully complete (4a + 4b).** The `profiles/arm64` codegen
-profile lowers all 5 M3 positive fixtures (`tiny_mlp`, `classifier`,
-`pipeline_styles`, `comments`, `mixed_args`) plus the M4a fixture
-(`m4_linear_relu`) end-to-end to native AArch64 assembly callable as a
-C function on Apple Silicon.
+**Milestone 5a complete.** UIR-pass infrastructure shipped: `compiler::passes`
+module with `UirPass` trait, `default_pipeline()`, `run_pipeline()`, and
+`FuseLinearRelu` — the first fusion pass. Pass turns `Linear (no bias=true,
+single consumer) → Relu` into `Linear { fused_post_ops: [Relu] }` with the
+Relu node removed and references remapped via fresh NodeIds. Profile/arm64
+emits `fmov s4, wzr` once at function-header time and inline `fmax s0, s0, s4`
+before store (recovers M4a's in-place relu performance).
 
-Op coverage: `linear` (with or without `bias=true`), `relu`, `dropout`
-(no-op pass-through at inference), `softmax` (numerically stable 3-pass
-via libm `expf`). ABI: single packed `params` buffer with typed slot
-metadata (`FnSig.params_layout: Vec<ParamSlot>`). Stack-allocated
-intermediate buffers; conditional non-leaf prologue with d8/d9 + x19-x23
-callee-saved when softmax is present; per-model label namespacing for
-multi-model fixtures.
+CLI `nflc compile` runs `default_pipeline()` between `ir::build` and
+`profiles_arm64::lower` by default; `--no-fuse` flag skips it for verification.
+Strict stdout/stderr discipline: stdout = asm only (pipeable to `cc`); stderr =
+`note:`/`error:` diagnostics. The applied-passes note is emitted only on
+pipeline success.
 
-3-crate workspace (`compiler` lib, `nflc` bin, `profiles/arm64` lib) with
-no dependency cycles. Production code stays std-only; `libloading` is a
-test-only dev-dep. **148 tests passing** across lexer, parser, IR, profile
-codegen, and 6 fixture-driven FFI integration tests + 2 reference-validation
-tests. Both `cargo build --workspace`, `cargo clippy --workspace
---all-targets -- -D warnings`, and `cargo fmt --all -- --check` are clean.
-CI green on every push. `docs/profile_guide/arm64.md` documents the profile
-for users and contributors.
+Op coverage unchanged from M4 (linear ± bias, relu, dropout, softmax).
+ABI unchanged. Stack allocation, non-leaf prologue, label namespacing — all
+unchanged. The `fused_vs_unfused_classifier_match_numerically` integration
+test confirms fusion preserves numerics bit-exactly via `assert_eq!` on
+all 320 output elements of `classifier.nfl`.
 
-The immediate next step is **Milestone 5 — kernel fusion pass**: introduce
-optimisation passes that fuse `linear → relu` (and similar elementwise-
-after-matmul patterns) into a single loop, recovering the in-place
-performance the M4a fixture had and setting up the framework for more
-aggressive fusion (matmul→bias→relu→softmax_max etc.).
+3-crate workspace (`compiler` lib, `nflc` bin, `profiles/arm64` lib).
+Production code std-only; `libloading` is a test-only dev-dep. **173 tests
+passing** across lexer, parser, IR, passes (10 fusion + 4 pipeline-level),
+profile codegen (3 fusion + existing M4b), CLI smoke (3), reference-
+validation, and FFI integration. `cargo build --workspace`,
+`cargo clippy --workspace --all-targets -- -D warnings`, and
+`cargo fmt --all -- --check` are clean. CI green.
+
+The immediate next step is **Milestone 5b — bias-aware fusion +
+EliminateDropout pass**: lift the M5a `linear_has_bias` restriction so
+`linear[bias=true] → relu` fuses (with bias-add inline before the post-op),
+add `EliminateDropout` pass (removes dropout from UIR via the same NodeId-
+remap mechanism), introduce `--passes=X,Y` CLI filter syntax. After M5b:
+`compiler::passes` has 2 passes; profile guide doc updates land in M5c.
 
 ---
 
