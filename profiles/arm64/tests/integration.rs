@@ -111,6 +111,9 @@ fn m4a_no_softmax_still_runs() {
         .expect("fixture readable");
     let ast = compiler::parse(&src).expect("parse");
     let uir = compiler::ir::build(&ast).expect("ir::build");
+    // M5a: exercise the default (fused) path — same as `nflc compile`.
+    let uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
 
     let asm = profiles_arm64::lower(&uir).expect("lower");
     assert_eq!(asm.functions.len(), 1);
@@ -170,6 +173,9 @@ fn tinymlp_full_with_softmax_runs_correctly() {
     let src = std::fs::read_to_string("../../tests/fixtures/tiny_mlp.nfl").unwrap();
     let ast = compiler::parse(&src).unwrap();
     let uir = compiler::ir::build(&ast).unwrap();
+    // M5a: exercise the default (fused) path — same as `nflc compile`.
+    let uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
     let asm = profiles_arm64::lower(&uir).expect("lower");
     let dylib_path = common::compile_to_dylib(&asm.source, "tinymlp_softmax");
 
@@ -215,6 +221,9 @@ fn mixed_args_runs_correctly() {
     let src = std::fs::read_to_string("../../tests/fixtures/mixed_args.nfl").unwrap();
     let ast = compiler::parse(&src).unwrap();
     let uir = compiler::ir::build(&ast).unwrap();
+    // M5a: exercise the default (fused) path — same as `nflc compile`.
+    let uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
     let asm = profiles_arm64::lower(&uir).expect("lower");
 
     // Confirm layout: linear[16, bias=true] + linear[output=2] (no bias) + softmax.
@@ -275,6 +284,9 @@ fn classifier_runs_correctly() {
     let src = std::fs::read_to_string("../../tests/fixtures/classifier.nfl").unwrap();
     let ast = compiler::parse(&src).unwrap();
     let uir = compiler::ir::build(&ast).unwrap();
+    // M5a: exercise the default (fused) path — same as `nflc compile`.
+    let uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
     let asm = profiles_arm64::lower(&uir).expect("lower");
 
     let sig = &asm.functions[0];
@@ -334,6 +346,9 @@ fn pipeline_styles_runs_correctly() {
     let src = std::fs::read_to_string("../../tests/fixtures/pipeline_styles.nfl").unwrap();
     let ast = compiler::parse(&src).unwrap();
     let uir = compiler::ir::build(&ast).unwrap();
+    // M5a: exercise the default (fused) path — same as `nflc compile`.
+    let uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
     let asm = profiles_arm64::lower(&uir).expect("lower");
 
     // Three models with same signature shape.
@@ -396,6 +411,9 @@ fn comments_runs_correctly() {
     let src = std::fs::read_to_string("../../tests/fixtures/comments.nfl").unwrap();
     let ast = compiler::parse(&src).unwrap();
     let uir = compiler::ir::build(&ast).unwrap();
+    // M5a: exercise the default (fused) path — same as `nflc compile`.
+    let uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
     let asm = profiles_arm64::lower(&uir).expect("lower");
 
     let sig = &asm.functions[0];
