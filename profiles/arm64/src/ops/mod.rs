@@ -1,5 +1,6 @@
 //! Per-op codegen modules.
 
+pub mod dropout;
 pub mod linear;
 pub mod relu;
 

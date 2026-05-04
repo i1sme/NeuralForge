@@ -151,6 +151,10 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
                     body.push_str(&crate::ops::emit_relu(total, relu_idx, src_loc, dst_loc));
                     relu_idx += 1;
                 }
+                StdOp::Dropout => {
+                    // No asm emitted: BufferLoc::Alias(operand) ensures
+                    // downstream ops read from the operand's buffer directly.
+                }
                 _ => unreachable!("classify_op should have caught this"),
             }
         }
@@ -179,8 +183,8 @@ fn resolve_loc(locs: &[crate::buffer::BufferLoc], id: NodeId) -> crate::buffer::
     }
 }
 
-/// Validate that an op is supported in M4a; return error otherwise.
-/// Linear with `bias=true` rejected; UnsupportedOp for softmax, dropout.
+/// Validate that an op is supported in M4b; return error otherwise.
+/// Linear with `bias=true` rejected (Task 7 will accept it); UnsupportedOp for softmax (Task 8).
 fn classify_op(
     op: StdOp,
     attrs: &[compiler::OpAttr],
@@ -195,10 +199,7 @@ fn classify_op(
             }
         }
         StdOp::Relu => Ok(()),
-        StdOp::Dropout => Err(LowerError::UnsupportedOp {
-            op: "dropout".into(),
-            span,
-        }),
+        StdOp::Dropout => Ok(()),
         StdOp::Softmax => Err(LowerError::UnsupportedOp {
             op: "softmax".into(),
             span,

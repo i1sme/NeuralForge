@@ -97,11 +97,22 @@ fn linear_with_bias_returns_lower_error() {
 }
 
 #[test]
-fn dropout_returns_unsupported_op() {
-    let uir =
-        build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[3] -> dropout[rate=0.2]\n");
-    let err = lower(&uir).unwrap_err();
-    assert!(matches!(err, LowerError::UnsupportedOp { ref op, .. } if op == "dropout"));
+fn dropout_emits_no_code() {
+    // input → linear → dropout → linear (terminal-linear). Dropout has no
+    // dispatch arm that emits asm; its BufferLoc::Alias(operand) propagates.
+    let uir = build_uir(
+        "model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[3] -> dropout[rate=0.2] -> linear[2]\n",
+    );
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+    // Two linear matmuls present.
+    assert!(s.contains(".Lmm_i_0:"));
+    assert!(s.contains(".Lmm_i_1:"));
+    // No dropout-specific instructions or labels.
+    assert!(
+        !s.contains("dropout"),
+        "asm must not mention dropout literally:\n{s}"
+    );
 }
 
 #[test]
