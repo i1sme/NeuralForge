@@ -483,11 +483,18 @@ fn fused_vs_unfused_classifier_match_numerically() {
     > = unsafe { unfused_lib.get(b"nfl_forward_Classifier") }.unwrap();
 
     // Same deterministic input + params as classifier_runs_correctly test.
+    // Both asms describe the same model; pull params length from the FnSig
+    // instead of hardcoding so the test follows the fixture if it changes.
+    let params_len = fused_asm.functions[0].params_floats;
+    debug_assert_eq!(
+        params_len, unfused_asm.functions[0].params_floats,
+        "fused/unfused FnSig params_floats must agree"
+    );
     let mut input = vec![0.0f32; 32 * 784];
     for (i, v) in input.iter_mut().enumerate() {
         *v = ((i as f32) % 100.0) * 0.001;
     }
-    let mut params = vec![0.0f32; 535040];
+    let mut params = vec![0.0f32; params_len];
     for (i, v) in params.iter_mut().enumerate() {
         *v = (((i as f32) % 1000.0) - 500.0) * 0.0001;
     }
