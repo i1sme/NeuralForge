@@ -418,3 +418,23 @@ fn unsupported_op_display_and_span_round_trip() {
     assert_eq!(e.span().line, span.line);
     assert_eq!(e.span().col, span.col);
 }
+
+#[test]
+fn unsupported_post_op_display_and_span_round_trip() {
+    let span = compiler::ast::Span::new(7, 3);
+    let e = LowerError::UnsupportedPostOp {
+        op: "future_post_op".into(),
+        span,
+    };
+    let msg = e.to_string();
+    assert!(
+        msg.contains("future_post_op"),
+        "Display should mention post-op name; got: {msg}"
+    );
+    assert!(
+        msg.contains("post-op"),
+        "Display should clearly mark this as a post-op error; got: {msg}"
+    );
+    assert_eq!(e.span().line, span.line);
+    assert_eq!(e.span().col, span.col);
+}
