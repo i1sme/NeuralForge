@@ -1,7 +1,7 @@
 //! Unit tests for the lexer.
 
-use super::*;
 use super::tokens::TokenKind::*;
+use super::*;
 
 fn lex_kinds(source: &str) -> Vec<TokenKind> {
     lex(source).unwrap().into_iter().map(|t| t.kind).collect()
@@ -71,20 +71,23 @@ fn lex_comment_alone() {
 #[test]
 fn lex_comment_at_end_of_line() {
     // Comment after a token does not affect the token, and is consumed.
-    assert_eq!(
-        lex_kinds("model # ignored"),
-        vec![Model, Eof],
-    );
+    assert_eq!(lex_kinds("model # ignored"), vec![Model, Eof],);
 }
 
 #[test]
 fn lex_newline_lf() {
-    assert_eq!(lex_kinds("model\nTensor"), vec![Model, Newline, Tensor, Eof]);
+    assert_eq!(
+        lex_kinds("model\nTensor"),
+        vec![Model, Newline, Tensor, Eof]
+    );
 }
 
 #[test]
 fn lex_newline_crlf() {
-    assert_eq!(lex_kinds("model\r\nTensor"), vec![Model, Newline, Tensor, Eof]);
+    assert_eq!(
+        lex_kinds("model\r\nTensor"),
+        vec![Model, Newline, Tensor, Eof]
+    );
 }
 
 #[test]
@@ -93,7 +96,17 @@ fn lex_simple_indent_block() {
     let src = "model X:\n    foo\n";
     assert_eq!(
         lex_kinds(src),
-        vec![Model, Ident("X".into()), Colon, Newline, Indent, Ident("foo".into()), Newline, Dedent, Eof],
+        vec![
+            Model,
+            Ident("X".into()),
+            Colon,
+            Newline,
+            Indent,
+            Ident("foo".into()),
+            Newline,
+            Dedent,
+            Eof
+        ],
     );
 }
 
@@ -103,9 +116,16 @@ fn lex_indent_then_dedent_back_to_zero() {
     assert_eq!(
         lex_kinds(src),
         vec![
-            Model, Ident("X".into()), Colon, Newline,
-            Indent, Ident("foo".into()), Newline,
-            Dedent, Ident("bar".into()), Newline,
+            Model,
+            Ident("X".into()),
+            Colon,
+            Newline,
+            Indent,
+            Ident("foo".into()),
+            Newline,
+            Dedent,
+            Ident("bar".into()),
+            Newline,
             Eof,
         ],
     );
@@ -118,11 +138,18 @@ fn lex_blank_lines_do_not_affect_indent() {
     assert_eq!(
         lex_kinds(src),
         vec![
-            Model, Ident("X".into()), Colon, Newline,
-            Indent, Ident("foo".into()), Newline,
+            Model,
+            Ident("X".into()),
+            Colon,
             Newline,
-            Ident("bar".into()), Newline,
-            Dedent, Eof,
+            Indent,
+            Ident("foo".into()),
+            Newline,
+            Newline,
+            Ident("bar".into()),
+            Newline,
+            Dedent,
+            Eof,
         ],
     );
 }
@@ -135,11 +162,18 @@ fn lex_comment_only_line_does_not_affect_indent() {
     assert_eq!(
         lex_kinds(src),
         vec![
-            Model, Ident("X".into()), Colon, Newline,
-            Indent, Ident("foo".into()), Newline,
-            Newline,                                   // for the comment-bearing line
-            Ident("bar".into()), Newline,
-            Dedent, Eof,
+            Model,
+            Ident("X".into()),
+            Colon,
+            Newline,
+            Indent,
+            Ident("foo".into()),
+            Newline,
+            Newline, // for the comment-bearing line
+            Ident("bar".into()),
+            Newline,
+            Dedent,
+            Eof,
         ],
     );
 }
@@ -163,11 +197,21 @@ fn lex_nested_indent_dedent() {
     assert_eq!(
         lex_kinds(src),
         vec![
-            Model, Ident("X".into()), Colon, Newline,
-            Indent, Ident("foo".into()), Newline,
-            Indent, Ident("bar".into()), Newline,
-            Dedent, Ident("baz".into()), Newline,
-            Dedent, Eof,
+            Model,
+            Ident("X".into()),
+            Colon,
+            Newline,
+            Indent,
+            Ident("foo".into()),
+            Newline,
+            Indent,
+            Ident("bar".into()),
+            Newline,
+            Dedent,
+            Ident("baz".into()),
+            Newline,
+            Dedent,
+            Eof,
         ],
     );
 }
@@ -179,11 +223,20 @@ fn lex_pipeline_continuation_basic() {
     assert_eq!(
         lex_kinds(src),
         vec![
-            Model, Ident("X".into()), Colon, Newline,
+            Model,
+            Ident("X".into()),
+            Colon,
+            Newline,
             Indent,
-            Ident("a".into()), Arrow, Ident("b".into()), Newline,
-            Arrow, Ident("c".into()), Newline,        // continuation: NO Indent
-            Dedent, Eof,
+            Ident("a".into()),
+            Arrow,
+            Ident("b".into()),
+            Newline,
+            Arrow,
+            Ident("c".into()),
+            Newline, // continuation: NO Indent
+            Dedent,
+            Eof,
         ],
     );
 }
@@ -196,12 +249,21 @@ fn lex_pipeline_continuation_then_real_dedent() {
     assert_eq!(
         lex_kinds(src),
         vec![
-            Model, Ident("X".into()), Colon, Newline,
+            Model,
+            Ident("X".into()),
+            Colon,
+            Newline,
             Indent,
-            Ident("a".into()), Arrow, Ident("b".into()), Newline,
-            Arrow, Ident("c".into()), Newline,
+            Ident("a".into()),
+            Arrow,
+            Ident("b".into()),
+            Newline,
+            Arrow,
+            Ident("c".into()),
+            Newline,
             Dedent,
-            Ident("foo".into()), Newline,
+            Ident("foo".into()),
+            Newline,
             Eof,
         ],
     );
@@ -213,19 +275,30 @@ fn lex_two_continuations_in_a_row() {
     assert_eq!(
         lex_kinds(src),
         vec![
-            Model, Ident("X".into()), Colon, Newline,
+            Model,
+            Ident("X".into()),
+            Colon,
+            Newline,
             Indent,
-            Ident("a".into()), Arrow, Ident("b".into()), Newline,
-            Arrow, Ident("c".into()), Newline,
-            Arrow, Ident("d".into()), Newline,
-            Dedent, Eof,
+            Ident("a".into()),
+            Arrow,
+            Ident("b".into()),
+            Newline,
+            Arrow,
+            Ident("c".into()),
+            Newline,
+            Arrow,
+            Ident("d".into()),
+            Newline,
+            Dedent,
+            Eof,
         ],
     );
 }
 
 #[test]
 fn err_tab_in_indent() {
-    let src = "model X:\n\tfoo\n";              // tab as the leading whitespace
+    let src = "model X:\n\tfoo\n"; // tab as the leading whitespace
     let err = lex(src).unwrap_err();
     match err {
         LexError::TabInIndent { line, col } => {

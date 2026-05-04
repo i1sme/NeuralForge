@@ -7,8 +7,8 @@ mod tiny_mlp {
 
     #[test]
     fn tiny_mlp_builds() {
-        let src = std::fs::read_to_string("../tests/fixtures/tiny_mlp.nfl")
-            .expect("fixture readable");
+        let src =
+            std::fs::read_to_string("../tests/fixtures/tiny_mlp.nfl").expect("fixture readable");
         let ast = parse(&src).expect("must parse");
         let uir = ir::build(&ast).expect("must build");
 
@@ -26,16 +26,27 @@ mod tiny_mlp {
         assert_eq!(m.nodes[0].ty.shape.0, vec![8, 4]);
 
         // Node 1: Linear[2], operands=[0], shape Tensor[8, 2]
-        let NodeKind::Op { op, operands, attrs } = &m.nodes[1].kind else { panic!() };
+        let NodeKind::Op {
+            op,
+            operands,
+            attrs,
+        } = &m.nodes[1].kind
+        else {
+            panic!()
+        };
         assert_eq!(*op, StdOp::Linear);
         assert_eq!(operands.as_slice(), &[0]);
         assert_eq!(m.nodes[1].ty.shape.0, vec![8, 2]);
-        let AttrValue::Integer(out_dim) = attrs[0].value else { panic!() };
+        let AttrValue::Integer(out_dim) = attrs[0].value else {
+            panic!()
+        };
         assert_eq!(out_dim, 2);
         assert_eq!(attrs[0].name, "out_dim");
 
         // Node 2: Softmax, operands=[1], shape Tensor[8, 2]
-        let NodeKind::Op { op, operands, .. } = &m.nodes[2].kind else { panic!() };
+        let NodeKind::Op { op, operands, .. } = &m.nodes[2].kind else {
+            panic!()
+        };
         assert_eq!(*op, StdOp::Softmax);
         assert_eq!(operands.as_slice(), &[1]);
         assert_eq!(m.nodes[2].ty.shape.0, vec![8, 2]);
@@ -62,7 +73,10 @@ mod tiny_mlp {
         let src = "model X [a=1]:\n    x: Tensor[a, 1]\n";
         let ast = parse(src).expect("parses");
         let err = ir::build(&ast).expect_err("must fail");
-        assert!(matches!(err.kind, BuildErrorKind::ModelHasNoPipeline { .. }));
+        assert!(matches!(
+            err.kind,
+            BuildErrorKind::ModelHasNoPipeline { .. }
+        ));
     }
 }
 
@@ -71,8 +85,8 @@ mod classifier {
 
     #[test]
     fn classifier_builds() {
-        let src = std::fs::read_to_string("../tests/fixtures/classifier.nfl")
-            .expect("fixture readable");
+        let src =
+            std::fs::read_to_string("../tests/fixtures/classifier.nfl").expect("fixture readable");
         let ast = parse(&src).expect("must parse");
         let uir = ir::build(&ast).expect("must build");
 
@@ -93,11 +107,15 @@ mod classifier {
         assert_eq!(m.nodes[7].ty.shape.0, vec![32, 10]);
 
         // Spot-check the dropout node (n3) has its named float arg.
-        let NodeKind::Op { op, attrs, .. } = &m.nodes[3].kind else { panic!() };
+        let NodeKind::Op { op, attrs, .. } = &m.nodes[3].kind else {
+            panic!()
+        };
         assert_eq!(*op, StdOp::Dropout);
         assert_eq!(attrs.len(), 1);
         assert_eq!(attrs[0].name, "rate");
-        let AttrValue::Float(rate) = attrs[0].value else { panic!() };
+        let AttrValue::Float(rate) = attrs[0].value else {
+            panic!()
+        };
         assert!((rate - 0.2).abs() < 1e-9);
     }
 }
@@ -136,8 +154,8 @@ mod comments {
 
     #[test]
     fn comments_builds() {
-        let src = std::fs::read_to_string("../tests/fixtures/comments.nfl")
-            .expect("fixture readable");
+        let src =
+            std::fs::read_to_string("../tests/fixtures/comments.nfl").expect("fixture readable");
         let ast = parse(&src).expect("must parse");
         let uir = ir::build(&ast).expect("must build");
 
@@ -156,15 +174,17 @@ mod mixed_args {
 
     #[test]
     fn mixed_args_builds() {
-        let src = std::fs::read_to_string("../tests/fixtures/mixed_args.nfl")
-            .expect("fixture readable");
+        let src =
+            std::fs::read_to_string("../tests/fixtures/mixed_args.nfl").expect("fixture readable");
         let ast = parse(&src).expect("must parse");
         let uir = ir::build(&ast).expect("must build");
 
         let m = &uir.models[0];
 
         // First op: linear[16, bias=true] — positional Integer + named Symbol.
-        let NodeKind::Op { op, attrs, .. } = &m.nodes[1].kind else { panic!() };
+        let NodeKind::Op { op, attrs, .. } = &m.nodes[1].kind else {
+            panic!()
+        };
         assert_eq!(*op, StdOp::Linear);
         assert_eq!(attrs.len(), 2);
         // Positional out_dim = 16
@@ -203,7 +223,9 @@ mod m4_linear_relu {
         assert_eq!(m.nodes[2].ty.shape.0, vec![8, 2]);
 
         // Linear has no bias attr.
-        let NodeKind::Op { op, attrs, .. } = &m.nodes[1].kind else { panic!() };
+        let NodeKind::Op { op, attrs, .. } = &m.nodes[1].kind else {
+            panic!()
+        };
         assert_eq!(*op, StdOp::Linear);
         assert_eq!(attrs.len(), 1);
         assert_eq!(attrs[0].name, "out_dim");
@@ -216,9 +238,9 @@ mod negative {
 
     #[test]
     fn dropout_rate_out_of_range_rejected() {
-        let src = std::fs::read_to_string(
-            "../tests/fixtures/negative/dropout_rate_out_of_range.nfl"
-        ).expect("fixture readable");
+        let src =
+            std::fs::read_to_string("../tests/fixtures/negative/dropout_rate_out_of_range.nfl")
+                .expect("fixture readable");
         let ast = parse(&src).expect("parses");
         let err = ir::build(&ast).expect_err("must fail");
         assert!(matches!(err.kind, BuildErrorKind::InvalidAttrValue { .. }));

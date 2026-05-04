@@ -36,20 +36,32 @@ pub enum ShapeError {
     /// reaches single-input shape inference. No M3 op constructs >1 operand,
     /// so no test fires this path; the constructor exists so M5+ multi-input
     /// ops (add/concat) cannot silently misroute through single-input helpers.
-    WrongInputCount { expected: usize, actual: usize },
-    WrongRank { expected: usize, actual: usize, dim_index: Option<usize> },
-    MissingAttr { name: &'static str },
+    WrongInputCount {
+        expected: usize,
+        actual: usize,
+    },
+    WrongRank {
+        expected: usize,
+        actual: usize,
+        dim_index: Option<usize>,
+    },
+    MissingAttr {
+        name: &'static str,
+    },
 }
 
 impl std::fmt::Display for ShapeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ShapeError::WrongInputCount { expected, actual } =>
-                write!(f, "expected {} input(s), got {}", expected, actual),
-            ShapeError::WrongRank { expected, actual, dim_index: _ } =>
-                write!(f, "expected rank {}, got {}", expected, actual),
-            ShapeError::MissingAttr { name } =>
-                write!(f, "missing required attribute: '{}'", name),
+            ShapeError::WrongInputCount { expected, actual } => {
+                write!(f, "expected {} input(s), got {}", expected, actual)
+            }
+            ShapeError::WrongRank {
+                expected,
+                actual,
+                dim_index: _,
+            } => write!(f, "expected rank {}, got {}", expected, actual),
+            ShapeError::MissingAttr { name } => write!(f, "missing required attribute: '{}'", name),
         }
     }
 }
@@ -68,15 +80,33 @@ pub fn signature(op: StdOp) -> Signature {
     use ArgType::*;
     match op {
         StdOp::Linear => Signature {
-            positional: &[ArgSlot { name: "out_dim", ty: Integer, required: true }],
-            named: &[ArgSlot { name: "bias", ty: Symbol, required: false }],
+            positional: &[ArgSlot {
+                name: "out_dim",
+                ty: Integer,
+                required: true,
+            }],
+            named: &[ArgSlot {
+                name: "bias",
+                ty: Symbol,
+                required: false,
+            }],
         },
-        StdOp::Relu => Signature { positional: &[], named: &[] },
+        StdOp::Relu => Signature {
+            positional: &[],
+            named: &[],
+        },
         StdOp::Dropout => Signature {
             positional: &[],
-            named: &[ArgSlot { name: "rate", ty: Float, required: true }],
+            named: &[ArgSlot {
+                name: "rate",
+                ty: Float,
+                required: true,
+            }],
         },
-        StdOp::Softmax => Signature { positional: &[], named: &[] },
+        StdOp::Softmax => Signature {
+            positional: &[],
+            named: &[],
+        },
     }
 }
 
@@ -103,7 +133,10 @@ fn single_input(inputs: &[Shape]) -> Result<&Shape, ShapeError> {
     if inputs.len() == 1 {
         Ok(&inputs[0])
     } else {
-        Err(ShapeError::WrongInputCount { expected: 1, actual: inputs.len() })
+        Err(ShapeError::WrongInputCount {
+            expected: 1,
+            actual: inputs.len(),
+        })
     }
 }
 
@@ -111,7 +144,11 @@ fn require_rank(s: &Shape, expected: usize) -> Result<(), ShapeError> {
     if s.rank() == expected {
         Ok(())
     } else {
-        Err(ShapeError::WrongRank { expected, actual: s.rank(), dim_index: None })
+        Err(ShapeError::WrongRank {
+            expected,
+            actual: s.rank(),
+            dim_index: None,
+        })
     }
 }
 
@@ -128,17 +165,31 @@ fn get_int_attr(attrs: &[OpAttr], name: &'static str) -> Result<u64, ShapeError>
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AttrError {
-    OutOfRange { name: &'static str, value: f64, min: f64, max: f64 },
-    MissingAttr { name: &'static str },
+    OutOfRange {
+        name: &'static str,
+        value: f64,
+        min: f64,
+        max: f64,
+    },
+    MissingAttr {
+        name: &'static str,
+    },
 }
 
 impl std::fmt::Display for AttrError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AttrError::OutOfRange { name, value, min, max } =>
-                write!(f, "attribute '{}' value {} is outside [{}, {}]", name, value, min, max),
-            AttrError::MissingAttr { name } =>
-                write!(f, "missing required attribute: '{}'", name),
+            AttrError::OutOfRange {
+                name,
+                value,
+                min,
+                max,
+            } => write!(
+                f,
+                "attribute '{}' value {} is outside [{}, {}]",
+                name, value, min, max
+            ),
+            AttrError::MissingAttr { name } => write!(f, "missing required attribute: '{}'", name),
         }
     }
 }

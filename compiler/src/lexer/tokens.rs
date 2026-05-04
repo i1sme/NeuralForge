@@ -54,7 +54,10 @@ impl std::fmt::Display for LexError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LexError::TabInIndent { .. } => write!(f, "tab character in leading whitespace"),
-            LexError::BadDedent { .. } => write!(f, "inconsistent dedent: indent level does not match any enclosing block"),
+            LexError::BadDedent { .. } => write!(
+                f,
+                "inconsistent dedent: indent level does not match any enclosing block"
+            ),
             LexError::UnknownChar { ch, .. } => write!(f, "unknown character: {:?}", ch),
             LexError::BadNumber { raw, .. } => write!(f, "malformed number literal: {:?}", raw),
             LexError::UnexpectedEof { .. } => write!(f, "unexpected end of file"),

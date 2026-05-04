@@ -1,7 +1,7 @@
 //! Hand-written lexer for NFL.
 
-pub mod tokens;
 mod indent;
+pub mod tokens;
 
 #[cfg(test)]
 mod tests;
@@ -60,11 +60,8 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         // Detect pipeline continuation: a content line that starts with "->"
         // at an indent strictly greater than the current block's indent is a
         // continuation of the previous pipeline_stmt — no Indent/Dedent emitted.
-        let starts_with_arrow = i + 1 < bytes.len()
-            && bytes[i] == b'-'
-            && bytes[i + 1] == b'>';
-        let is_continuation = starts_with_arrow
-            && indent_spaces > stack.current_top();
+        let starts_with_arrow = i + 1 < bytes.len() && bytes[i] == b'-' && bytes[i + 1] == b'>';
+        let is_continuation = starts_with_arrow && indent_spaces > stack.current_top();
 
         if !is_continuation {
             let first_col = indent_spaces as u32 + 1;
@@ -120,9 +117,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             if b.is_ascii_alphabetic() {
                 let start = i;
                 let start_col = col;
-                while i < bytes.len()
-                    && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
-                {
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                     i += 1;
                     col += 1;
                 }
@@ -146,9 +141,8 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     i += 1;
                     col += 1;
                 }
-                let has_fractional = i + 1 < bytes.len()
-                    && bytes[i] == b'.'
-                    && bytes[i + 1].is_ascii_digit();
+                let has_fractional =
+                    i + 1 < bytes.len() && bytes[i] == b'.' && bytes[i + 1].is_ascii_digit();
                 if has_fractional {
                     i += 1;
                     col += 1;
@@ -175,7 +169,11 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 continue;
             }
 
-            return Err(LexError::UnknownChar { line, col, ch: b as char });
+            return Err(LexError::UnknownChar {
+                line,
+                col,
+                ch: b as char,
+            });
         }
 
         // End of content line: emit Newline if we are at one, then advance.

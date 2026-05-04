@@ -53,7 +53,12 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
     // Sum weight sizes for all Linear ops in topological (UIR-node) order.
     let mut weight_floats: usize = 0;
     for node in &model.nodes {
-        if let NodeKind::Op { op: StdOp::Linear, operands, .. } = &node.kind {
+        if let NodeKind::Op {
+            op: StdOp::Linear,
+            operands,
+            ..
+        } = &node.kind
+        {
             // Input shape of this linear is the operand's shape; output rank-2 col is N.
             let in_shape = &model.nodes[operands[0]].ty.shape;
             let out_shape = &node.ty.shape;
@@ -85,7 +90,9 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
                     let out_shape = &node.ty.shape;
                     // shape is [batch, k] for input and [batch, n] for output
                     if in_shape.0.len() != 2 || out_shape.0.len() != 2 {
-                        return Err(LowerError::ShapeNotConcrete { span: node.source_span });
+                        return Err(LowerError::ShapeNotConcrete {
+                            span: node.source_span,
+                        });
                     }
                     let b = in_shape.0[0];
                     let k = in_shape.0[1];
@@ -121,7 +128,9 @@ fn emit_matmul(b: u64, k: u64, n: u64, linear_idx: usize) -> String {
     let mut s = String::new();
     let lid = linear_idx;
 
-    s.push_str(&format!("    ; matmul: input [{b},{k}] × weights [{k},{n}] → output [{b},{n}]\n"));
+    s.push_str(&format!(
+        "    ; matmul: input [{b},{k}] × weights [{k},{n}] → output [{b},{n}]\n"
+    ));
 
     // Hoist loop-invariant stride constants out of the inner loops.
     // x10 = K (input row stride and weight row count)
@@ -196,7 +205,9 @@ fn emit_relu(total_floats: u64, relu_idx: usize) -> String {
     let mut s = String::new();
     let rid = relu_idx;
 
-    s.push_str(&format!("    ; relu: in-place clamp on output buffer ({total_floats} elements)\n"));
+    s.push_str(&format!(
+        "    ; relu: in-place clamp on output buffer ({total_floats} elements)\n"
+    ));
     s.push_str("    fmov    s4, wzr\n");
     s.push_str("    mov     x9, #0\n");
     s.push_str(&format!(".Lrelu_{rid}:\n"));
@@ -234,7 +245,13 @@ fn classify_op(
             Ok(())
         }
         StdOp::Relu => Ok(()),
-        StdOp::Dropout => Err(LowerError::UnsupportedOp { op: "dropout".into(), span }),
-        StdOp::Softmax => Err(LowerError::UnsupportedOp { op: "softmax".into(), span }),
+        StdOp::Dropout => Err(LowerError::UnsupportedOp {
+            op: "dropout".into(),
+            span,
+        }),
+        StdOp::Softmax => Err(LowerError::UnsupportedOp {
+            op: "softmax".into(),
+            span,
+        }),
     }
 }

@@ -26,20 +26,17 @@ fn tinymlp_no_softmax_runs_correctly() {
     assert_eq!(asm.functions.len(), 1, "one function expected");
     let sig = &asm.functions[0];
     assert_eq!(sig.name, "nfl_forward_M4Demo");
-    assert_eq!(sig.input_floats, 32);   // 8*4
-    assert_eq!(sig.weight_floats, 8);   // 4*2
-    assert_eq!(sig.output_floats, 16);  // 8*2
+    assert_eq!(sig.input_floats, 32); // 8*4
+    assert_eq!(sig.weight_floats, 8); // 4*2
+    assert_eq!(sig.output_floats, 16); // 8*2
 
     // 3. Assemble + link.
     let dylib_path = common::compile_to_dylib(&asm.source, "m4_linear_relu");
 
     // 4. dlopen + call via FFI.
-    let lib = unsafe { libloading::Library::new(&dylib_path) }
-        .expect("libloading: open dylib");
-    let forward: libloading::Symbol<
-        unsafe extern "C" fn(*const f32, *const f32, *mut f32),
-    > = unsafe { lib.get(b"nfl_forward_M4Demo") }
-        .expect("dlsym: nfl_forward_M4Demo not found");
+    let lib = unsafe { libloading::Library::new(&dylib_path) }.expect("libloading: open dylib");
+    let forward: libloading::Symbol<unsafe extern "C" fn(*const f32, *const f32, *mut f32)> =
+        unsafe { lib.get(b"nfl_forward_M4Demo") }.expect("dlsym: nfl_forward_M4Demo not found");
 
     // Deterministic test inputs.
     let mut input = [0.0f32; 32];
@@ -52,7 +49,9 @@ fn tinymlp_no_softmax_runs_correctly() {
     }
     let mut output = [0.0f32; 16];
 
-    unsafe { forward(input.as_ptr(), weights.as_ptr(), output.as_mut_ptr()); }
+    unsafe {
+        forward(input.as_ptr(), weights.as_ptr(), output.as_mut_ptr());
+    }
 
     // 5. Compare against pure-Rust reference.
     let expected = reference_linear_relu(&input, &weights);

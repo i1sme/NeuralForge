@@ -53,14 +53,23 @@ pub enum LowerError {
 impl std::fmt::Display for LowerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LowerError::UnsupportedOp { op, .. } =>
-                write!(f, "operation '{}' is not supported by the arm64 profile in M4a", op),
-            LowerError::LinearWithBias { .. } =>
-                write!(f, "linear[..., bias=true] is not yet implemented (M4b)"),
-            LowerError::ShapeNotConcrete { .. } =>
-                write!(f, "internal: UIR shape was not fully resolved before lowering"),
-            LowerError::DuplicateModelName { name, .. } =>
-                write!(f, "duplicate model name '{}': would emit conflicting symbols", name),
+            LowerError::UnsupportedOp { op, .. } => write!(
+                f,
+                "operation '{}' is not supported by the arm64 profile in M4a",
+                op
+            ),
+            LowerError::LinearWithBias { .. } => {
+                write!(f, "linear[..., bias=true] is not yet implemented (M4b)")
+            }
+            LowerError::ShapeNotConcrete { .. } => write!(
+                f,
+                "internal: UIR shape was not fully resolved before lowering"
+            ),
+            LowerError::DuplicateModelName { name, .. } => write!(
+                f,
+                "duplicate model name '{}': would emit conflicting symbols",
+                name
+            ),
         }
     }
 }

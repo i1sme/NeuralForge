@@ -36,7 +36,11 @@ fn main() -> ExitCode {
         [cmd, path, p_flag, p_name, o_flag, o_path]
             if cmd == "compile" && p_flag == "--profile" && o_flag == "-o" =>
         {
-            run_compile(PathBuf::from(path), p_name.clone(), Some(PathBuf::from(o_path)))
+            run_compile(
+                PathBuf::from(path),
+                p_name.clone(),
+                Some(PathBuf::from(o_path)),
+            )
         }
         [cmd] if cmd == "compile" => {
             eprintln!("error: 'compile' requires a file path and --profile");
@@ -72,13 +76,7 @@ fn print_usage() {
 /// 12 |     x -> dropout[rate=1.5] -> softmax
 ///    |                       ^
 /// ```
-fn render_error_with_snippet(
-    source: &str,
-    path: &Path,
-    line: u32,
-    col: u32,
-    message: &str,
-) {
+fn render_error_with_snippet(source: &str, path: &Path, line: u32, col: u32, message: &str) {
     eprintln!("error: {}", message);
     eprintln!("  --> {}:{}:{}", path.display(), line, col);
     let line_idx = line.saturating_sub(1) as usize;
@@ -160,10 +158,14 @@ fn print_stmt(s: &compiler::ModelStmt, depth: usize) {
                 if !op.args.is_empty() {
                     print!("[");
                     for (i, a) in op.args.iter().enumerate() {
-                        if i > 0 { print!(", "); }
+                        if i > 0 {
+                            print!(", ");
+                        }
                         match a {
                             compiler::OpArg::Positional(v) => print!("{}", format_arg(v)),
-                            compiler::OpArg::Named { name, value } => print!("{name}={}", format_arg(value)),
+                            compiler::OpArg::Named { name, value } => {
+                                print!("{name}={}", format_arg(value))
+                            }
                         }
                     }
                     print!("]");
