@@ -365,11 +365,31 @@ for i in 0..B:                         # per-row outer loop
         output[i*K + k] = output[i*K + k] / sum
 ```
 
+**Materialising `-inf` for the max init.** AArch64 `fmov` immediate uses an
+8-bit FP encoding that does NOT include ±inf, ±0, NaN, or denormals. So
+`fmov s8, #-inf` is invalid — assembler will reject it. The portable
+pattern is to load the bit pattern of `-inf` (`0xFF800000` for f32) into a
+GPR and `fmov` from GPR to FP register (this `fmov` variant moves bits
+literally, no immediate restriction):
+
+```asm
+    movz    w0, #0x0000
+    movk    w0, #0xFF80, lsl #16   ; w0 = 0xFF800000 = f32 -inf
+    fmov    s8, w0
+```
+
+(`movz` zeros the destination then sets the low 16 bits; `movk` keeps
+existing bits and updates one 16-bit chunk. Apple's `as` may also accept
+the equivalent `mov w0, #0xFF800000` syntax; the `movz`/`movk` pair is the
+explicit-and-portable form.) Sum init (`s9 = 0.0`) uses the same trick as
+M4a's relu: `fmov s9, wzr` (the integer-zero-register source is a special
+case the encoder permits).
+
 **Asm sketch (per-row body):**
 
 ```asm
     ; Pass 1: max into s8 (callee-saved)
-    ; ... materialise -inf into s8, then loop fmax over input row ...
+    ; ... materialise -inf into s8 (see above), then loop fmax over input row ...
 
     ; Pass 2: exp loop with bl _expf
     ; ... loop body:
