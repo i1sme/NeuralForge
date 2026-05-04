@@ -5,6 +5,10 @@ use crate::ops::linear::materialise_ptr;
 
 /// Emit AArch64 asm for softmax over `[b, k]` shape (per-row normalize).
 ///
+/// `model_idx` and `softmax_idx` together uniquely name every label across
+/// all models emitted into a single assembly file (multi-model fixtures like
+/// `pipeline_styles.nfl` would otherwise collide on `.Lsm_i_0` etc.).
+///
 /// Uses `bl _expf` (libm). State across the call is held in callee-saved
 /// registers so that `_expf` cannot clobber it:
 ///   x19 = i (outer row counter)
@@ -21,11 +25,12 @@ use crate::ops::linear::materialise_ptr;
 pub fn emit_softmax(
     b: u64,
     k: u64,
+    model_idx: usize,
     softmax_idx: usize,
     src_loc: BufferLoc,
     dst_loc: BufferLoc,
 ) -> String {
-    let sid = softmax_idx;
+    let sid = format!("{model_idx}_{softmax_idx}");
     let mut s = String::new();
     s.push_str(&format!(
         "    ; softmax (3-pass): input [{b},{k}] -> output [{b},{k}]\n"

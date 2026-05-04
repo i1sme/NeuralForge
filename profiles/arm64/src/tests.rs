@@ -48,9 +48,10 @@ fn linear_emits_matmul_loops_with_fmadd() {
     let asm = lower(&uir).expect("lower");
     let s = &asm.source;
     assert!(s.contains("fmadd"), "expected fmadd in:\n{s}");
-    assert!(s.contains(".Lmm_i_0:"));
-    assert!(s.contains(".Lmm_j_0:"));
-    assert!(s.contains(".Lmm_k_0:"));
+    // Labels include model_idx prefix: model 0, linear 0 → "0_0".
+    assert!(s.contains(".Lmm_i_0_0:"));
+    assert!(s.contains(".Lmm_j_0_0:"));
+    assert!(s.contains(".Lmm_k_0_0:"));
     assert!(s.contains("cmp     x3, #2"));
     assert!(s.contains("cmp     x4, #2"));
     assert!(s.contains("cmp     x5, #3"));
@@ -66,7 +67,7 @@ fn relu_emits_separate_loop_with_fmov_zero_and_fmax() {
     let s = &asm.source;
     assert!(s.contains("fmov    s4, wzr"));
     assert!(s.contains("fmax    s3, s3, s4"));
-    assert!(s.contains(".Lrelu_0:"));
+    assert!(s.contains(".Lrelu_0_0:"));
     assert!(s.contains("cmp     x9, #4"));
     // Relu now uses materialised src/dst pointers.
     assert!(s.contains("ldr     s3, [x11,"));
@@ -90,9 +91,9 @@ fn dropout_emits_no_code() {
     );
     let asm = lower(&uir).expect("lower");
     let s = &asm.source;
-    // Two linear matmuls present.
-    assert!(s.contains(".Lmm_i_0:"));
-    assert!(s.contains(".Lmm_i_1:"));
+    // Two linear matmuls present (model 0 → "0_0" and "0_1").
+    assert!(s.contains(".Lmm_i_0_0:"));
+    assert!(s.contains(".Lmm_i_0_1:"));
     // No dropout-specific instructions or labels.
     assert!(
         !s.contains("dropout"),
@@ -126,10 +127,10 @@ fn softmax_emits_three_passes() {
     assert!(s.contains("movk    w0, #0xFF80, lsl #16"));
     assert!(s.contains("fmov    s8, w0"));
 
-    // Pass ordering: max → exp → norm.
-    let max_label = s.find(".Lsm_max_0:").expect("max label");
-    let exp_label = s.find(".Lsm_exp_0:").expect("exp label");
-    let norm_label = s.find(".Lsm_norm_0:").expect("norm label");
+    // Pass ordering: max → exp → norm. Labels include model_idx prefix → "0_0".
+    let max_label = s.find(".Lsm_max_0_0:").expect("max label");
+    let exp_label = s.find(".Lsm_exp_0_0:").expect("exp label");
+    let norm_label = s.find(".Lsm_norm_0_0:").expect("norm label");
     assert!(max_label < exp_label, "max must precede exp");
     assert!(exp_label < norm_label, "exp must precede norm");
 }

@@ -1,19 +1,26 @@
 //! Linear (matmul + optional bias-add) codegen.
 
+use crate::asm::emit_imm32;
 use crate::buffer::BufferLoc;
 
+/// Emit AArch64 asm for a linear layer (matmul + optional bias-add).
+///
+/// `model_idx` and `linear_idx` together uniquely name every label in the
+/// output file, which is critical when multiple models share one assembly
+/// source (e.g. pipeline_styles.nfl with 3 model definitions).
 #[allow(clippy::too_many_arguments)]
 pub fn emit_linear(
     b: u64,
     k: u64,
     n: u64,
+    model_idx: usize,
     linear_idx: usize,
     src_loc: BufferLoc,
     dst_loc: BufferLoc,
     weight_offset: usize,
     bias_offset: Option<usize>,
 ) -> String {
-    let lid = linear_idx;
+    let lid = format!("{model_idx}_{linear_idx}");
     let mut s = String::new();
     s.push_str(&format!(
         "    ; matmul: input [{b},{k}] x weights [{k},{n}] -> output [{b},{n}]{}\n",
@@ -25,14 +32,14 @@ pub fn emit_linear(
     if weight_offset == 0 {
         s.push_str("    mov     x13, x1\n");
     } else {
-        s.push_str(&format!("    mov     x9, #{}\n", weight_offset));
+        s.push_str(&emit_imm32("x9", weight_offset));
         s.push_str("    add     x13, x1, x9, lsl #2\n");
     }
     if let Some(boff) = bias_offset {
         if boff == 0 {
             s.push_str("    mov     x14, x1\n");
         } else {
-            s.push_str(&format!("    mov     x9, #{}\n", boff));
+            s.push_str(&emit_imm32("x9", boff));
             s.push_str("    add     x14, x1, x9, lsl #2\n");
         }
     }

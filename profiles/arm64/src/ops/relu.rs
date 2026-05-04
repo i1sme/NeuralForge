@@ -3,13 +3,18 @@
 use crate::buffer::BufferLoc;
 use crate::ops::linear::materialise_ptr;
 
+/// Emit AArch64 asm for an elementwise ReLU.
+///
+/// `model_idx` + `relu_idx` together uniquely name every label across all
+/// models emitted into a single assembly file.
 pub fn emit_relu(
     total_floats: u64,
+    model_idx: usize,
     relu_idx: usize,
     src_loc: BufferLoc,
     dst_loc: BufferLoc,
 ) -> String {
-    let rid = relu_idx;
+    let rid = format!("{model_idx}_{relu_idx}");
     let mut s = String::new();
     s.push_str(&format!(
         "    ; relu: copy-clamp from src to dst ({total_floats} elements)\n"

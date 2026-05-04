@@ -95,6 +95,26 @@ pub fn emit_sp_sub(n_bytes: usize) -> String {
     }
 }
 
+/// Materialise an arbitrary 32-bit unsigned value into a GPR using movz/movk.
+///
+/// AArch64 `mov Xn, #imm` only encodes values whose bit pattern fits a 16-bit
+/// immediate (optionally shifted). For larger values (e.g. param offsets > 65535)
+/// we must use movz + optional movk.
+pub fn emit_imm32(reg: &str, value: usize) -> String {
+    assert!(
+        value <= u32::MAX as usize,
+        "immediate > 32 bits unsupported here (got {value})"
+    );
+    let lo = (value & 0xFFFF) as u16;
+    let hi = ((value >> 16) & 0xFFFF) as u16;
+    let mut s = String::new();
+    s.push_str(&format!("    movz    {}, #0x{:04x}\n", reg, lo));
+    if hi != 0 {
+        s.push_str(&format!("    movk    {}, #0x{:04x}, lsl #16\n", reg, hi));
+    }
+    s
+}
+
 /// Symmetric `add sp, sp, #N`.
 pub fn emit_sp_add(n_bytes: usize) -> String {
     assert!(

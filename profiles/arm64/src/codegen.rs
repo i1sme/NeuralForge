@@ -18,8 +18,8 @@ pub fn walk_uir(uir: &Uir) -> Result<Asm, LowerError> {
     let mut source = String::new();
     let mut functions = Vec::with_capacity(uir.models.len());
 
-    for model in &uir.models {
-        let (model_asm, sig) = walk_model(model)?;
+    for (model_idx, model) in uir.models.iter().enumerate() {
+        let (model_asm, sig) = walk_model(model_idx, model)?;
         source.push_str(&model_asm);
         source.push('\n');
         functions.push(sig);
@@ -28,7 +28,7 @@ pub fn walk_uir(uir: &Uir) -> Result<Asm, LowerError> {
     Ok(Asm { source, functions })
 }
 
-fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
+fn walk_model(model_idx: usize, model: &UirModel) -> Result<(String, FnSig), LowerError> {
     use crate::asm::{format_function_epilogue, format_function_prologue, LeafKind};
     use crate::buffer::{assign_buffers, compute_callee_saved, compute_is_leaf};
 
@@ -142,6 +142,7 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
                         b,
                         k,
                         n,
+                        model_idx,
                         linear_idx,
                         src_loc,
                         dst_loc,
@@ -155,7 +156,9 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
                     let total: u64 = buf_shape.0.iter().product();
                     let src_loc = resolve_loc(&assignment.locs, operands[0]);
                     let dst_loc = resolve_loc(&assignment.locs, node_idx);
-                    body.push_str(&crate::ops::emit_relu(total, relu_idx, src_loc, dst_loc));
+                    body.push_str(&crate::ops::emit_relu(
+                        total, model_idx, relu_idx, src_loc, dst_loc,
+                    ));
                     relu_idx += 1;
                 }
                 StdOp::Dropout => {
@@ -171,6 +174,7 @@ fn walk_model(model: &UirModel) -> Result<(String, FnSig), LowerError> {
                     body.push_str(&crate::ops::emit_softmax(
                         b,
                         k,
+                        model_idx,
                         softmax_idx,
                         src_loc,
                         dst_loc,
