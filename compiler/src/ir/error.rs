@@ -8,6 +8,11 @@ pub struct BuildError {
     pub kind: BuildErrorKind,
 }
 
+/// `#[non_exhaustive]` — adding new variants is non-breaking for downstream
+/// `match` consumers. The `nflc` CLI and any future profile crates that
+/// inspect `BuildErrorKind` (e.g. to extract a `first_span` for diagnostics)
+/// must keep a `_ => ...` arm.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum BuildErrorKind {
     UnknownOp {
@@ -45,11 +50,33 @@ pub enum BuildErrorKind {
         attr: String,
         reason: String,
     },
+    DuplicateModelName {
+        name: String,
+        first_span: crate::ast::Span,
+    },
+}
+
+impl std::fmt::Display for BuildErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BuildErrorKind::DuplicateModelName { name, .. } => write!(
+                f,
+                "duplicate model name '{}': would emit conflicting symbols",
+                name
+            ),
+            // All other variants rely on the pre-filled message in BuildError.
+            _ => Ok(()),
+        }
+    }
 }
 
 impl std::fmt::Display for BuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
+        if self.message.is_empty() {
+            write!(f, "{}", self.kind)
+        } else {
+            write!(f, "{}", self.message)
+        }
     }
 }
 
@@ -177,6 +204,23 @@ impl BuildError {
                 attr: attr.to_string(),
                 reason: reason.to_string(),
             },
+        }
+    }
+
+    pub fn duplicate_model_name(
+        name: String,
+        first_span: crate::ast::Span,
+        current_span: crate::ast::Span,
+    ) -> Self {
+        let message = format!(
+            "duplicate model name '{}': would emit conflicting symbols",
+            name
+        );
+        Self {
+            message,
+            line: current_span.line,
+            col: current_span.col,
+            kind: BuildErrorKind::DuplicateModelName { name, first_span },
         }
     }
 }

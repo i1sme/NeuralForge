@@ -115,10 +115,19 @@ Adding a new op = new `StdOp` variant + new arms in `signature()` and
 
 NFL grammar marks some op arguments as optional (e.g. `Linear`'s `bias`).
 Default behaviour is **codegen-profile-specific**: profiles document how they
-treat absent optional attributes. The current arm64 profile (M4a) interprets
+treat absent optional attributes. The current arm64 profile (M4b) interprets
 `linear[N]` without an explicit `bias` attribute as **no bias add** (pure
 matmul). To get bias, write `linear[N, bias=true]` explicitly. See
-[`docs/profile_guide/arm64.md`](../profile_guide/arm64.md) for details.
+[`docs/profile_guide/arm64.md`](../profile_guide/arm64.md) §3 + §4.3 for the
+exact codegen patterns.
+
+### Dropout at inference
+
+NFL v0.1 is inference-only and `dropout` behaves as **identity** at run time
+(no random masking). Codegen profiles implement this by aliasing the dropout
+node's output buffer to its operand's, emitting no asm. See
+[`docs/profile_guide/arm64.md`](../profile_guide/arm64.md) §4.5 for the
+arm64-profile-specific implementation.
 
 ---
 

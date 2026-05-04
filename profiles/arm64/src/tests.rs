@@ -17,17 +17,7 @@ fn empty_uir_lowers_to_empty_asm() {
 }
 
 #[test]
-fn unsupported_op_returns_unsupported() {
-    // tiny_mlp ends in softmax — not supported in M4a
-    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> softmax\n");
-    let err = lower(&uir).unwrap_err();
-    assert!(matches!(err, LowerError::UnsupportedOp { ref op, .. } if op == "softmax"));
-}
-
-#[test]
 fn linear_emits_function_with_correct_symbol_and_ret() {
-    // model M [b=2]: x: Tensor[b, 3]
-    //     x -> linear[2]
     let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n");
     let asm = lower(&uir).expect("lower");
 
@@ -35,17 +25,21 @@ fn linear_emits_function_with_correct_symbol_and_ret() {
     let sig = &asm.functions[0];
     assert_eq!(sig.name, "nfl_forward_M");
     assert_eq!(sig.model, "M");
-    assert_eq!(sig.input_floats, 6); // 2*3
-    assert_eq!(sig.weight_floats, 6); // 3*2
-    assert_eq!(sig.output_floats, 4); // 2*2
+    assert_eq!(sig.input_floats, 6);
+    assert_eq!(sig.params_floats, 6);
+    assert_eq!(sig.output_floats, 4);
+
+    assert_eq!(sig.params_layout.len(), 1);
+    let slot = &sig.params_layout[0];
+    assert_eq!(slot.kind, ParamKind::LinearWeight);
+    assert_eq!(slot.offset, 0);
+    assert_eq!(slot.size, 6);
+    assert_eq!(slot.origin_node, 1);
 
     let s = &asm.source;
-    assert!(
-        s.contains(".globl _nfl_forward_M"),
-        "missing .globl in:\n{s}"
-    );
-    assert!(s.contains("_nfl_forward_M:"), "missing label in:\n{s}");
-    assert!(s.contains("ret"), "missing ret in:\n{s}");
+    assert!(s.contains(".globl _nfl_forward_M"));
+    assert!(s.contains("_nfl_forward_M:"));
+    assert!(s.contains("ret"));
 }
 
 #[test]
@@ -53,28 +47,17 @@ fn linear_emits_matmul_loops_with_fmadd() {
     let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n");
     let asm = lower(&uir).expect("lower");
     let s = &asm.source;
-
-    // Sanity: FMADD is the matmul accumulator.
     assert!(s.contains("fmadd"), "expected fmadd in:\n{s}");
-    // Three loop labels (i, j, k) for the single Linear (label suffix 0).
-    assert!(s.contains(".Lmm_i_0:"), "missing i-loop label in:\n{s}");
-    assert!(s.contains(".Lmm_j_0:"), "missing j-loop label in:\n{s}");
-    assert!(s.contains(".Lmm_k_0:"), "missing k-loop label in:\n{s}");
-    // Comparison constants come from shapes.
-    assert!(
-        s.contains("cmp     x3, #2"),
-        "missing i-bound (B=2) in:\n{s}"
-    );
-    assert!(
-        s.contains("cmp     x4, #2"),
-        "missing j-bound (N=2) in:\n{s}"
-    );
-    assert!(
-        s.contains("cmp     x5, #3"),
-        "missing k-bound (K=3) in:\n{s}"
-    );
-    // Sum init.
-    assert!(s.contains("fmov    s0, wzr"), "missing sum init in:\n{s}");
+    // Labels include model_idx prefix: model 0, linear 0 → "0_0".
+    assert!(s.contains(".Lmm_i_0_0:"));
+    assert!(s.contains(".Lmm_j_0_0:"));
+    assert!(s.contains(".Lmm_k_0_0:"));
+    assert!(s.contains("cmp     x3, #2"));
+    assert!(s.contains("cmp     x4, #2"));
+    assert!(s.contains("cmp     x5, #3"));
+    assert!(s.contains("fmov    s0, wzr"));
+    // Destination is x12 (materialised dst pointer), not raw x2.
+    assert!(s.contains("str     s0, [x12,"));
 }
 
 #[test]
@@ -82,32 +65,13 @@ fn relu_emits_separate_loop_with_fmov_zero_and_fmax() {
     let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> relu\n");
     let asm = lower(&uir).expect("lower");
     let s = &asm.source;
-
-    // Zero materialisation outside the loop.
-    assert!(
-        s.contains("fmov    s4, wzr"),
-        "missing 'fmov s4, wzr' (zero materialisation) in:\n{s}"
-    );
-    // The relu loop body uses fmax against s4.
-    assert!(
-        s.contains("fmax    s3, s3, s4"),
-        "missing relu fmax in:\n{s}"
-    );
-    // Loop label and bound (output total = 2*2 = 4).
-    assert!(s.contains(".Lrelu_0:"), "missing relu loop label in:\n{s}");
-    assert!(
-        s.contains("cmp     x9, #4"),
-        "missing relu element-count bound in:\n{s}"
-    );
-    // Relu reads + writes via x2 (output buffer).
-    assert!(
-        s.contains("ldr     s3, [x2, x9, lsl #2]"),
-        "missing relu load in:\n{s}"
-    );
-    assert!(
-        s.contains("str     s3, [x2, x9, lsl #2]"),
-        "missing relu store in:\n{s}"
-    );
+    assert!(s.contains("fmov    s4, wzr"));
+    assert!(s.contains("fmax    s3, s3, s4"));
+    assert!(s.contains(".Lrelu_0_0:"));
+    assert!(s.contains("cmp     x9, #4"));
+    // Relu now uses materialised src/dst pointers.
+    assert!(s.contains("ldr     s3, [x11,"));
+    assert!(s.contains("str     s3, [x12,"));
 }
 
 #[test]
@@ -119,34 +83,338 @@ fn relu_alone_after_matmul_does_not_break_existing_test() {
 }
 
 #[test]
-fn linear_with_bias_returns_lower_error() {
+fn dropout_emits_no_code() {
+    // input → linear → dropout → linear (terminal-linear). Dropout has no
+    // dispatch arm that emits asm; its BufferLoc::Alias(operand) propagates.
+    let uir = build_uir(
+        "model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[3] -> dropout[rate=0.2] -> linear[2]\n",
+    );
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+    // Two linear matmuls present (model 0 → "0_0" and "0_1").
+    assert!(s.contains(".Lmm_i_0_0:"));
+    assert!(s.contains(".Lmm_i_0_1:"));
+    // No dropout-specific instructions or labels.
+    assert!(
+        !s.contains("dropout"),
+        "asm must not mention dropout literally:\n{s}"
+    );
+}
+
+#[test]
+fn softmax_emits_three_passes() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[3] -> softmax\n");
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+
+    // Key instructions present.
+    assert!(s.contains("bl      _expf"), "expected 'bl _expf' in:\n{s}");
+    assert!(
+        s.contains("fdiv"),
+        "expected fdiv (normalize pass) in:\n{s}"
+    );
+    assert!(s.contains("fmax    s8,"), "expected fmax (max pass)");
+    assert!(
+        s.contains("fsub    s0, s0, s8"),
+        "expected fsub (max-subtract)"
+    );
+    assert!(
+        s.contains("fadd    s9, s9, s0"),
+        "expected fadd (sum accumulate)"
+    );
+    // -inf materialisation present.
+    assert!(s.contains("movz    w0, #0x0000"));
+    assert!(s.contains("movk    w0, #0xFF80, lsl #16"));
+    assert!(s.contains("fmov    s8, w0"));
+
+    // Pass ordering: max → exp → norm. Labels include model_idx prefix → "0_0".
+    let max_label = s.find(".Lsm_max_0_0:").expect("max label");
+    let exp_label = s.find(".Lsm_exp_0_0:").expect("exp label");
+    let norm_label = s.find(".Lsm_norm_0_0:").expect("norm label");
+    assert!(max_label < exp_label, "max must precede exp");
+    assert!(exp_label < norm_label, "exp must precede norm");
+}
+
+#[test]
+fn softmax_function_saves_d8_d9_and_x19_x23() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[3] -> softmax\n");
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+    // Callee-saved FP (s8/s9 for max+sum).
+    assert!(
+        s.contains("stp     d8, d9, [sp, #-16]!"),
+        "missing d8/d9 prologue:\n{s}"
+    );
+    assert!(
+        s.contains("ldp     d8, d9, [sp], #16"),
+        "missing d8/d9 epilogue:\n{s}"
+    );
+    // Callee-saved integer regs (x19-x23 for softmax loop state across bl _expf).
+    assert!(
+        s.contains("stp     x19, x20, [sp, #-16]!"),
+        "missing x19/x20 prologue:\n{s}"
+    );
+    assert!(
+        s.contains("stp     x21, x22, [sp, #-16]!"),
+        "missing x21/x22 prologue:\n{s}"
+    );
+    assert!(
+        s.contains("str     x23, [sp, #-16]!"),
+        "missing x23 prologue:\n{s}"
+    );
+    assert!(
+        s.contains("ldr     x23, [sp], #16"),
+        "missing x23 epilogue:\n{s}"
+    );
+    assert!(
+        s.contains("ldp     x21, x22, [sp], #16"),
+        "missing x21/x22 epilogue:\n{s}"
+    );
+    assert!(
+        s.contains("ldp     x19, x20, [sp], #16"),
+        "missing x19/x20 epilogue:\n{s}"
+    );
+}
+
+#[test]
+fn non_leaf_function_saves_x29_x30() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[3] -> softmax\n");
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+    assert!(s.contains("stp     x29, x30, [sp, #-16]!"));
+    assert!(s.contains("ldp     x29, x30, [sp], #16"));
+}
+
+// ── buffer analyzer tests ────────────────────────────────────────────────────
+
+use super::buffer::{assign_buffers, compute_callee_saved, compute_is_leaf, BufferLoc};
+
+#[test]
+fn assign_buffers_input_node_is_input_reg() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n");
+    let model = &uir.models[0];
+    let assignment = assign_buffers(model);
+    assert!(matches!(assignment.locs[0], BufferLoc::InputReg));
+}
+
+#[test]
+fn assign_buffers_terminal_node_is_output_reg() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n");
+    let model = &uir.models[0];
+    let assignment = assign_buffers(model);
+    let last = assignment.locs.last().unwrap();
+    assert!(matches!(last, BufferLoc::OutputReg));
+}
+
+#[test]
+fn assign_buffers_relu_aliases_operand() {
+    // input → linear → relu (terminal-relu)
+    // n0 input, n1 linear (non-terminal), n2 relu (terminal)
+    // Expected: n2 → OutputReg (terminal wins over alias rule); n1 → StackOffset
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> relu\n");
+    let model = &uir.models[0];
+    let assignment = assign_buffers(model);
+    assert!(matches!(assignment.locs[1], BufferLoc::StackOffset(_)));
+    assert!(matches!(assignment.locs[2], BufferLoc::OutputReg));
+}
+
+#[test]
+fn assign_buffers_intermediate_relu_aliases_operand() {
+    // input → linear → relu → linear → relu (terminal). Intermediate relu (n2)
+    // aliases linear (n1). The terminal relu (n4) is OutputReg.
+    let uir = build_uir(
+        "model M [b=2]:\n    x: Tensor[b, 4]\n    x -> linear[8] -> relu -> linear[2] -> relu\n",
+    );
+    let model = &uir.models[0];
+    let assignment = assign_buffers(model);
+    assert!(matches!(assignment.locs[1], BufferLoc::StackOffset(_)));
+    assert!(matches!(assignment.locs[2], BufferLoc::Alias(1)));
+    assert!(matches!(assignment.locs[3], BufferLoc::StackOffset(_)));
+    assert!(matches!(assignment.locs[4], BufferLoc::OutputReg));
+}
+
+#[test]
+fn assign_buffers_stack_bytes_is_aligned() {
+    let uir = build_uir(
+        "model M [b=2]:\n    x: Tensor[b, 4]\n    x -> linear[8] -> relu -> linear[2] -> relu\n",
+    );
+    let model = &uir.models[0];
+    let assignment = assign_buffers(model);
+    assert!(assignment.stack_bytes > 0);
+    assert_eq!(assignment.stack_bytes % 16, 0, "stack must be 16-aligned");
+}
+
+#[test]
+fn compute_is_leaf_true_for_no_softmax() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> relu\n");
+    assert!(compute_is_leaf(&uir.models[0]));
+}
+
+#[test]
+fn compute_is_leaf_false_when_softmax_present() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> softmax\n");
+    assert!(!compute_is_leaf(&uir.models[0]));
+}
+
+#[test]
+fn compute_callee_saved_includes_d8_d9_when_softmax() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> softmax\n");
+    let regs = compute_callee_saved(&uir.models[0]);
+    assert!(regs.contains_d8_d9());
+}
+
+#[test]
+fn compute_callee_saved_empty_for_leaf() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> relu\n");
+    let regs = compute_callee_saved(&uir.models[0]);
+    assert!(!regs.contains_d8_d9());
+}
+
+#[test]
+fn assign_buffers_stack_bytes_rounds_non_aligned_total_up() {
+    // Use a model where the unaligned total is NOT already 16-aligned, so the
+    // round-up math actually does work. Tensor[1, 2] -> linear[3] -> linear[3]:
+    //   n0 input (no slot), n1 linear (1*3=3 floats=12 bytes, non-terminal),
+    //   n2 linear (terminal -> OutputReg, no slot)
+    // Total raw stack = 12 bytes; rounded up to 16.
+    let uir = build_uir("model M [b=1]:\n    x: Tensor[b, 2]\n    x -> linear[3] -> linear[3]\n");
+    let model = &uir.models[0];
+    let assignment = assign_buffers(model);
+    assert_eq!(
+        assignment.stack_bytes, 16,
+        "12 raw bytes should round up to 16"
+    );
+}
+
+#[test]
+fn leaf_function_no_prologue() {
+    // input → linear (terminal): leaf, no intermediates.
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n");
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+    // Leaf, no intermediates → no stp, no sub sp, no ldp.
+    assert!(
+        !s.contains("stp"),
+        "leaf-no-intermediates should have no stp:\n{s}"
+    );
+    assert!(!s.contains("ldp"));
+    assert!(!s.contains("sub     sp"));
+}
+
+#[test]
+fn intermediate_buffers_allocated_on_stack() {
+    let uir = build_uir(
+        "model M [b=2]:\n    x: Tensor[b, 4]\n    x -> linear[8] -> relu -> linear[2] -> relu\n",
+    );
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+    assert!(s.contains("sub     sp, sp,"), "expected sub sp in:\n{s}");
+    assert!(s.contains("add     sp, sp,"), "expected add sp in:\n{s}");
+}
+
+#[test]
+fn linear_with_bias_emits_bias_add() {
     let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2, bias=true]\n");
-    let err = lower(&uir).unwrap_err();
-    assert!(matches!(err, LowerError::LinearWithBias { .. }));
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+    // After the k-loop end, before the store, expect bias load + fadd.
+    assert!(
+        s.contains("fadd    s0, s0,"),
+        "expected fadd s0, s0, ... in:\n{s}"
+    );
 }
 
 #[test]
-fn dropout_returns_unsupported_op() {
-    let uir =
-        build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[3] -> dropout[rate=0.2]\n");
-    let err = lower(&uir).unwrap_err();
-    assert!(matches!(err, LowerError::UnsupportedOp { ref op, .. } if op == "dropout"));
+fn linear_bias_packed_layout() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2, bias=true]\n");
+    let asm = lower(&uir).expect("lower");
+    let sig = &asm.functions[0];
+    // Two slots: LinearWeight (size 6) then LinearBias (size 2) immediately after.
+    assert_eq!(sig.params_layout.len(), 2);
+    assert_eq!(sig.params_layout[0].kind, ParamKind::LinearWeight);
+    assert_eq!(sig.params_layout[0].size, 6);
+    assert_eq!(sig.params_layout[1].kind, ParamKind::LinearBias);
+    assert_eq!(sig.params_layout[1].size, 2);
+    assert_eq!(sig.params_layout[1].offset, 6);
+    assert_eq!(sig.params_floats, 8);
+}
+
+// ── emit_sp_sub / emit_sp_add branch coverage ────────────────────────────────
+
+use super::asm::{emit_sp_add, emit_sp_sub};
+
+#[test]
+fn emit_sp_sub_small_immediate() {
+    let s = emit_sp_sub(80);
+    assert_eq!(s, "    sub     sp, sp, #80\n");
 }
 
 #[test]
-fn softmax_returns_unsupported_op() {
-    // softmax-only path
-    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> softmax\n");
-    let err = lower(&uir).unwrap_err();
-    assert!(matches!(err, LowerError::UnsupportedOp { ref op, .. } if op == "softmax"));
+fn emit_sp_sub_shifted_12_for_4096_multiple() {
+    let s = emit_sp_sub(8192);
+    // 8192 = 2*4096 → "sub sp, sp, #2, lsl #12"
+    assert_eq!(s, "    sub     sp, sp, #2, lsl #12\n");
 }
 
 #[test]
-fn duplicate_model_name_returns_error() {
-    // Two models named "M" in one source.
-    let src = "model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n\
-               model M [b=2]:\n    y: Tensor[b, 3]\n    y -> linear[2]\n";
-    let uir = build_uir(src);
-    let err = lower(&uir).unwrap_err();
-    assert!(matches!(err, LowerError::DuplicateModelName { ref name, .. } if name == "M"));
+fn emit_sp_sub_movz_movk_for_general_case() {
+    // 99584 = 0x18500 → lo=0x8500, hi=0x0001
+    let s = emit_sp_sub(99584);
+    assert!(s.contains("movz    w9, #0x8500"));
+    assert!(s.contains("movk    w9, #0x0001, lsl #16"));
+    assert!(s.contains("sub     sp, sp, x9"));
+}
+
+#[test]
+fn emit_sp_add_small_immediate() {
+    let s = emit_sp_add(80);
+    assert_eq!(s, "    add     sp, sp, #80\n");
+}
+
+#[test]
+fn emit_sp_add_shifted_12_for_4096_multiple() {
+    let s = emit_sp_add(8192);
+    assert_eq!(s, "    add     sp, sp, #2, lsl #12\n");
+}
+
+#[test]
+fn emit_sp_add_movz_movk_for_general_case() {
+    let s = emit_sp_add(99584);
+    assert!(s.contains("movz    w9, #0x8500"));
+    assert!(s.contains("movk    w9, #0x0001, lsl #16"));
+    assert!(s.contains("add     sp, sp, x9"));
+}
+
+// ── RegSet x19_x23 flag tests ────────────────────────────────────────────────
+
+#[test]
+fn compute_callee_saved_includes_x19_x23_when_softmax() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> softmax\n");
+    let regs = compute_callee_saved(&uir.models[0]);
+    assert!(regs.contains_x19_x23());
+}
+
+#[test]
+fn compute_callee_saved_no_x19_x23_for_leaf() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> relu\n");
+    let regs = compute_callee_saved(&uir.models[0]);
+    assert!(!regs.contains_x19_x23());
+}
+
+// ── UnsupportedOp display and span round-trip ────────────────────────────────
+
+#[test]
+fn unsupported_op_display_and_span_round_trip() {
+    let span = compiler::ast::Span::new(1, 1);
+    let e = LowerError::UnsupportedOp {
+        op: "future_op".into(),
+        span,
+    };
+    let msg = e.to_string();
+    assert!(
+        msg.contains("future_op"),
+        "Display should mention op name; got: {msg}"
+    );
+    assert_eq!(e.span().line, span.line);
+    assert_eq!(e.span().col, span.col);
 }

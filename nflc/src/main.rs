@@ -76,7 +76,14 @@ fn print_usage() {
 /// 12 |     x -> dropout[rate=1.5] -> softmax
 ///    |                       ^
 /// ```
-fn render_error_with_snippet(source: &str, path: &Path, line: u32, col: u32, message: &str) {
+fn render_error_with_snippet(
+    source: &str,
+    path: &Path,
+    line: u32,
+    col: u32,
+    message: &str,
+    first_span: Option<(u32, u32)>,
+) {
     eprintln!("error: {}", message);
     eprintln!("  --> {}:{}:{}", path.display(), line, col);
     let line_idx = line.saturating_sub(1) as usize;
@@ -91,6 +98,14 @@ fn render_error_with_snippet(source: &str, path: &Path, line: u32, col: u32, mes
         }
         underline.push('^');
         eprintln!("{}  | {}", pad, underline);
+    }
+    if let Some((fl, fc)) = first_span {
+        eprintln!(
+            "note: previously defined at {}:{}:{}",
+            path.display(),
+            fl,
+            fc
+        );
     }
 }
 
@@ -113,7 +128,7 @@ fn run_parse(path: PathBuf, tokens_only: bool) -> ExitCode {
             }
             Err(e) => {
                 let (line, col) = e.position();
-                render_error_with_snippet(&source, &path, line, col, &format!("{}", e));
+                render_error_with_snippet(&source, &path, line, col, &format!("{}", e), None);
                 ExitCode::FAILURE
             }
         }
@@ -124,7 +139,7 @@ fn run_parse(path: PathBuf, tokens_only: bool) -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                render_error_with_snippet(&source, &path, e.line, e.col, &e.message);
+                render_error_with_snippet(&source, &path, e.line, e.col, &e.message, None);
                 ExitCode::FAILURE
             }
         }
@@ -209,12 +224,12 @@ fn run_build_uir(path: PathBuf) -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                render_error_with_snippet(&source, &path, e.line, e.col, &e.message);
+                render_error_with_snippet(&source, &path, e.line, e.col, &e.message, None);
                 ExitCode::FAILURE
             }
         },
         Err(e) => {
-            render_error_with_snippet(&source, &path, e.line, e.col, &e.message);
+            render_error_with_snippet(&source, &path, e.line, e.col, &e.message, None);
             ExitCode::FAILURE
         }
     }
@@ -232,7 +247,7 @@ fn run_compile(path: PathBuf, profile: String, out_path: Option<PathBuf>) -> Exi
     let ast = match compiler::parse(&source) {
         Ok(a) => a,
         Err(e) => {
-            render_error_with_snippet(&source, &path, e.line, e.col, &e.message);
+            render_error_with_snippet(&source, &path, e.line, e.col, &e.message, None);
             return ExitCode::FAILURE;
         }
     };
@@ -240,7 +255,14 @@ fn run_compile(path: PathBuf, profile: String, out_path: Option<PathBuf>) -> Exi
     let uir = match compiler::ir::build(&ast) {
         Ok(u) => u,
         Err(e) => {
-            render_error_with_snippet(&source, &path, e.line, e.col, &e.message);
+            let first = match &e.kind {
+                compiler::BuildErrorKind::DuplicateModelName { first_span, .. } => {
+                    Some((first_span.line, first_span.col))
+                }
+                _ => None,
+            };
+            let msg = e.to_string();
+            render_error_with_snippet(&source, &path, e.line, e.col, &msg, first);
             return ExitCode::FAILURE;
         }
     };
@@ -267,7 +289,7 @@ fn run_compile(path: PathBuf, profile: String, out_path: Option<PathBuf>) -> Exi
         }
         Err(e) => {
             let span = e.span();
-            render_error_with_snippet(&source, &path, span.line, span.col, &format!("{e}"));
+            render_error_with_snippet(&source, &path, span.line, span.col, &format!("{e}"), None);
             ExitCode::FAILURE
         }
     }

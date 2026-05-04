@@ -65,7 +65,7 @@ Profiles translate UIR into assembly for a specific hardware target.
 Initial target profiles:
 | Profile     | Architecture       | Key capability              |
 |-------------|--------------------|-----------------------------|
-| `arm64`     | Apple Silicon / AArch64 POSIX | Scalar AArch64 assembly, no SIMD (M4a). NEON / SVE / AMX in later slices. |
+| `arm64`     | Apple Silicon / AArch64 POSIX | Scalar AArch64 assembly: linear (± bias), relu, dropout (no-op pass-through), softmax (libm `expf`). All 5 M3 fixtures lower end-to-end (M4a + M4b). NEON / SVE / AMX in later slices. |
 | `x86_64`    | Intel / AMD        | AVX-512, VNNI instructions (M6) |
 | `riscv64`   | RISC-V             | RVV vector extension (future) |
 
@@ -154,7 +154,7 @@ NeuralForge is designed so that LLMs can write, read, and reason about NFL code 
 | 1 | Language spec v0.1                             | Define NFL syntax formally (EBNF grammar) — inference-only; training in v0.2 |
 | 2 | Parser prototype                               | Parse a simple feedforward network definition                              |
 | 3 | UIR prototype                                  | Produce a computation graph from parsed AST       |
-| 4 | `arm64` profile                                | Generate scalar AArch64 assembly for `linear` + `relu` (host: Apple Silicon) |
+| 4 | `arm64` profile (4a + 4b complete)             | Generate scalar AArch64 assembly for all 5 M3 fixtures end-to-end (linear ± bias, relu, dropout, softmax via libm expf) |
 | 5 | Kernel fusion pass                             | Fuse linear+activation in the IR optimiser        |
 | 6 | `x86-64` profile                               | Use AVX-512 for matrix operations                 |
 | 7 | Human-readable viewer v0.1                     | Show UIR in annotated human-readable format       |

@@ -21,33 +21,44 @@ pub struct FnSig {
     pub model: String,
     /// Number of f32 elements in the input buffer.
     pub input_floats: usize,
-    /// Total number of f32 elements across all weight matrices, packed in
-    /// UIR-node order. M4a always single-Linear so this equals the one
-    /// matrix's element count.
-    pub weight_floats: usize,
     /// Number of f32 elements in the output buffer.
     pub output_floats: usize,
+    /// Total number of f32 elements in the packed params buffer.
+    pub params_floats: usize,
+    /// Layout of the packed params buffer, one entry per parameter slot in
+    /// UIR-node order.
+    pub params_layout: Vec<ParamSlot>,
+}
+
+/// One slot within the packed `params` buffer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParamSlot {
+    pub kind: ParamKind,
+    pub origin_node: compiler::NodeId,
+    pub offset: usize,
+    pub size: usize,
+}
+
+/// Type tag for a `ParamSlot`. `#[non_exhaustive]` per spec §5.2.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamKind {
+    LinearWeight,
+    LinearBias,
 }
 
 /// Errors that can occur during lowering.
-///
-/// `#[non_exhaustive]` — variants representing deferred features
-/// (`UnsupportedOp`, `LinearWithBias`) become unreachable as M4b/c add
-/// coverage and may be removed at that point.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum LowerError {
-    /// Op is not supported in the current M4 slice.
-    /// `op` is the lowercase token name (e.g. "softmax", "dropout").
+    /// Defensive: op encountered that the codegen doesn't know how to lower.
+    /// All M4b ops (linear/relu/dropout/softmax with or without bias) are
+    /// supported; this variant exists as a guard for M5+ ops landing before
+    /// codegen catches up.
+    #[allow(dead_code)]
     UnsupportedOp { op: String, span: Span },
-    /// `linear[N, bias=true]` is not yet implemented (M4b).
-    LinearWithBias { span: Span },
     /// Defensive: UIR contained a shape that wasn't fully resolved.
-    /// Should be unreachable if the IR builder did its job.
     ShapeNotConcrete { span: Span },
-    /// Two `UirModel`s share the same `name` — would emit duplicate
-    /// `nfl_forward_<name>` symbols. M4b moves this check into `ir::build`.
-    DuplicateModelName { name: String, span: Span },
 }
 
 impl std::fmt::Display for LowerError {
@@ -55,20 +66,12 @@ impl std::fmt::Display for LowerError {
         match self {
             LowerError::UnsupportedOp { op, .. } => write!(
                 f,
-                "operation '{}' is not supported by the arm64 profile in M4a",
+                "operation '{}' is not supported by the arm64 profile",
                 op
             ),
-            LowerError::LinearWithBias { .. } => {
-                write!(f, "linear[..., bias=true] is not yet implemented (M4b)")
-            }
             LowerError::ShapeNotConcrete { .. } => write!(
                 f,
                 "internal: UIR shape was not fully resolved before lowering"
-            ),
-            LowerError::DuplicateModelName { name, .. } => write!(
-                f,
-                "duplicate model name '{}': would emit conflicting symbols",
-                name
             ),
         }
     }
@@ -79,9 +82,7 @@ impl LowerError {
     pub fn span(&self) -> Span {
         match self {
             LowerError::UnsupportedOp { span, .. } => *span,
-            LowerError::LinearWithBias { span } => *span,
             LowerError::ShapeNotConcrete { span } => *span,
-            LowerError::DuplicateModelName { span, .. } => *span,
         }
     }
 }

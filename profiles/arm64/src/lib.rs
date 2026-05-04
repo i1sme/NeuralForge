@@ -3,10 +3,12 @@
 //! Lowers a [`compiler::Uir`] to AArch64 Mach-O assembly text via [`lower`].
 
 mod asm;
+mod buffer;
 mod codegen;
+mod ops;
 mod types;
 
-pub use types::{Asm, FnSig, LowerError};
+pub use types::{Asm, FnSig, LowerError, ParamKind, ParamSlot};
 
 use compiler::Uir;
 
