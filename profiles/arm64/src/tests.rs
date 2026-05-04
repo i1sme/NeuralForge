@@ -105,20 +105,41 @@ fn softmax_emits_three_passes() {
     let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[3] -> softmax\n");
     let asm = lower(&uir).expect("lower");
     let s = &asm.source;
-    // Pass 2 has the bl _expf.
+
+    // Key instructions present.
     assert!(s.contains("bl      _expf"), "expected 'bl _expf' in:\n{s}");
-    // Pass 3 has the divide.
     assert!(
         s.contains("fdiv"),
         "expected fdiv (normalize pass) in:\n{s}"
     );
+    assert!(s.contains("fmax    s8,"), "expected fmax (max pass)");
+    assert!(
+        s.contains("fsub    s0, s0, s8"),
+        "expected fsub (max-subtract)"
+    );
+    assert!(
+        s.contains("fadd    s9, s9, s0"),
+        "expected fadd (sum accumulate)"
+    );
+    // -inf materialisation present.
+    assert!(s.contains("movz    w0, #0x0000"));
+    assert!(s.contains("movk    w0, #0xFF80, lsl #16"));
+    assert!(s.contains("fmov    s8, w0"));
+
+    // Pass ordering: max → exp → norm.
+    let max_label = s.find(".Lsm_max_0:").expect("max label");
+    let exp_label = s.find(".Lsm_exp_0:").expect("exp label");
+    let norm_label = s.find(".Lsm_norm_0:").expect("norm label");
+    assert!(max_label < exp_label, "max must precede exp");
+    assert!(exp_label < norm_label, "exp must precede norm");
 }
 
 #[test]
-fn softmax_function_saves_d8_d9() {
+fn softmax_function_saves_d8_d9_and_x19_x23() {
     let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[3] -> softmax\n");
     let asm = lower(&uir).expect("lower");
     let s = &asm.source;
+    // Callee-saved FP (s8/s9 for max+sum).
     assert!(
         s.contains("stp     d8, d9, [sp, #-16]!"),
         "missing d8/d9 prologue:\n{s}"
@@ -126,6 +147,31 @@ fn softmax_function_saves_d8_d9() {
     assert!(
         s.contains("ldp     d8, d9, [sp], #16"),
         "missing d8/d9 epilogue:\n{s}"
+    );
+    // Callee-saved integer regs (x19-x23 for softmax loop state across bl _expf).
+    assert!(
+        s.contains("stp     x19, x20, [sp, #-16]!"),
+        "missing x19/x20 prologue:\n{s}"
+    );
+    assert!(
+        s.contains("stp     x21, x22, [sp, #-16]!"),
+        "missing x21/x22 prologue:\n{s}"
+    );
+    assert!(
+        s.contains("str     x23, [sp, #-16]!"),
+        "missing x23 prologue:\n{s}"
+    );
+    assert!(
+        s.contains("ldr     x23, [sp], #16"),
+        "missing x23 epilogue:\n{s}"
+    );
+    assert!(
+        s.contains("ldp     x21, x22, [sp], #16"),
+        "missing x21/x22 epilogue:\n{s}"
+    );
+    assert!(
+        s.contains("ldp     x19, x20, [sp], #16"),
+        "missing x19/x20 epilogue:\n{s}"
     );
 }
 
@@ -336,4 +382,38 @@ fn emit_sp_add_movz_movk_for_general_case() {
     assert!(s.contains("movz    w9, #0x8500"));
     assert!(s.contains("movk    w9, #0x0001, lsl #16"));
     assert!(s.contains("add     sp, sp, x9"));
+}
+
+// ── RegSet x19_x23 flag tests ────────────────────────────────────────────────
+
+#[test]
+fn compute_callee_saved_includes_x19_x23_when_softmax() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> softmax\n");
+    let regs = compute_callee_saved(&uir.models[0]);
+    assert!(regs.contains_x19_x23());
+}
+
+#[test]
+fn compute_callee_saved_no_x19_x23_for_leaf() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> relu\n");
+    let regs = compute_callee_saved(&uir.models[0]);
+    assert!(!regs.contains_x19_x23());
+}
+
+// ── UnsupportedOp display and span round-trip ────────────────────────────────
+
+#[test]
+fn unsupported_op_display_and_span_round_trip() {
+    let span = compiler::ast::Span::new(1, 1);
+    let e = LowerError::UnsupportedOp {
+        op: "future_op".into(),
+        span,
+    };
+    let msg = e.to_string();
+    assert!(
+        msg.contains("future_op"),
+        "Display should mention op name; got: {msg}"
+    );
+    assert_eq!(e.span().line, span.line);
+    assert_eq!(e.span().col, span.col);
 }

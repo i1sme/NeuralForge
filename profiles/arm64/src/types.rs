@@ -66,7 +66,7 @@ impl std::fmt::Display for LowerError {
         match self {
             LowerError::UnsupportedOp { op, .. } => write!(
                 f,
-                "operation '{}' is not supported by the arm64 profile in M4a",
+                "operation '{}' is not supported by the arm64 profile",
                 op
             ),
             LowerError::ShapeNotConcrete { .. } => write!(

@@ -29,6 +29,11 @@ pub fn format_function_prologue(
     s.push_str(".p2align 2\n");
     s.push_str(&format!("{}{}:\n", MACHO_SYM_PREFIX, sig.name));
 
+    if regs.contains_x19_x23() {
+        s.push_str("    stp     x19, x20, [sp, #-16]!\n");
+        s.push_str("    stp     x21, x22, [sp, #-16]!\n");
+        s.push_str("    str     x23, [sp, #-16]!\n");
+    }
     if regs.contains_d8_d9() {
         s.push_str("    stp     d8, d9, [sp, #-16]!\n");
     }
@@ -53,6 +58,11 @@ pub fn format_function_epilogue(leaf: LeafKind, regs: RegSet, intermediate_bytes
     }
     if regs.contains_d8_d9() {
         s.push_str("    ldp     d8, d9, [sp], #16\n");
+    }
+    if regs.contains_x19_x23() {
+        s.push_str("    ldr     x23, [sp], #16\n");
+        s.push_str("    ldp     x21, x22, [sp], #16\n");
+        s.push_str("    ldp     x19, x20, [sp], #16\n");
     }
     s.push_str("    ret\n");
     s
