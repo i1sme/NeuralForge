@@ -611,7 +611,8 @@ mod tests {
         };
 
         let out = FuseLinearRelu.run(&uir).expect("ok");
-        // 3 nodes preserved (softmax → relu is not fusable; only Linear → Relu fuses in M5a).
+        // 3 nodes preserved: softmax → relu is not a fusion pattern
+        // (only Linear → Relu — with or without bias, post-M5b — fuses).
         assert_eq!(out.models[0].nodes.len(), 3);
     }
 
