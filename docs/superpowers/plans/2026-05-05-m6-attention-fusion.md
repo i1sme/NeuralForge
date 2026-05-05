@@ -683,7 +683,7 @@ Expected: PASS (the implementation in Step 4 is bias-agnostic — it does not in
 #[test]
 fn does_not_fuse_when_post_ops_already_present() {
     use crate::ir::test_utils::{input_node, op_node, out_dim_attr};
-    use crate::ir::types::{NodeKind, PostOp, Shape, Type};
+    use crate::ir::types::{NodeKind, PostOp};
     use crate::ir::StdOp;
     use crate::ir::Uir;
     use crate::UirModel;
@@ -1283,7 +1283,9 @@ s.push_str(&format!("    cmp     x4, #{n}\n"));
 s.push_str(&format!("    b.lt    .Lmm_j_{linear_idx}\n"));
 
 if has_row_wise {
-    emit_row_wise_softmax_tail(&mut s, b, n, linear_idx, /* dst_loc args */);
+    // x12 already holds the dst buffer base from the outer materialise_ptr,
+    // and x3 holds i — the tail reads both directly. No extra args needed.
+    emit_row_wise_softmax_tail(&mut s, b, n, linear_idx);
 }
 
 // existing i-loop tail
@@ -1463,23 +1465,28 @@ The classifier fixture's final `linear[output] -> softmax` has no bias (default 
 - Create: `tests/fixtures/softmax_with_bias.nfl`
 - Modify: `profiles/arm64/tests/integration.rs` (add `fused_vs_unfused_softmax_match_numerically`)
 
-- [ ] **Step 1: Look up the bias=true syntax used by `mixed_args.nfl`**
+- [ ] **Step 1: Confirm bias=true syntax**
 
-Read `tests/fixtures/mixed_args.nfl` to see the exact NFL syntax for a `linear` with `bias=true`. Replicate that syntax in the new fixture.
+`tests/fixtures/mixed_args.nfl` uses `linear[16, bias=true]` — positional output-dim first, then a named `bias=true` argument. The new fixture follows the same shape.
 
 - [ ] **Step 2: Create `tests/fixtures/softmax_with_bias.nfl`**
 
 A minimal fixture exercising `linear[bias=true] -> softmax` as the final step:
 
 ```nfl
+# Smallest fixture exercising linear[bias=true] -> softmax for M6.
+# Used by profiles/arm64/tests/integration.rs:
+#   fused_vs_unfused_softmax_match_numerically
+# to cover the bias-aware path through emit_linear's RowWise tail.
+
 model SoftmaxWithBias [batch=4, input=8, output=3]:
     x: Tensor[batch, input]
 
     x -> linear[16] -> relu
-      -> linear[out=output, bias=true] -> softmax
+      -> linear[output, bias=true] -> softmax
 ```
 
-(Adjust to match the actual NFL grammar for `bias=true`. Keep dimensions small — the FFI test will allocate input/params/output arrays.)
+Dimensions are small to keep the FFI test's allocation size reasonable (input = 4×8 = 32 floats; output = 4×3 = 12 floats). The middle `linear[16] -> relu` is included so the fixture's UIR has multiple ops (otherwise it's a degenerate single-Linear case that would not exercise the full pipeline).
 
 Verify it parses:
 
@@ -1528,11 +1535,14 @@ fn fused_vs_unfused_softmax_match_numerically() {
         let fused_lib = unsafe { libloading::Library::new(&fused_dylib).unwrap() };
         let unfused_lib = unsafe { libloading::Library::new(&unfused_dylib).unwrap() };
 
-        let fn_bytes = std::ffi::CString::new(fn_name).unwrap();
+        // Symbol lookup: match M5b's idiomatic dynamic-name style
+        // (format! + "\0" + into_bytes), see existing
+        // pipeline-comparison test in integration.rs.
+        let sym_bytes = format!("{fn_name}\0").into_bytes();
         let fused_forward: libloading::Symbol<unsafe extern "C" fn(*const f32, *const f32, *mut f32)> =
-            unsafe { fused_lib.get(fn_bytes.as_bytes_with_nul()).unwrap() };
+            unsafe { fused_lib.get(&sym_bytes).unwrap() };
         let unfused_forward: libloading::Symbol<unsafe extern "C" fn(*const f32, *const f32, *mut f32)> =
-            unsafe { unfused_lib.get(fn_bytes.as_bytes_with_nul()).unwrap() };
+            unsafe { unfused_lib.get(&sym_bytes).unwrap() };
 
         let params_len = fused_asm.functions[0].params_floats;
         assert_eq!(params_len, unfused_asm.functions[0].params_floats,
