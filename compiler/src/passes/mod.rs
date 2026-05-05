@@ -122,3 +122,5 @@ impl std::fmt::Display for PassError {
         }
     }
 }
+
+impl std::error::Error for PassError {}

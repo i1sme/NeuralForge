@@ -155,7 +155,7 @@ NeuralForge is designed so that LLMs can write, read, and reason about NFL code 
 | 2 | Parser prototype                               | Parse a simple feedforward network definition                              |
 | 3 | UIR prototype                                  | Produce a computation graph from parsed AST       |
 | 4 | `arm64` profile (4a + 4b complete)             | Generate scalar AArch64 assembly for all 5 M3 fixtures end-to-end (linear ± bias, relu, dropout, softmax via libm expf) |
-| 5 | Kernel fusion pass                             | Fuse linear+activation in the IR optimiser        |
+| 5 | Kernel fusion + UIR-pass framework (5a + 5b + 5c complete) | UIR-pass infrastructure (`UirPass` trait, `default_pipeline`, `run_pipeline`, `PassError`); two passes shipped — `FuseLinearRelu` (bias-aware: fuses `linear → relu` and `linear[bias=true] → relu`) and `EliminateDropout` (removes inference-time-noop Dropout); CLI gains `--no-passes` and `--passes <list>` filter; bit-exact equivalence proven via `fused_vs_unfused_*_match_numerically` integration tests on classifier and mixed_args fixtures |
 | 6 | `x86-64` profile                               | Use AVX-512 for matrix operations                 |
 | 7 | Human-readable viewer v0.1                     | Show UIR in annotated human-readable format       |
 
@@ -163,11 +163,14 @@ NeuralForge is designed so that LLMs can write, read, and reason about NFL code 
 
 ## Open Questions
 
-- Final syntax decisions for NFL (to be designed incrementally)
-- Memory model: static allocation only, or dynamic?
 - Training syntax design: when and how to introduce loss/optimiser constructs (planned for v0.2)
 - How profiles handle quantisation (INT8, FP16, BF16)?
 - Distribution format for compiled binaries
+
+## Decisions (formerly open, now resolved)
+
+- **NFL v0.1 grammar** — frozen as of M1 (`language/grammar.ebnf`). Future syntax extensions land in NFL v0.2+ as separate language milestones.
+- **Memory model** — static stack-allocated intermediate buffers, no heap. Established by M4b (`profiles/arm64::buffer.rs::assign_buffers`); applies to all v1 profiles.
 
 ---
 

@@ -53,9 +53,8 @@ pub enum ParamKind {
 pub enum LowerError {
     /// Defensive: op encountered that the codegen doesn't know how to lower.
     /// All M4b ops (linear/relu/dropout/softmax with or without bias) are
-    /// supported; this variant exists as a guard for M5+ ops landing before
-    /// codegen catches up.
-    #[allow(dead_code)]
+    /// supported; M5c made StdOp #[non_exhaustive] so the wildcard arm in
+    /// walk_model now routes future ops here.
     UnsupportedOp { op: String, span: Span },
     /// Defensive: UIR contained a shape that wasn't fully resolved.
     ShapeNotConcrete { span: Span },
@@ -84,6 +83,8 @@ impl std::fmt::Display for LowerError {
         }
     }
 }
+
+impl std::error::Error for LowerError {}
 
 impl LowerError {
     /// Returns the source span associated with the error.

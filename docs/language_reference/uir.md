@@ -14,8 +14,9 @@ disagree, the source wins — file an issue.
 
 The Universal IR is a typed computation graph that the NFL compiler produces
 between parsing and codegen. It is the input to architecture profiles
-(`profiles/generic/` and friends, M4+) and to optimisation passes (kernel fusion,
-M5).
+(`profiles/arm64/` is the first concrete one, M4+) and to optimisation passes
+(`compiler::passes::default_pipeline()` runs `EliminateDropout` then
+`FuseLinearRelu`, M5+).
 
 ```
 NFL source  ──lex──>  Tokens  ──parse──>  AST  ──build──>  UIR  ──codegen──>  assembly
@@ -55,17 +56,30 @@ pub struct Node {
 
 pub enum NodeKind {
     Input { name: String },
-    Op { op: StdOp, operands: Vec<NodeId>, attrs: Vec<OpAttr> },
+    Op {
+        op: StdOp,
+        operands: Vec<NodeId>,
+        attrs: Vec<OpAttr>,
+        // M5a: post-ops fused into this op's emitter (currently
+        // FuseLinearRelu sets this to `vec![PostOp::Relu]` on a
+        // Linear it has fused with a downstream Relu; otherwise
+        // empty).
+        fused_post_ops: Vec<PostOp>,
+    },
 }
 ```
 
-**Why index-based?** Easy to clone, easy to traverse (just iterate `nodes`), easy
-to mutate (M5 fusion will replace nodes by id), easy to share subexpressions
-(multiple nodes can reference the same `NodeId`). Standard compiler-textbook
-choice.
+**Why index-based?** Easy to clone, easy to traverse (just iterate `nodes`),
+easy to share subexpressions (multiple nodes can reference the same `NodeId`).
+Standard compiler-textbook choice. UIR-passes (M5+) take an immutable `&Uir`
+and return a fresh `Uir` with the transformation applied — see §7 below.
 
-**Why immutable in v0.1?** The builder never modifies a node after pushing it.
-M5 will introduce mutation when fusion lands.
+**Why immutable?** The builder never modifies a node after pushing it. UIR-passes
+preserve the immutability contract: each pass returns a freshly-numbered `Uir`
+(NodeIds renumbered 0..N), with operands and `model.inputs`/`model.output`
+remapped through an internal id_map. Consumers can hold a `&Uir` reference
+across multiple passes by re-binding through `run_pipeline`'s output. No
+in-place mutation; no tombstones; no stale-NodeId hazards.
 
 ---
 
@@ -84,11 +98,16 @@ n0: input "x"        :: Tensor[8, 4]
 
 ### Op
 
-`NodeKind::Op { op, operands, attrs }` — applies an operation from the stdlib.
+`NodeKind::Op { op, operands, attrs, fused_post_ops }` — applies an operation
+from the stdlib.
 - `op` is a `StdOp` enum variant (resolved from the AST identifier).
 - `operands` are `NodeId`s referencing the inputs (one for v0.1's single-input ops).
 - `attrs` are validated, type-resolved arguments (positional and named, in the
   signature's slot order).
+- `fused_post_ops: Vec<PostOp>` carries fused post-operations (M5a+; set by
+  `FuseLinearRelu` to `vec![PostOp::Relu]` on a Linear that has fused with a
+  downstream Relu; empty for un-fused nodes). Renders as `fused=[<list>]`
+  suffix in the CLI pretty-print (§6).
 
 Example: `linear[16, bias=true]` becomes:
 ```
@@ -206,8 +225,11 @@ Listed here so contributors don't accidentally rely on absent features:
 - **Pipeline output binding.** Pipelines don't bind their output to a name that
   later pipelines can reference. Multi-pipeline bodies have only one consumer
   (the implicit-output convention).
-- **Mutation API.** `Uir` is immutable-by-construction in v0.1. M5 (kernel fusion)
-  introduces mutation.
+- **Mutation API.** `Uir` is immutable-by-construction. M5+ UIR-passes
+  preserve this — each pass produces a fresh `Uir` (NodeIds renumbered
+  0..N, references remapped), not in-place edits. See
+  `compiler::passes::run_pipeline` and the per-pass doc-comments in
+  `compiler/src/passes/`.
 - **Profile-specific lowering.** All profile work is M4+.
 - **Multi-error reporting.** First error halts the build. v0.2.
 - **Source-snippet errors with multi-line context, color, or labels.** M3c's
