@@ -158,67 +158,81 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-**Milestone 5 fully complete (5a + 5b + 5c).** UIR-pass infrastructure ships
-two passes: `EliminateDropout` (removes dropout nodes from the graph at
-inference time) and `FuseLinearRelu` (bias-aware — fuses `linear → relu`
-and `linear[bias=true] → relu`). `default_pipeline()` runs them in canonical
-order `[EliminateDropout, FuseLinearRelu]` so that `linear → dropout → relu`
-patterns collapse and fuse end-to-end.
+**Milestone 6 fully complete.** M6 extended the M5 kernel-fusion framework
+one step: `compiler::ir::PostOp::SoftmaxRow` (the third post-op variant
+on the `#[non_exhaustive]` enum), `compiler::passes::FuseLinearSoftmax`
+(bias-aware UIR pass parallel to `FuseLinearRelu`), and a row-wise emit
+branch in `profiles/arm64::emit_linear` that runs a 3-pass softmax tail
+(row-max → exp+sum → normalise) in-place on the linear output buffer
+after the matmul i-loop completes.
 
-CLI: `nflc compile` runs the default pipeline between `ir::build` and
-profile lowering. `--no-passes` skips the pipeline; `--passes <list>` runs a
-filtered subset (canonical order enforced regardless of user-typed order,
-with a stderr `note:` when they diverge). Mutually exclusive flags. All flag
-validation uses the dynamic `default_pipeline()` registry, so M6+ pass
-additions surface in error messages automatically.
+CLI: `default_pipeline()` is now `[EliminateDropout, FuseLinearRelu,
+FuseLinearSoftmax]`. `--no-passes` and `--passes <list>` continue to
+work without code changes — the filter reads pass names dynamically
+from the registry.
 
-Profile (`profiles/arm64`) is unchanged from M4b in source, but consumes the
-fused UIR by default. `emit_linear` stacks `matmul → bias-add → fmax (post-op)
-→ store` in one block; `BufferLoc::Alias(operand)` stays as the fallback for
-Dropout in `--no-passes` and exclude-eliminate_dropout filter modes.
+Profile (`profiles/arm64`): the RowWise emit branch uses callee-saved
+registers (s8 = row max, s9 = row sum, x19/x20/x21 for i/row-base/j,
+x22/x23 for src/dst pointers — all preserved across `bl _expf` per
+AAPCS64). `compute_is_leaf` and `compute_callee_saved` were extended
+via a shared `node_uses_softmax(node)` helper to detect both standalone
+`StdOp::Softmax` and `Linear` with `PostOp::SoftmaxRow` in
+`fused_post_ops`. Labels prefixed `.Lfsmx_*` to avoid collision with
+the standalone-softmax `.Lsm_*`.
 
-Op coverage: linear (± bias), relu, dropout, softmax (NFL v0.1 inference-only).
-Two FFI integration tests pin bit-exact equivalence between fused and unfused
-asm — `fused_vs_unfused_classifier_match_numerically` (M5a) and
-`fused_vs_unfused_mixed_args_match_numerically` (M5b).
+Op coverage: linear (± bias), relu, dropout, softmax — all five M3
+fixtures lower end-to-end. NFL v0.1 inference-only. Two FFI integration
+tests pin bit-exact equivalence:
+`fused_vs_unfused_softmax_match_numerically` on `classifier.nfl`
+(no-bias) + `softmax_with_bias.nfl` (bias-aware). OQ-5 closed: all
+three `fused_vs_unfused_*_match_numerically` tests now use `assert_eq!`
+(not `debug_assert_eq!`) for the `params_floats` agreement check.
 
-Cross-cutting consistency (M5c): all five workspace error types (`BuildError`,
-`ParseError`, `LexError`, `PassError`, `LowerError`) implement
-`std::error::Error`. `StdOp` and `PostOp` are both `#[non_exhaustive]`. The
-profile-side `match op` blocks (in `walk_model`, `classify_op`, and
-`assign_buffers`) have wildcard arms routing future ops to
-`LowerError::UnsupportedOp`.
+Cross-cutting consistency (carried from M5c): all five workspace error
+types implement `std::error::Error`; `StdOp` and `PostOp` are both
+`#[non_exhaustive]`; profile-side `match` blocks have wildcard arms
+routing future ops to `LowerError::UnsupportedOp` /
+`LowerError::UnsupportedPostOp`.
 
 3-crate workspace (`compiler` lib, `nflc` bin, `profiles/arm64` lib).
-Production code std-only; `libloading` is a test-only dev-dep. **189 tests
-passing** across lexer, parser, IR, passes (11 fusion + 8 dropout +
-5 pipeline-level), profile codegen, CLI smoke (8), reference-validation,
-and FFI integration. `cargo build --workspace`, `cargo clippy --workspace
---all-targets -- -D warnings`, and `cargo fmt --all -- --check` all clean.
-CI green.
+Production code std-only; `libloading` and `cc` are test-only dev-deps.
+**202 tests passing** across lexer, parser, IR, passes (5 fusion +
+8 dropout + 6 pipeline-level), profile codegen, CLI smoke (9), and
+FFI integration. `cargo build --workspace`, `cargo clippy --workspace
+--all-targets -- -D warnings`, `cargo fmt --all -- --check`, and
+`cargo test --workspace` all clean. CI green.
 
-Documentation: `docs/profile_guide/arm64.md` covers the M5b-current asm
-patterns including fused linear→relu (§4.9) and the `UnsupportedPostOp` /
-`UnsupportedOp` error variants. `docs/language_reference/uir.md` reflects
-the `fused_post_ops` field on `NodeKind::Op` and the functional-pass model.
-`PROJECT_SPEC.md` milestones table marks M5 complete.
+Documentation: `docs/profile_guide/arm64.md` §3 supported-ops table
+documents the fused-vs-unfused split for Softmax; new §4.10 "Fused
+linear → softmax (row-wise)" carries the full asm sketch, register
+convention table, AAPCS64 callee-saved notes, the explicit warning
+that row-wise differs structurally from elementwise (do NOT inline
+softmax per element), memory and ABI notes, bias-aware fusion, and
+stacking constraints. §5 errors and §8 Limitations were updated.
+`docs/language_reference/uir.md` §2 lists `SoftmaxRow` alongside
+`Relu` in the `fused_post_ops` field description with the lowercase
+snake_case Display convention. `PROJECT_SPEC.md` milestones table
+M6 row marks "complete".
 
-The immediate next step is **Milestone 6 — open scope**. Candidate
-directions documented in DEVLOG (M5b/M5c carried-forward tech debt):
-- **Test-helper extraction** (`compiler/src/ir/test_utils.rs` for the
-  hand-built UIR pattern that hit "three strikes" in M5b).
-- **Bare-metal target** (Taylor-series `expf` for softmax, no libm
-  dependency) as a second arm64-flavoured profile.
-- **Attention-pattern fusion** (`linear → softmax_max`, `linear → bias →
-  softmax`) — requires a third PostOp variant and possibly a softmax-aware
-  fusion pass, which would naturally trigger the M5b-deferred shared
-  victim/remap helper extraction.
-- **x86_64 profile** (AVX-512 / VNNI for matmul).
-- **`BuildError::span()` accessor + shared `Diagnostic` trait** if a
-  fourth error type appears or generic CLI rendering arrives (M5c findings
-  1.2, 2.1).
+The immediate next step is **Milestone 7 — open scope**. Carry-forward
+candidate directions (priority-ordered from the M6 holistic review):
+1. **Shared 3-step rebuild helper extraction.** Three identical bodies
+   now exist in `eliminate_dropout.rs`, `fuse_linear_relu.rs`,
+   `fuse_linear_softmax.rs`. The "three strikes" trigger fired in M6
+   but extraction was deferred to keep M6 focused.
+2. **`FuseLinearPostOp` consolidation** (M5c OQ-1) — fires on a third
+   access pattern or a second RowWise post-op.
+3. **Type-level `PostOpKind` distinction** (M5c OQ-2) — same trigger
+   plus emit-shape divergence between RowWise variants.
+4. **Bare-metal target** (M5c OQ-3) — Taylor-series `expf` for softmax,
+   no libm dependency.
+5. **Attention-pattern extension** beyond `linear → softmax`: Q/K/V
+   projections, scaled dot-product, axis-N softmax. Requires NFL v0.2
+   grammar work first.
+6. **`BuildError::span()` accessor + shared `Diagnostic` trait** (M5c
+   OQ-4) if a fourth error type or generic CLI rendering arrives.
 
-M6 brainstorming runs in a fresh worktree once M5c is merged.
+M7 brainstorming runs in a fresh worktree once M6 merges.
 
 ---
 
