@@ -114,41 +114,9 @@ fn eliminate_one_model(model: &UirModel) -> Result<UirModel, PassError> {
 mod tests {
     use super::*;
     use crate::ast::Span;
-    use crate::ir::types::{AttrValue, OpAttr, Shape, Type};
+    use crate::ir::test_utils::{input_node, op_node};
+    use crate::ir::types::{AttrValue, OpAttr};
     use crate::Uir;
-
-    /// Build a Node with `NodeKind::Op` and a tensor type. Local helper
-    /// used by the hand-built UIR tests in this module. Kept private —
-    /// per spec §4.5, no shared helper between EliminateDropout and
-    /// FuseLinearRelu (rule of three).
-    fn op_node(op: StdOp, operands: Vec<NodeId>, attrs: Vec<OpAttr>, shape: Vec<u64>) -> Node {
-        Node {
-            kind: NodeKind::Op {
-                op,
-                operands,
-                attrs,
-                fused_post_ops: vec![],
-            },
-            ty: Type {
-                name: "Tensor".into(),
-                shape: Shape(shape),
-            },
-            source_span: Span::new(1, 1),
-        }
-    }
-
-    /// Build a `NodeKind::Input` node with a tensor type. Companion to
-    /// `op_node`; same private-test-helper rationale (spec §4.5).
-    fn input_node(name: &str, shape: Vec<u64>) -> Node {
-        Node {
-            kind: NodeKind::Input { name: name.into() },
-            ty: Type {
-                name: "Tensor".into(),
-                shape: Shape(shape),
-            },
-            source_span: Span::new(1, 1),
-        }
-    }
 
     #[test]
     fn pass_name_is_stable() {

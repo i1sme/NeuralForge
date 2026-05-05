@@ -109,72 +109,22 @@ fn pipeline_eliminates_dropout_before_fusing_linear_relu() {
     // Expected: 2 nodes (input + fused linear with fused_post_ops==[Relu]).
     // This proves end-to-end that EliminateDropout runs first AND
     // that FuseLinearRelu picks up the resulting linear→relu pattern.
-    use crate::ast::Span;
-    use crate::ir::types::{AttrValue, Node, NodeKind, OpAttr, PostOp, Shape, Type};
+    use crate::ir::test_utils::{input_node, op_node, out_dim_attr, rate_attr};
+    use crate::ir::types::{NodeKind, PostOp};
     use crate::ir::StdOp;
     use crate::UirModel;
 
-    let span = Span::new(1, 1);
     let model = UirModel {
         name: "M".into(),
         nodes: vec![
-            Node {
-                kind: NodeKind::Input { name: "x".into() },
-                ty: Type {
-                    name: "Tensor".into(),
-                    shape: Shape(vec![2, 3]),
-                },
-                source_span: span,
-            },
-            Node {
-                kind: NodeKind::Op {
-                    op: StdOp::Linear,
-                    operands: vec![0],
-                    attrs: vec![OpAttr {
-                        name: "out_dim".into(),
-                        value: AttrValue::Integer(2),
-                    }],
-                    fused_post_ops: vec![],
-                },
-                ty: Type {
-                    name: "Tensor".into(),
-                    shape: Shape(vec![2, 2]),
-                },
-                source_span: span,
-            },
-            Node {
-                kind: NodeKind::Op {
-                    op: StdOp::Dropout,
-                    operands: vec![1],
-                    attrs: vec![OpAttr {
-                        name: "rate".into(),
-                        value: AttrValue::Float(0.5),
-                    }],
-                    fused_post_ops: vec![],
-                },
-                ty: Type {
-                    name: "Tensor".into(),
-                    shape: Shape(vec![2, 2]),
-                },
-                source_span: span,
-            },
-            Node {
-                kind: NodeKind::Op {
-                    op: StdOp::Relu,
-                    operands: vec![2],
-                    attrs: vec![],
-                    fused_post_ops: vec![],
-                },
-                ty: Type {
-                    name: "Tensor".into(),
-                    shape: Shape(vec![2, 2]),
-                },
-                source_span: span,
-            },
+            input_node("x", vec![2, 3]),
+            op_node(StdOp::Linear, vec![0], vec![out_dim_attr(2)], vec![2, 2]),
+            op_node(StdOp::Dropout, vec![1], vec![rate_attr(0.5)], vec![2, 2]),
+            op_node(StdOp::Relu, vec![2], vec![], vec![2, 2]),
         ],
         inputs: vec![0],
         output: 3, // relu
-        source_span: span,
+        source_span: crate::ast::Span::new(1, 1),
     };
     let uir = Uir {
         models: vec![model],
