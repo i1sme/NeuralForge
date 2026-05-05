@@ -504,9 +504,9 @@ fn fused_vs_unfused_classifier_match_numerically() {
     // Both asms describe the same model; pull params length from the FnSig
     // instead of hardcoding so the test follows the fixture if it changes.
     let params_len = fused_asm.functions[0].params_floats;
-    debug_assert_eq!(
+    assert_eq!(
         params_len, unfused_asm.functions[0].params_floats,
-        "fused/unfused FnSig params_floats must agree"
+        "fused/unfused params_floats disagree — pipeline changed param layout"
     );
     let mut input = vec![0.0f32; 32 * 784];
     for (i, v) in input.iter_mut().enumerate() {
@@ -723,9 +723,9 @@ fn fused_vs_unfused_mixed_args_match_numerically() {
     // Same deterministic input + params formula as the classifier
     // integration test. mixed_args has batch=4, input=8, output=2.
     let params_len = fused_asm.functions[0].params_floats;
-    debug_assert_eq!(
+    assert_eq!(
         params_len, unfused_asm.functions[0].params_floats,
-        "fused/unfused FnSig params_floats must agree"
+        "fused/unfused params_floats disagree — pipeline changed param layout"
     );
 
     let mut input = [0.0f32; 4 * 8];
