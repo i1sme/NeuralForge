@@ -560,7 +560,7 @@ In `compiler/src/passes/fuse_linear_relu.rs::tests`:
   have `fused_post_ops == [Relu]`, the second linear's attrs include `bias=true`.
   Tests that bias-aware fusion composes with M5a's existing chain support. Net change in count: +1.
 
-Net unit: **+1**. Plus 1 integration test in 11.4.
+Net unit: **+1**. Plus 1 integration test in 11.5.
 
 ### 11.2. EliminateDropout (new module unit tests)
 
