@@ -252,6 +252,60 @@ fn compile_no_passes_and_passes_rejected() {
 }
 
 #[test]
+fn compile_with_passes_filter_only_fuse_linear_softmax_runs() {
+    // --passes fuse_linear_softmax against classifier.nfl, which ends
+    // with `linear[output] -> softmax`.  Only fuse_linear_softmax runs;
+    // eliminate_dropout and fuse_linear_relu must be absent from the
+    // applied-passes note.  Asm confirms the RowWise fused tail was
+    // emitted (.Lfsmx_* labels, bl _expf) and the standalone softmax
+    // path (.Lsm_*) was NOT taken.
+    let output = Command::new(nflc_bin())
+        .args([
+            "compile",
+            "../tests/fixtures/classifier.nfl",
+            "--profile",
+            "arm64",
+            "--passes",
+            "fuse_linear_softmax",
+        ])
+        .output()
+        .expect("failed to run nflc");
+
+    assert!(output.status.success(), "exit failure: {:?}", output);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("note: applied passes: fuse_linear_softmax"),
+        "stderr should announce only fuse_linear_softmax:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("eliminate_dropout"),
+        "stderr should NOT mention eliminate_dropout under filter:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("fuse_linear_relu"),
+        "stderr should NOT mention fuse_linear_relu under filter:\n{stderr}"
+    );
+
+    // Fused RowWise tail: bl _expf and .Lfsmx_* labels must be present.
+    assert!(
+        stdout.contains("bl      _expf"),
+        "fused asm should call bl _expf inside the RowWise softmax tail:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(".Lfsmx_"),
+        "fused asm should use .Lfsmx_* labels for the inlined softmax tail:\n{stdout}"
+    );
+    // No standalone softmax path should appear (fusion replaced it).
+    assert!(
+        !stdout.contains(".Lsm_"),
+        "with fuse_linear_softmax applied, no standalone .Lsm_* label should appear:\n{stdout}"
+    );
+}
+
+#[test]
 fn compile_with_passes_duplicate_name_rejected() {
     // Companion test for the duplicate-name guard in parse_compile_args
     // (--passes a,a → error "pass 'a' specified more than once").

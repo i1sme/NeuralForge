@@ -3,7 +3,8 @@
 [![CI](https://github.com/i1sme/NeuralForge/actions/workflows/ci.yml/badge.svg)](https://github.com/i1sme/NeuralForge/actions/workflows/ci.yml)
 
 A domain-specific language and ahead-of-time compiler for neural networks.
-Write your network in NFL (NeuralForge Language), compile it to assembly, load it directly onto any device.
+Write your network in NFL (NeuralForge Language), compile it to assembly,
+load it directly onto any device.
 
 ---
 
@@ -44,12 +45,13 @@ model Classifier [batch=32, input=784, output=10]:
 | `PROJECT_SPEC.md` | Full design specification — read this first |
 | `DEVLOG.md` | Chronological record of all work and decisions |
 | `CLAUDE.md` | Context file for Claude Code (AI development assistant) |
-| `compiler/` | Lexer, parser, IR, optimisation passes |
-| `profiles/` | Architecture-specific code generators (x86-64, arm64, riscv64, generic) |
-| `language/` | NFL grammar (EBNF) and standard library of operations |
-| `viewer/` | Human-readable renderer for compiler output |
-| `tests/` | Unit tests, integration tests, and NFL fixture files |
-| `docs/` | Language reference and profile writing guide |
+| `compiler/` | `compiler` crate — lexer, parser, AST, Universal IR, optimisation passes |
+| `nflc/` | `nflc` crate — CLI binary (`nflc parse`, `nflc compile`) |
+| `profiles/arm64/` | `profiles-arm64` crate — AArch64 / Apple Silicon code generator |
+| `language/` | NFL grammar (`grammar.ebnf`, frozen at v0.1) |
+| `tests/fixtures/` | Sample `.nfl` files used in integration tests |
+| `docs/` | Language reference (`grammar.md`, `uir.md`) and profile guide (`arm64.md`) |
+| `viewer/` | Reserved for the standalone viewer tool (M7+); rendering today is via `nflc parse --uir` |
 
 ---
 
@@ -71,11 +73,73 @@ Look it up in `DEVLOG.md`. Every significant decision is recorded there with its
 
 ## Project status
 
-Early design phase. The architecture is defined; implementation has not started yet.
+**Milestone 5 fully closed (5a + 5b + 5c).** The compiler stack is end-to-end
+working for inference-only NFL v0.1, with a complete arm64 profile and a
+kernel-fusion pipeline.
 
-The next concrete step is defining the NFL grammar formally (`language/grammar.ebnf`).
-The v0.1 grammar covers inference (forward pass) only — training syntax (loss, optimizer)
-is planned for v0.2.
+What's working today:
+
+- Lexer, parser, typed AST, Universal IR (UIR)
+- AArch64 scalar code generation: `linear` (with or without bias), `relu`,
+  `dropout`, `softmax` (libm `expf`)
+- UIR-pass framework with two passes shipped — `EliminateDropout` (removes
+  inference-time-noop Dropout) and `FuseLinearRelu` (bias-aware fusion of
+  `linear → relu`)
+- CLI: `nflc parse` (with `--uir` rendering) and `nflc compile` (with
+  `--no-passes` and `--passes <list>` filters)
+- Bit-exact fused-vs-unfused FFI integration tests on the `classifier`
+  and `mixed_args` fixtures
+- 189 tests passing across the workspace; CI green; `cargo fmt`,
+  `cargo clippy -D warnings`, `cargo test --workspace` all clean
+
+Next: **Milestone 6 — attention-pattern fusion** (`linear → softmax`
+fused into a row-wise emit branch). Design spec at
+[`docs/superpowers/specs/2026-05-05-m6-attention-fusion-design.md`](docs/superpowers/specs/2026-05-05-m6-attention-fusion-design.md).
+
+NFL training syntax (loss, optimiser) is deferred to v0.2.
+
+---
+
+## Build & try
+
+The workspace is pure Rust, std-only at runtime (`libloading` is a
+test-only dev-dependency). Build the CLI:
+
+```sh
+cargo build --release -p nflc
+```
+
+Parse an NFL file and print the AST or UIR:
+
+```sh
+cargo run -p nflc -- parse tests/fixtures/classifier.nfl
+cargo run -p nflc -- parse tests/fixtures/classifier.nfl --uir
+```
+
+Compile to AArch64 assembly:
+
+```sh
+cargo run -p nflc -- compile tests/fixtures/classifier.nfl > out.s
+```
+
+Inspect or filter optimisation passes:
+
+```sh
+# skip the entire pipeline (Dropout stays as a buffer alias, no fusion)
+cargo run -p nflc -- compile foo.nfl --no-passes
+
+# run only the linear+relu fusion pass
+cargo run -p nflc -- compile foo.nfl --passes fuse_linear_relu
+```
+
+Run the full test suite:
+
+```sh
+cargo test --workspace
+```
+
+The arm64 profile targets Apple Silicon and AArch64 POSIX hosts. NEON / SVE
+vectorisation, an x86_64 profile, and a RISC-V profile are future work.
 
 ---
 
@@ -85,7 +149,7 @@ is planned for v0.2.
 - **Explicit over implicit** — shapes and types are always declared, never inferred silently
 - **Profile isolation** — each hardware target is a self-contained module
 - **AI-native syntax** — NFL is designed to be written and read by both humans and LLMs
-- **Human oversight** — all compiler output is inspectable via the viewer tool
+- **Human oversight** — every compiler output is inspectable; today via `nflc parse --uir`, with a dedicated viewer tool planned for M7+
 
 ---
 

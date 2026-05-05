@@ -1,7 +1,7 @@
 # NFL Universal IR (UIR) — Language Reference
 
-> **Status:** Defines the UIR as of NFL v0.1 (Milestone 3 complete).
-> **Authoritative source:** `compiler/src/ir/` and the M3a/M3b/M3c specs under
+> **Status:** Defines the UIR as of NFL v0.1 (Milestone 6 complete).
+> **Authoritative source:** `compiler/src/ir/` and the M3a/M3b/M3c/M5a/M6 specs under
 > `docs/superpowers/specs/`.
 
 This document explains what the UIR is, how it's structured, and the rules the
@@ -16,7 +16,7 @@ The Universal IR is a typed computation graph that the NFL compiler produces
 between parsing and codegen. It is the input to architecture profiles
 (`profiles/arm64/` is the first concrete one, M4+) and to optimisation passes
 (`compiler::passes::default_pipeline()` runs `EliminateDropout` then
-`FuseLinearRelu`, M5+).
+`FuseLinearRelu` then `FuseLinearSoftmax`, M5+/M6+).
 
 ```
 NFL source  ──lex──>  Tokens  ──parse──>  AST  ──build──>  UIR  ──codegen──>  assembly
@@ -60,10 +60,10 @@ pub enum NodeKind {
         op: StdOp,
         operands: Vec<NodeId>,
         attrs: Vec<OpAttr>,
-        // M5a: post-ops fused into this op's emitter (currently
-        // FuseLinearRelu sets this to `vec![PostOp::Relu]` on a
-        // Linear it has fused with a downstream Relu; otherwise
-        // empty).
+        // M5a+: post-ops fused into this op's emitter. Set by:
+        //   FuseLinearRelu → vec![PostOp::Relu] (linear→relu)
+        //   FuseLinearSoftmax → vec![PostOp::SoftmaxRow] (linear→softmax, M6+)
+        // Empty for un-fused nodes.
         fused_post_ops: Vec<PostOp>,
     },
 }
@@ -104,10 +104,11 @@ from the stdlib.
 - `operands` are `NodeId`s referencing the inputs (one for v0.1's single-input ops).
 - `attrs` are validated, type-resolved arguments (positional and named, in the
   signature's slot order).
-- `fused_post_ops: Vec<PostOp>` carries fused post-operations (M5a+; set by
-  `FuseLinearRelu` to `vec![PostOp::Relu]` on a Linear that has fused with a
-  downstream Relu; empty for un-fused nodes). Renders as `fused=[<list>]`
-  suffix in the CLI pretty-print (§6).
+- `fused_post_ops: Vec<PostOp>` — post-operations folded into this
+  node by passes such as `FuseLinearRelu` (`PostOp::Relu`) and
+  `FuseLinearSoftmax` (`PostOp::SoftmaxRow`). Empty by default.
+  `Display` rendering: lowercase snake_case (`relu`, `softmax_row`).
+  Renders as `fused=[<list>]` suffix in the CLI pretty-print (§6).
 
 Example: `linear[16, bias=true]` becomes:
 ```

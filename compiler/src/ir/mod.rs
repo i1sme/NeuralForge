@@ -10,6 +10,9 @@ pub mod types;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+pub(crate) mod test_utils;
+
 pub use error::{BuildError, BuildErrorKind};
 pub use stdlib::{linear_has_bias, ArgSlot, ArgType, Signature, StdOp};
 pub use types::{AttrValue, Node, NodeId, NodeKind, OpAttr, PostOp, Shape, Type, Uir, UirModel};

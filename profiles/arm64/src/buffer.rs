@@ -3,7 +3,7 @@
 //! Pure analyzers over `UirModel`. No asm emission. Consumed by `codegen.rs`
 //! in Task 3.
 
-use compiler::{NodeId, NodeKind, StdOp, UirModel};
+use compiler::{Node, NodeId, NodeKind, StdOp, UirModel};
 
 /// Bytes per f32 element. M4b is f32-only project-wide. M5+ may parameterise.
 const BYTES_PER_ELEMENT: usize = 4;
@@ -75,25 +75,43 @@ pub fn assign_buffers(model: &UirModel) -> BufferAssignment {
     BufferAssignment { locs, stack_bytes }
 }
 
-/// True iff the model emits no `bl`/`blr` (i.e. no softmax in M4b).
-pub fn compute_is_leaf(model: &UirModel) -> bool {
-    !model.nodes.iter().any(|n| {
-        matches!(
-            &n.kind,
-            NodeKind::Op {
-                op: StdOp::Softmax,
-                ..
-            }
-        )
-    })
+/// Returns true iff the node uses softmax in any form — either as a standalone
+/// `StdOp::Softmax` node or as a `PostOp::SoftmaxRow` fused into a Linear node.
+/// Both paths call `bl _expf`, making the function non-leaf.
+fn node_uses_softmax(node: &Node) -> bool {
+    use compiler::PostOp;
+    match &node.kind {
+        NodeKind::Op {
+            op, fused_post_ops, ..
+        } => {
+            matches!(op, StdOp::Softmax)
+                || fused_post_ops
+                    .iter()
+                    .any(|p| matches!(p, PostOp::SoftmaxRow))
+        }
+        NodeKind::Input { .. } => false,
+    }
 }
 
-/// Set of callee-saved registers used by the model's body. M4b: `{d8, d9}`
-/// and `{x19-x23}` iff softmax is present.
+/// True iff the model emits no `bl`/`blr` (i.e. no softmax in any form).
+///
+/// After M6 fusion, a fused `linear → softmax` node carries
+/// `PostOp::SoftmaxRow` and still calls `bl _expf` — so such a model is
+/// not a leaf even though there is no standalone `StdOp::Softmax` node.
+pub fn compute_is_leaf(model: &UirModel) -> bool {
+    !model.nodes.iter().any(node_uses_softmax)
+}
+
+/// Set of callee-saved registers used by the model's body. M6: `{d8, d9}`
+/// and `{x19-x23}` iff any node calls `bl _expf` — either a standalone
+/// `StdOp::Softmax` or a `Linear` carrying `PostOp::SoftmaxRow` in its
+/// `fused_post_ops`. See `node_uses_softmax`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RegSet {
     pub d8_d9: bool,
-    /// x19-x23 are used by emit_softmax to hold loop state across `bl _expf`.
+    /// x19-x23 are used by `emit_softmax` (standalone path) and by the
+    /// row-wise softmax tail in `emit_linear` (M6 fused path; see
+    /// `arm64.md` §4.10) to hold loop state across `bl _expf`.
     pub x19_x23: bool,
 }
 
@@ -108,15 +126,7 @@ impl RegSet {
 }
 
 pub fn compute_callee_saved(model: &UirModel) -> RegSet {
-    let has_softmax = model.nodes.iter().any(|n| {
-        matches!(
-            &n.kind,
-            NodeKind::Op {
-                op: StdOp::Softmax,
-                ..
-            }
-        )
-    });
+    let has_softmax = model.nodes.iter().any(node_uses_softmax);
     RegSet {
         d8_d9: has_softmax,
         x19_x23: has_softmax,

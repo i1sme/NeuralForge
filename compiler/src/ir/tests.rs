@@ -496,6 +496,12 @@ fn display_for_postop_lowercase() {
 }
 
 #[test]
+fn post_op_softmax_row_displays_as_softmax_row() {
+    use crate::ir::PostOp;
+    assert_eq!(format!("{}", PostOp::SoftmaxRow), "softmax_row");
+}
+
+#[test]
 fn display_for_node_renders_fused_post_ops_when_present() {
     use crate::ast::Span;
     use crate::ir::stdlib::StdOp;

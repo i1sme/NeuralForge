@@ -66,7 +66,7 @@ Initial target profiles:
 | Profile     | Architecture       | Key capability              |
 |-------------|--------------------|-----------------------------|
 | `arm64`     | Apple Silicon / AArch64 POSIX | Scalar AArch64 assembly: linear (± bias), relu, dropout (no-op pass-through), softmax (libm `expf`). All 5 M3 fixtures lower end-to-end (M4a + M4b). NEON / SVE / AMX in later slices. |
-| `x86_64`    | Intel / AMD        | AVX-512, VNNI instructions (M6) |
+| `x86_64`    | Intel / AMD        | AVX-512, VNNI instructions (future) |
 | `riscv64`   | RISC-V             | RVV vector extension (future) |
 
 A profile is a self-contained module. Adding support for a new architecture means writing a new profile — the language and compiler core remain unchanged.
@@ -156,7 +156,7 @@ NeuralForge is designed so that LLMs can write, read, and reason about NFL code 
 | 3 | UIR prototype                                  | Produce a computation graph from parsed AST       |
 | 4 | `arm64` profile (4a + 4b complete)             | Generate scalar AArch64 assembly for all 5 M3 fixtures end-to-end (linear ± bias, relu, dropout, softmax via libm expf) |
 | 5 | Kernel fusion + UIR-pass framework (5a + 5b + 5c complete) | UIR-pass infrastructure (`UirPass` trait, `default_pipeline`, `run_pipeline`, `PassError`); two passes shipped — `FuseLinearRelu` (bias-aware: fuses `linear → relu` and `linear[bias=true] → relu`) and `EliminateDropout` (removes inference-time-noop Dropout); CLI gains `--no-passes` and `--passes <list>` filter; bit-exact equivalence proven via `fused_vs_unfused_*_match_numerically` integration tests on classifier and mixed_args fixtures |
-| 6 | `x86-64` profile                               | Use AVX-512 for matrix operations                 |
+| 6 | Attention-pattern fusion — kernel fusion v2 (complete) | `PostOp::SoftmaxRow` variant + `FuseLinearSoftmax` pass; `default_pipeline = [EliminateDropout, FuseLinearRelu, FuseLinearSoftmax]`; arm64 RowWise emit branch in `emit_linear` (matmul i-loop A writes the M×N output, then a separate i-loop B runs Phases 2-4: row-max → exp+sum → normalise, in-place over the linear output buffer using callee-saved s8/s9 surviving `bl _expf`); bit-exact equivalence proven via `fused_vs_unfused_softmax_match_numerically` on `classifier` (no-bias) + `softmax_with_bias` (bias-aware) fixtures; `compiler/src/ir/test_utils.rs` shared helpers extracted; OQ-5 `assert_eq!` harmonisation across all three fused-vs-unfused FFI tests |
 | 7 | Human-readable viewer v0.1                     | Show UIR in annotated human-readable format       |
 
 ---

@@ -20,16 +20,17 @@ impl UirPass for IdentityPass {
 
 #[test]
 fn default_pipeline_is_canonical_order() {
-    // M5b: default_pipeline now contains two passes in canonical order.
-    // EliminateDropout MUST come before FuseLinearRelu so that
-    // `linear → dropout → relu` patterns can fuse (the dropout has to
-    // be removed first for the Linear's consumer to become the Relu).
+    // M6: default_pipeline now contains three passes in canonical order.
+    // EliminateDropout MUST come before FuseLinearRelu and FuseLinearSoftmax
+    // so that `linear → dropout → relu` and `linear → dropout → softmax`
+    // patterns can fuse (the dropout has to be removed first for the
+    // Linear's consumer to become the Relu or Softmax).
     let pipeline = default_pipeline();
     let names: Vec<&str> = pipeline.iter().map(|p| p.name()).collect();
     assert_eq!(
         names,
-        vec!["eliminate_dropout", "fuse_linear_relu"],
-        "default_pipeline must run eliminate_dropout before fuse_linear_relu; got: {:?}",
+        vec!["eliminate_dropout", "fuse_linear_relu", "fuse_linear_softmax"],
+        "default_pipeline must run eliminate_dropout, then fuse_linear_relu, then fuse_linear_softmax; got: {:?}",
         names
     );
 }
@@ -65,7 +66,7 @@ fn empty_pipeline_returns_input_clone() {
 /// Synthetic always-failing pass: lets us verify pipeline halts on
 /// `Err` and propagates the error unchanged. Without this test, a
 /// future refactor of `run_pipeline` could accidentally swallow
-/// errors and only Task 4's tests would (incidentally) catch it.
+/// errors and only the canonical-order test would (incidentally) catch it.
 struct FailPass;
 
 impl UirPass for FailPass {
@@ -109,72 +110,22 @@ fn pipeline_eliminates_dropout_before_fusing_linear_relu() {
     // Expected: 2 nodes (input + fused linear with fused_post_ops==[Relu]).
     // This proves end-to-end that EliminateDropout runs first AND
     // that FuseLinearRelu picks up the resulting linear→relu pattern.
-    use crate::ast::Span;
-    use crate::ir::types::{AttrValue, Node, NodeKind, OpAttr, PostOp, Shape, Type};
+    use crate::ir::test_utils::{input_node, op_node, out_dim_attr, rate_attr};
+    use crate::ir::types::{NodeKind, PostOp};
     use crate::ir::StdOp;
     use crate::UirModel;
 
-    let span = Span::new(1, 1);
     let model = UirModel {
         name: "M".into(),
         nodes: vec![
-            Node {
-                kind: NodeKind::Input { name: "x".into() },
-                ty: Type {
-                    name: "Tensor".into(),
-                    shape: Shape(vec![2, 3]),
-                },
-                source_span: span,
-            },
-            Node {
-                kind: NodeKind::Op {
-                    op: StdOp::Linear,
-                    operands: vec![0],
-                    attrs: vec![OpAttr {
-                        name: "out_dim".into(),
-                        value: AttrValue::Integer(2),
-                    }],
-                    fused_post_ops: vec![],
-                },
-                ty: Type {
-                    name: "Tensor".into(),
-                    shape: Shape(vec![2, 2]),
-                },
-                source_span: span,
-            },
-            Node {
-                kind: NodeKind::Op {
-                    op: StdOp::Dropout,
-                    operands: vec![1],
-                    attrs: vec![OpAttr {
-                        name: "rate".into(),
-                        value: AttrValue::Float(0.5),
-                    }],
-                    fused_post_ops: vec![],
-                },
-                ty: Type {
-                    name: "Tensor".into(),
-                    shape: Shape(vec![2, 2]),
-                },
-                source_span: span,
-            },
-            Node {
-                kind: NodeKind::Op {
-                    op: StdOp::Relu,
-                    operands: vec![2],
-                    attrs: vec![],
-                    fused_post_ops: vec![],
-                },
-                ty: Type {
-                    name: "Tensor".into(),
-                    shape: Shape(vec![2, 2]),
-                },
-                source_span: span,
-            },
+            input_node("x", vec![2, 3]),
+            op_node(StdOp::Linear, vec![0], vec![out_dim_attr(2)], vec![2, 2]),
+            op_node(StdOp::Dropout, vec![1], vec![rate_attr(0.5)], vec![2, 2]),
+            op_node(StdOp::Relu, vec![2], vec![], vec![2, 2]),
         ],
         inputs: vec![0],
         output: 3, // relu
-        source_span: span,
+        source_span: crate::ast::Span::new(1, 1),
     };
     let uir = Uir {
         models: vec![model],
@@ -212,6 +163,65 @@ fn pipeline_eliminates_dropout_before_fusing_linear_relu() {
     assert_eq!(fused_post_ops, &vec![PostOp::Relu]);
 
     // model.output points at the fused linear.
+    assert_eq!(m.output, 1);
+    assert_eq!(m.inputs, vec![0]);
+}
+
+#[test]
+fn pipeline_eliminates_dropout_before_fusing_linear_softmax() {
+    // Load-bearing test for M6 spec §6: hand-build a synthetic UIR
+    // `linear → dropout → softmax` and run the full default pipeline.
+    // Expected: 2 nodes (input + fused linear with fused_post_ops==[SoftmaxRow]).
+    // This proves end-to-end that EliminateDropout runs first AND
+    // that FuseLinearSoftmax picks up the resulting linear→softmax pattern.
+    use crate::ir::test_utils::{input_node, op_node, out_dim_attr, rate_attr};
+    use crate::ir::types::{NodeKind, PostOp};
+    use crate::ir::StdOp;
+    use crate::UirModel;
+
+    let model = UirModel {
+        name: "M".into(),
+        nodes: vec![
+            input_node("x", vec![2, 3]),
+            op_node(StdOp::Linear, vec![0], vec![out_dim_attr(2)], vec![2, 2]),
+            op_node(StdOp::Dropout, vec![1], vec![rate_attr(0.5)], vec![2, 2]),
+            op_node(StdOp::Softmax, vec![2], vec![], vec![2, 2]),
+        ],
+        inputs: vec![0],
+        output: 3,
+        source_span: crate::ast::Span::new(1, 1),
+    };
+    let uir = Uir {
+        models: vec![model],
+    };
+
+    let out = run_pipeline(&uir, &default_pipeline()).expect("pipeline ok");
+    let m = &out.models[0];
+
+    // EliminateDropout collapses the chain to linear → softmax;
+    // FuseLinearSoftmax then fuses, producing one Linear with [SoftmaxRow].
+    assert_eq!(
+        m.nodes.len(),
+        2,
+        "expected 2 nodes (input + fused linear); got: {:?}",
+        m.nodes
+    );
+
+    assert!(
+        matches!(m.nodes[0].kind, NodeKind::Input { .. }),
+        "n0 must be the Input node after pipeline; got: {:?}",
+        m.nodes[0].kind
+    );
+
+    let NodeKind::Op {
+        op, fused_post_ops, ..
+    } = &m.nodes[1].kind
+    else {
+        panic!("expected Op at n1");
+    };
+    assert!(matches!(op, StdOp::Linear));
+    assert_eq!(fused_post_ops, &vec![PostOp::SoftmaxRow]);
+
     assert_eq!(m.output, 1);
     assert_eq!(m.inputs, vec![0]);
 }

@@ -41,12 +41,17 @@ pub enum PostOp {
     /// Clamp negative values to zero (`max(x, 0)`), applied per-element to
     /// the producer's output before store.
     Relu,
+    /// Row-wise softmax. Emit shape is structurally different from `Relu` —
+    /// `emit_linear` materialises the full row first, then runs three sweeps
+    /// (max → exp+sum → normalize) in-place. See `arm64.md` §4.10.
+    SoftmaxRow,
 }
 
 impl std::fmt::Display for PostOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
             PostOp::Relu => "relu",
+            PostOp::SoftmaxRow => "softmax_row",
         };
         write!(f, "{}", name)
     }

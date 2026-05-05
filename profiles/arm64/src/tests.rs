@@ -501,3 +501,111 @@ fn unfused_linear_still_no_fmax() {
         "un-fused linear should NOT materialise s4 zero (only fused-relu needs it):\n{s}"
     );
 }
+
+// ── M6 analyzer tests: PostOp::SoftmaxRow via default pipeline ───────────────
+
+#[test]
+fn is_leaf_false_for_fused_softmax_row_linear() {
+    use compiler::passes::{default_pipeline, run_pipeline};
+
+    // Construct a fused linear → softmax UIR via the parser + default pipeline.
+    let src = "model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> softmax\n";
+    let ast = compiler::parse(src).expect("parse ok");
+    let uir = compiler::ir::build(&ast).expect("build ok");
+    let fused = run_pipeline(&uir, &default_pipeline()).expect("pipeline ok");
+    let model = &fused.models[0];
+
+    assert!(
+        !super::buffer::compute_is_leaf(model),
+        "a Linear carrying PostOp::SoftmaxRow still calls bl _expf — leaf must be false"
+    );
+}
+
+#[test]
+fn callee_saved_includes_d8_d9_for_fused_softmax_row() {
+    use compiler::passes::{default_pipeline, run_pipeline};
+
+    let src = "model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> softmax\n";
+    let ast = compiler::parse(src).expect("parse ok");
+    let uir = compiler::ir::build(&ast).expect("build ok");
+    let fused = run_pipeline(&uir, &default_pipeline()).expect("pipeline ok");
+    let model = &fused.models[0];
+
+    let regs = super::buffer::compute_callee_saved(model);
+    assert!(regs.d8_d9, "fused-SoftmaxRow Linear needs d8/d9 saved");
+    assert!(regs.x19_x23, "fused-SoftmaxRow Linear needs x19-x23 saved");
+}
+
+// ── M6 asm-shape tests: four-phase softmax tail via default pipeline ──────────
+
+#[test]
+fn emit_linear_with_softmax_row_post_op_emits_three_phase_softmax() {
+    use compiler::passes::{default_pipeline, run_pipeline};
+
+    let src = "model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> softmax\n";
+    let ast = compiler::parse(src).expect("parse ok");
+    let uir = compiler::ir::build(&ast).expect("build ok");
+    let fused = run_pipeline(&uir, &default_pipeline()).expect("pipeline ok");
+    let asm = crate::lower(&fused).expect("lower ok");
+    let s = &asm.source;
+
+    // Phase 1 — matmul. Some fmadd must appear.
+    assert!(s.contains("fmadd"), "Phase 1 matmul missing:\n{s}");
+
+    // Phase 2 — row-max scan into s8.
+    assert!(
+        s.contains("fmax    s8, s8, s1"),
+        "Phase 2 row-max scan into s8 missing:\n{s}"
+    );
+
+    // Phase 3 — exp(x - max), sum into s9, with bl _expf.
+    assert!(
+        s.contains("bl      _expf"),
+        "Phase 3 missing bl _expf:\n{s}"
+    );
+    assert!(
+        s.contains("fadd    s9, s9, s0"),
+        "Phase 3 sum accumulation in s9 missing:\n{s}"
+    );
+
+    // Phase 4 — normalise by s9.
+    assert!(
+        s.contains("fdiv    s0, s0, s9"),
+        "Phase 4 normalise missing:\n{s}"
+    );
+
+    // Fused asm uses .Lfsmx_* labels; no standalone .Lsm_* labels expected.
+    assert!(
+        !s.contains(".Lsm_"),
+        "fused asm must not emit standalone softmax .Lsm_* labels:\n{s}"
+    );
+    assert!(
+        s.contains(".Lfsmx_"),
+        "fused asm must use .Lfsmx_* labels for the inlined softmax tail:\n{s}"
+    );
+}
+
+#[test]
+fn emit_linear_with_softmax_row_post_op_preserves_bias_add() {
+    use compiler::passes::{default_pipeline, run_pipeline};
+
+    // bias=true on the linear; confirmed against tests/fixtures/mixed_args.nfl syntax.
+    let src = "model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2, bias=true] -> softmax\n";
+    let ast = compiler::parse(src).expect("parse ok");
+    let uir = compiler::ir::build(&ast).expect("build ok");
+    let fused = run_pipeline(&uir, &default_pipeline()).expect("pipeline ok");
+    let asm = crate::lower(&fused).expect("lower ok");
+    let s = &asm.source;
+
+    // Phase 1 still emits matmul → bias-add. The bias-add is `fadd s0, s0, s5`
+    // per the existing M5b emit_linear shape.
+    assert!(
+        s.contains("fadd    s0, s0, s5"),
+        "bias-add missing in fused row-wise emit:\n{s}"
+    );
+    // Phase 3 still calls _expf.
+    assert!(
+        s.contains("bl      _expf"),
+        "fused softmax tail missing bl _expf:\n{s}"
+    );
+}

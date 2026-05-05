@@ -14,6 +14,68 @@ Format for each entry:
 
 ---
 
+## 2026-05-05 — Milestone 6 closed: attention-pattern fusion (`linear → softmax`)
+
+### What was done
+- **`PostOp::SoftmaxRow` variant** on the `#[non_exhaustive]` `compiler::ir::PostOp` enum. `Display` renders as `softmax_row` (lowercase snake_case, matching `Relu => "relu"` convention).
+- **`compiler::passes::FuseLinearSoftmax` pass** — bias-aware from day one, parallel to `FuseLinearRelu`. Mirrors the canonical 3-step rebuild pattern (consumer count → victim identification → rebuild + remap). 5 unit tests pin all 5 victim criteria (single-consumer Linear, Softmax sole consumer, Softmax has Linear as sole operand, Linear's `fused_post_ops` empty, identity-when-no-Softmax). Cross-pass pipeline test `pipeline_eliminates_dropout_before_fusing_linear_softmax` confirms `linear → dropout → softmax` collapses through `EliminateDropout` then fuses.
+- **`default_pipeline()` extended** to `[EliminateDropout, FuseLinearRelu, FuseLinearSoftmax]`. CLI `--passes <list>` and `--no-passes` work without code changes (the filter reads pass names dynamically).
+- **arm64 RowWise emit branch** in `profiles/arm64::ops::linear::emit_linear`. After the existing matmul i-loop completes (writing the full M×N output), a separate i-loop runs Phases 2-4 of softmax in-place: row-max scan into `s8` (callee-saved), exp(x − s8) per element with `bl _expf` and sum-accumulate into `s9` (also callee-saved), normalise by `s9`. Labels prefixed `.Lfsmx_*` to avoid collision with the standalone-softmax `.Lsm_*` labels. Caller-saved `x6` is recomputed after each `bl _expf`.
+- **`profiles/arm64::buffer::node_uses_softmax(node)`** — shared helper used by `compute_is_leaf` and `compute_callee_saved` to detect both standalone `StdOp::Softmax` and `Linear` with `PostOp::SoftmaxRow` in `fused_post_ops`. Both analysers return the correct answer (non-leaf, d8/d9 + x19-x23 saved) for fused-softmax-row Linears.
+- **Shared test helpers** (`compiler/src/ir/test_utils.rs`, `pub(crate)`, `cfg(test)`): `input_node`, `op_node`, `out_dim_attr`, `rate_attr`. Promoted from inline in `eliminate_dropout.rs` (where they had been since M5b). Migrated the cross-pass test `pipeline_eliminates_dropout_before_fusing_linear_relu` and all 8 `eliminate_dropout` unit tests to use the shared module. `fuse_linear_relu` tests (which use the parser via `build("model M …")`) deliberately not migrated — out of M6 scope.
+- **New fixture** `tests/fixtures/softmax_with_bias.nfl` — minimal (batch=4, input=8, output=3) with `linear[output, bias=true] -> softmax` as the final step. Exercises the bias-aware path through the RowWise tail.
+- **FFI integration test** `fused_vs_unfused_softmax_match_numerically` in `profiles/arm64/tests/integration.rs`. Loops over `classifier.nfl` (no-bias) + `softmax_with_bias.nfl` (bias-aware). Compiles fused (`default_pipeline`) and unfused (`--no-passes`) asm. Links via `cc + libloading` and asserts bit-exact element-wise equality. Uses `assert_eq!` (not `debug_assert_eq!`) for `params_floats` agreement (OQ-5 fix applied from this test's first commit) and `FnSig`-driven buffer sizing (defensive cross-check against fixture-tuple constants).
+- **OQ-5 harmonisation** retro-fitted to the M5a `fused_vs_unfused_classifier_match_numerically` and M5b `fused_vs_unfused_mixed_args_match_numerically` tests: both `debug_assert_eq!` instances replaced with `assert_eq!` (`debug_assert_eq!` is a no-op in release builds; the agreement claim should hold unconditionally).
+- **CLI smoke** `compile_with_passes_filter_only_fuse_linear_softmax_runs` in `nflc/tests/cli_compile.rs` — confirms the dynamic pass registry exposes `fuse_linear_softmax` without CLI code changes; pins the stderr `note: applied passes:` format and the stdout asm shape (presence of `bl _expf` and `.Lfsmx_*` labels; absence of standalone `.Lsm_*`).
+- **Documentation:** `docs/profile_guide/arm64.md` §3 / §4.10 (new) / §5 / §8 brought to M6 state. `docs/language_reference/uir.md` §2 mentions `SoftmaxRow` alongside `Relu` in the `fused_post_ops` field description. `PROJECT_SPEC.md` M6 row marks "complete". `CLAUDE.md` "Current Status" rewritten.
+- **Drift-fixes from the M6 holistic review** (commit `a535184`): 6 close-in-M6 findings — stale doc-comment about helper-extraction trigger in `eliminate_dropout.rs`, "Pass N" → "Phase N" rename in `linear.rs` softmax tail, "Task N" plan-language → "M6" in source comments, M4b-era `RegSet` doc-comments updated, `node_uses_softmax` match overlap eliminated, two `#[allow(unreachable_patterns)]` comment wordings harmonised. None functional.
+
+### Decisions made
+- **Tasks 4+5+6 packed into a single commit** (`609eede`). Plan implicitly assumed independent tasks; in practice the asm-side dependency forced a combined commit (Task 4 alone would leave the workspace red because `default_pipeline()` includes `FuseLinearSoftmax` once the pass exists, and the asm-side `LowerError::UnsupportedPostOp` for `SoftmaxRow` triggers if the RowWise emit branch isn't there). A 4-test follow-up commit (`838cb7d`) added the per-task unit tests the combined commit skipped (`is_leaf_false_for_fused_softmax_row_linear`, `callee_saved_includes_d8_d9_for_fused_softmax_row`, `emit_linear_with_softmax_row_post_op_emits_three_phase_softmax`, `emit_linear_with_softmax_row_post_op_preserves_bias_add`).
+- **Two acceptable spec deviations**, both correctly reflected in arm64.md §4.10:
+  - **Two-pass i-loop structure**: full matmul i-loop completes (writes the entire M×N output buffer), then a separate i-loop runs Phases 2-4. The spec sketch implied a per-row interleaved structure. The two-pass form is simpler to reason about (no save/restore dance for `x3` around the tail) at the cost of cache locality for large M (negligible for the typical NFL fixtures, M ≤ 32).
+  - **`-inf` bit-pattern init for `s8`** (`movz w0, #0x0000; movk w0, #0xFF80, lsl #16; fmov s8, w0`) instead of `s8 = row[0]`. Mirrors the canonical `emit_softmax` pattern (consistency wins).
+- **No defensive `emit_linear` stacking check.** The plan briefly mentioned a defensive `has_row_wise && fused_post_ops.len() > 1 → UnsupportedPostOp` check inside `emit_linear`. Not implemented — the pass-level `FuseLinearSoftmax` criterion 4 (`fused_post_ops.is_empty()`) is the only guard against `[Relu, SoftmaxRow]` stacks. Single source of truth; documented in arm64.md §4.10 + the `PostOp::SoftmaxRow` doc-comment.
+- **Helper-extraction order of operations.** §10 of the spec was followed: extract `compiler/src/ir/test_utils.rs` BEFORE writing any M6 unit tests, migrate the existing M5b cross-pass test that hand-built verbose `Node` literals, only then write M6 tests through the shared helpers. Avoided the alternative ordering's double-touch hazard.
+
+### Problems encountered
+- **Plan-phase fixture audit (R3 from the spec):** the `classifier.nfl` final layer (`linear[output] -> softmax`) has `bias=false` (NFL default), so the bias-aware path through the RowWise tail isn't exercised by the existing fixture. Resolved by adding `tests/fixtures/softmax_with_bias.nfl` as a parallel small fixture covering `linear[output, bias=true] -> softmax`. The new FFI integration test loops over both fixtures.
+- **Cross-crate test_utils visibility:** `compiler::ir::test_utils` is `#[cfg(test)] pub(crate)`, making it invisible to `profiles/arm64`'s test compilation. The unit tests in `profiles/arm64::buffer::tests` and `profiles/arm64::ops::linear::tests` couldn't import the shared helpers directly; they construct fused UIR via `compiler::parse + ir::build + run_pipeline(default_pipeline)` instead. Acceptable workaround; cross-crate exposure of the helpers is a future-decision item if `profiles/x86_64` ever adds equivalent tests.
+- **Plan's draft `AttrValue::Boolean` for the bias attribute** was wrong: `compiler::ir::types::AttrValue` has `Integer(u64)`, `Float(f64)`, and `Symbol(String)` variants, no `Boolean`. The implementation uses `AttrValue::Symbol("true".into())` to mirror the existing convention (also confirmed via `linear_has_bias()` in `stdlib.rs`).
+- **Plan-language drift in source comments:** several "Task 5" / "Task 6" plan references leaked into committed source. Caught by the M6 holistic review (Finding #4) and renamed to "M6" in commit `a535184`.
+
+### Holistic review process — worth recording for M7+
+The M6 post-merge holistic review (single thorough subagent dispatch, spec / structure / cross-cutting / docs / process scan) found 15 findings vs. the per-task reviews' typical 1-3 findings each. Of the 15:
+- 7 close-in-M6 (landed in commit `a535184`).
+- 5 carry-forward to M7+ (recorded below).
+- 2 acceptable deviations (no action; documented in this entry).
+- 1 process finding for M7+ planning (atomic-task-pack convention).
+
+Decision for M7+: continue the holistic-review-per-milestone pattern. The cost (one subagent dispatch ~5 min) consistently catches drift the per-task reviews miss.
+
+### Known tech debt (carried forward to M7+)
+1. **Shared 3-step rebuild helper extraction.** Three identical bodies now exist in `eliminate_dropout.rs`, `fuse_linear_relu.rs`, `fuse_linear_softmax.rs`. The "three strikes" trigger has fired but extraction was deferred to keep M6 focused. M7+ first task candidate.
+2. **`_expf` AAPCS64 smoke test** (spec §13 R5): direct unit test in `profiles/arm64::asm::tests` pinning that `_expf` preserves d8/d9. The FFI integration test covers this transitively; the explicit smoke test is low-priority hygiene.
+3. **§8 invariant 6 unit test** (Finding #7): a small unit test for the "(--passes fuse_linear_softmax alone leaves linear → dropout → softmax untouched)" degradation case. Logic verified by code review; coverage gap is trivially closeable.
+4. **CLI smoke test future-proofing** (Finding #8): the `!stderr.contains("eliminate_dropout")` assertion in `compile_with_passes_filter_only_fuse_linear_softmax_runs` would break if a future M7+ pass adds the substring to a dynamic available-passes listing. Switch to `!stderr.contains("note: applied passes: eliminate_dropout")` style when the test becomes brittle.
+5. **Plan-convention for atomic task packs** (Finding #11): when a feature pack has mutual asm-side ↔ pass-side dependencies that would leave the workspace red mid-implementation, the plan should explicitly mark those tasks as "atomic / single commit" up-front. Apply this convention from M7's plan.
+6. **Carried over from M5c** (still open):
+   - **OQ-1 `FuseLinearPostOp` consolidation** — fires on a third access pattern OR a second RowWise post-op.
+   - **OQ-2 type-level `PostOpKind` distinction** — same trigger plus emit-shape divergence between RowWise variants.
+   - **OQ-3 bare-metal `expf`** — fires on user-driven embedded need.
+   - **OQ-4 `BuildError::span()` accessor + shared `Diagnostic` trait** — fires on a fourth error type or generic CLI rendering path.
+   - **OQ-6 `format!`/`to_string()` style consistency** — fires on the next cascade-arm touch.
+
+### Next step
+**Milestone 6 fully complete.** Brainstorm M7 in a fresh worktree once M6 merges. Open scope; candidate directions (priority-ordered from the holistic review):
+1. **Shared 3-step rebuild helper extraction** (the M6-deferred trigger; ~30-50 lines, decisive small win).
+2. **Attention-pattern extension** — Q/K/V projections, scaled dot-product, axis-N softmax. Requires NFL v0.2 grammar work first; biggest scope.
+3. **`FuseLinearPostOp` consolidation** (OQ-1) — fires when the next RowWise post-op (LayerNorm, attention-axis softmax) lands.
+4. **Bare-metal target** (OQ-3) — Taylor-series `expf`, second arm64 sub-profile.
+5. **`BuildError::span()` + `Diagnostic` trait** (OQ-4) — landed if a fourth error type appears or the CLI gains generic error rendering.
+
+---
+
 ## 2026-05-05 — Milestone 5c closed: M5 cycle close-out (docs sync + small consistency fixes)
 
 ### What was done
