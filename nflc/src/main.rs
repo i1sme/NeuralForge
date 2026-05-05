@@ -335,12 +335,12 @@ fn run_build_uir(path: PathBuf) -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                render_error_with_snippet(&source, &path, e.line, e.col, &e.message, None);
+                render_error_with_snippet(&source, &path, e.line, e.col, &e.to_string(), None);
                 ExitCode::FAILURE
             }
         },
         Err(e) => {
-            render_error_with_snippet(&source, &path, e.line, e.col, &e.message, None);
+            render_error_with_snippet(&source, &path, e.line, e.col, &e.to_string(), None);
             ExitCode::FAILURE
         }
     }
@@ -366,7 +366,7 @@ fn run_compile(args: CompileArgs) -> ExitCode {
     let ast = match compiler::parse(&source) {
         Ok(a) => a,
         Err(e) => {
-            render_error_with_snippet(&source, &path, e.line, e.col, &e.message, None);
+            render_error_with_snippet(&source, &path, e.line, e.col, &e.to_string(), None);
             return ExitCode::FAILURE;
         }
     };
