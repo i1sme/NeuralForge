@@ -575,6 +575,11 @@ fn fused_vs_unfused_softmax_match_numerically() {
 
         // Asm structural validation using ACTUAL label prefixes:
         // fused RowWise tail uses .Lfsmx_*, standalone emit_softmax uses .Lsm_*.
+        // Asm structural validation. Note: classifier.nfl is also
+        // covered by M5a's fused_vs_unfused_classifier_match_numerically,
+        // which pins relu fusion (fmax s0, s0, s4 + .Lrelu_). This test
+        // pins softmax fusion (.Lfsmx_ + bl _expf) — complementary, not
+        // redundant.
         assert!(
             fused_asm.source.contains("bl      _expf"),
             "{fixture_path}: fused asm missing bl _expf in row-wise tail"
@@ -615,7 +620,24 @@ fn fused_vs_unfused_softmax_match_numerically() {
             "{fixture_path}: fused/unfused param layout mismatch"
         );
 
-        let mut input = vec![0.0f32; batch * input_dim];
+        let input_floats = fused_asm.functions[0].input_floats;
+        let output_floats = fused_asm.functions[0].output_floats;
+        assert_eq!(input_floats, batch * input_dim,
+            "{fixture_path}: FnSig.input_floats={input_floats} disagrees with hardcoded batch*input_dim={}",
+            batch * input_dim);
+        assert_eq!(output_floats, batch * output_dim,
+            "{fixture_path}: FnSig.output_floats={output_floats} disagrees with hardcoded batch*output_dim={}",
+            batch * output_dim);
+        assert_eq!(
+            input_floats, unfused_asm.functions[0].input_floats,
+            "{fixture_path}: fused/unfused input_floats mismatch"
+        );
+        assert_eq!(
+            output_floats, unfused_asm.functions[0].output_floats,
+            "{fixture_path}: fused/unfused output_floats mismatch"
+        );
+
+        let mut input = vec![0.0f32; input_floats];
         for (i, v) in input.iter_mut().enumerate() {
             *v = ((i as f32) % 100.0) * 0.001;
         }
@@ -624,8 +646,8 @@ fn fused_vs_unfused_softmax_match_numerically() {
             *v = (((i as f32) % 1000.0) - 500.0) * 0.0001;
         }
 
-        let mut fused_out = vec![0.0f32; batch * output_dim];
-        let mut unfused_out = vec![0.0f32; batch * output_dim];
+        let mut fused_out = vec![0.0f32; output_floats];
+        let mut unfused_out = vec![0.0f32; output_floats];
 
         unsafe {
             fused_forward(input.as_ptr(), params.as_ptr(), fused_out.as_mut_ptr());
