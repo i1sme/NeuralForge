@@ -18,10 +18,13 @@ Format for each entry:
 
 ### What was done
 - Applied 13 of 17 findings from the M5b post-merge holistic review
-  (Option B scope from the brainstorming session). 5 findings explicitly
-  deferred to M6+ (1.2 shared `Diagnostic` trait, 2.1 `BuildError::span()`
-  accessor, 4.1 test-helper extraction, 6.1 pass struct visibility,
-  DEVLOG-1 `debug_assert_eq!` → `assert_eq!`).
+  (Option B scope from the brainstorming session). 4 holistic-review
+  findings explicitly deferred to M6+ (1.2 shared `Diagnostic` trait,
+  2.1 `BuildError::span()` accessor, 4.1 test-helper extraction, 6.1
+  pass struct visibility). 13 + 4 = 17 ✓. DEVLOG-1
+  (`debug_assert_eq!` → `assert_eq!`) is pre-existing M5b tech debt
+  also carried forward — listed in §"Known tech debt" but not part
+  of the holistic-review punch-list arithmetic.
 - Code consistency (3 small Rust changes + cascade fixes the plan
   didn't anticipate):
   - `impl std::error::Error for PassError` (`compiler/src/passes/mod.rs`).

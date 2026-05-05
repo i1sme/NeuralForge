@@ -98,11 +98,16 @@ n0: input "x"        :: Tensor[8, 4]
 
 ### Op
 
-`NodeKind::Op { op, operands, attrs }` — applies an operation from the stdlib.
+`NodeKind::Op { op, operands, attrs, fused_post_ops }` — applies an operation
+from the stdlib.
 - `op` is a `StdOp` enum variant (resolved from the AST identifier).
 - `operands` are `NodeId`s referencing the inputs (one for v0.1's single-input ops).
 - `attrs` are validated, type-resolved arguments (positional and named, in the
   signature's slot order).
+- `fused_post_ops: Vec<PostOp>` carries fused post-operations (M5a+; set by
+  `FuseLinearRelu` to `vec![PostOp::Relu]` on a Linear that has fused with a
+  downstream Relu; empty for un-fused nodes). Renders as `fused=[<list>]`
+  suffix in the CLI pretty-print (§6).
 
 Example: `linear[16, bias=true]` becomes:
 ```
