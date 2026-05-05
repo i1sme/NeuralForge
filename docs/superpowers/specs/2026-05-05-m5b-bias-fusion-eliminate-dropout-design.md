@@ -424,7 +424,14 @@ let post_pass_uir = if no_passes {
     uir
 } else {
     let canonical = compiler::passes::default_pipeline();
-    let canonical_names: Vec<&str> = canonical.iter().map(|p| p.name()).collect();
+    // Own the names (Vec<String>, not Vec<&str>) so the borrow on
+    // `canonical` doesn't outlive the move below — the `None` arm
+    // moves `canonical` into `pipeline`, the `Some` arm moves it
+    // into `filtered.into_iter()`. Either way the borrow checker
+    // would reject keeping a Vec<&str> alive into the Ok-arm where
+    // `canonical_names.join(...)` runs (E0505).
+    let canonical_names: Vec<String> =
+        canonical.iter().map(|p| p.name().to_owned()).collect();
 
     // Resolve the pipeline: full canonical, or filtered subset.
     let (pipeline, divergent) = match passes {
