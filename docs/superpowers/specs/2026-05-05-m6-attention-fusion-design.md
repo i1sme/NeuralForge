@@ -349,11 +349,12 @@ helpers established by M4b/M5b's `emit_linear`.
    s_b` pair in Phase 1. Phases 2–4 are bias-independent.
 6. **No `EliminateDropout`** (e.g. `--passes fuse_linear_softmax`
    alone): if the UIR still contains `linear → dropout → softmax`,
-   `FuseLinearSoftmax`'s criterion 1 fails (Linear has two consumers
-   — Dropout, plus whatever else; or Linear's sole consumer is
-   Dropout, not Softmax). The pattern is left untouched. Dropout
-   stays as a `BufferLoc::Alias` (M5a fallback), Softmax as its
-   own `emit_softmax` call. Correct degradation.
+   `FuseLinearSoftmax`'s criterion 2 fails — Linear's sole
+   consumer is Dropout, not Softmax. (Criterion 1, "exactly one
+   consumer", is satisfied: Linear feeds only Dropout in this
+   pattern.) The pattern is left untouched. Dropout stays as a
+   `BufferLoc::Alias` (M5a fallback), Softmax as its own
+   `emit_softmax` call. Correct degradation.
 
 ### Errors
 
@@ -386,9 +387,21 @@ helpers established by M4b/M5b's `emit_linear`.
    FuseLinearSoftmax]` produces one fused Linear. Mirror of M5b's
    `pipeline_eliminates_dropout_before_fusing_linear_relu`.
 
-Tests 1–4 each construct UIR by hand. Combined with M5b's three
-existing manual-UIR tests, this is the four-strikes moment that
-fires the §10 helper-extraction trigger.
+Tests 1–4 would each construct UIR by hand under M5b's pre-helper
+convention. Combined with M5b's three existing manual-UIR tests,
+the first M6 test is the four-strikes moment — and so the helper
+extraction trigger fires *before* test 1 is written, not after
+test 4. In practice tests 1–4 are written through the new helpers
+from the start; the boilerplate is never duplicated four times.
+See §10 for the explicit order of operations.
+
+**Existing test update** — `default_pipeline_is_canonical_order` in
+`compiler/src/passes/tests.rs` (added in M5b) currently asserts
+`["eliminate_dropout", "fuse_linear_relu"]` via `assert_eq!`. M6
+extends this to `["eliminate_dropout", "fuse_linear_relu",
+"fuse_linear_softmax"]`. Mechanical one-line edit; called out
+explicitly here so the failing assertion doesn't read as a
+regression during implementation.
 
 **CLI smoke** in `nflc/tests/cli.rs`: extend the existing
 `--passes` filter test with a `--passes fuse_linear_softmax` case.
