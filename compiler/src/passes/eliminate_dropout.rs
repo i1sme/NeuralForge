@@ -114,8 +114,7 @@ fn eliminate_one_model(model: &UirModel) -> Result<UirModel, PassError> {
 mod tests {
     use super::*;
     use crate::ast::Span;
-    use crate::ir::test_utils::{input_node, op_node};
-    use crate::ir::types::{AttrValue, OpAttr};
+    use crate::ir::test_utils::{input_node, op_node, out_dim_attr, rate_attr};
     use crate::Uir;
 
     #[test]
@@ -138,24 +137,8 @@ mod tests {
             name: "M".into(),
             nodes: vec![
                 input_node("x", vec![2, 3]),
-                op_node(
-                    StdOp::Linear,
-                    vec![0],
-                    vec![OpAttr {
-                        name: "out_dim".into(),
-                        value: AttrValue::Integer(2),
-                    }],
-                    vec![2, 2],
-                ),
-                op_node(
-                    StdOp::Dropout,
-                    vec![1],
-                    vec![OpAttr {
-                        name: "rate".into(),
-                        value: AttrValue::Float(0.5),
-                    }],
-                    vec![2, 2],
-                ),
+                op_node(StdOp::Linear, vec![0], vec![out_dim_attr(2)], vec![2, 2]),
+                op_node(StdOp::Dropout, vec![1], vec![rate_attr(0.5)], vec![2, 2]),
             ],
             inputs: vec![0],
             output: 2, // dropout
@@ -185,24 +168,8 @@ mod tests {
             name: "M".into(),
             nodes: vec![
                 input_node("x", vec![2, 3]),
-                op_node(
-                    StdOp::Linear,
-                    vec![0],
-                    vec![OpAttr {
-                        name: "out_dim".into(),
-                        value: AttrValue::Integer(3),
-                    }],
-                    vec![2, 3],
-                ),
-                op_node(
-                    StdOp::Dropout,
-                    vec![1],
-                    vec![OpAttr {
-                        name: "rate".into(),
-                        value: AttrValue::Float(0.3),
-                    }],
-                    vec![2, 3],
-                ),
+                op_node(StdOp::Linear, vec![0], vec![out_dim_attr(3)], vec![2, 3]),
+                op_node(StdOp::Dropout, vec![1], vec![rate_attr(0.3)], vec![2, 3]),
                 op_node(StdOp::Softmax, vec![2], vec![], vec![2, 3]),
             ],
             inputs: vec![0],
@@ -233,33 +200,9 @@ mod tests {
             name: "M".into(),
             nodes: vec![
                 input_node("x", vec![2, 3]),
-                op_node(
-                    StdOp::Linear,
-                    vec![0],
-                    vec![OpAttr {
-                        name: "out_dim".into(),
-                        value: AttrValue::Integer(3),
-                    }],
-                    vec![2, 3],
-                ),
-                op_node(
-                    StdOp::Dropout,
-                    vec![1],
-                    vec![OpAttr {
-                        name: "rate".into(),
-                        value: AttrValue::Float(0.2),
-                    }],
-                    vec![2, 3],
-                ),
-                op_node(
-                    StdOp::Dropout,
-                    vec![2],
-                    vec![OpAttr {
-                        name: "rate".into(),
-                        value: AttrValue::Float(0.4),
-                    }],
-                    vec![2, 3],
-                ),
+                op_node(StdOp::Linear, vec![0], vec![out_dim_attr(3)], vec![2, 3]),
+                op_node(StdOp::Dropout, vec![1], vec![rate_attr(0.2)], vec![2, 3]),
+                op_node(StdOp::Dropout, vec![2], vec![rate_attr(0.4)], vec![2, 3]),
                 op_node(StdOp::Relu, vec![3], vec![], vec![2, 3]),
             ],
             inputs: vec![0],
@@ -289,15 +232,7 @@ mod tests {
             name: "M".into(),
             nodes: vec![
                 input_node("x", vec![2, 3]),
-                op_node(
-                    StdOp::Linear,
-                    vec![0],
-                    vec![OpAttr {
-                        name: "out_dim".into(),
-                        value: AttrValue::Integer(3),
-                    }],
-                    vec![2, 3],
-                ),
+                op_node(StdOp::Linear, vec![0], vec![out_dim_attr(3)], vec![2, 3]),
                 op_node(StdOp::Relu, vec![1], vec![], vec![2, 3]),
             ],
             inputs: vec![0],
@@ -336,24 +271,8 @@ mod tests {
             name: "M".into(),
             nodes: vec![
                 input_node("x", vec![2, 3]),
-                op_node(
-                    StdOp::Linear,
-                    vec![0],
-                    vec![OpAttr {
-                        name: "out_dim".into(),
-                        value: AttrValue::Integer(3),
-                    }],
-                    vec![2, 3],
-                ),
-                op_node(
-                    StdOp::Dropout,
-                    vec![1],
-                    vec![OpAttr {
-                        name: "rate".into(),
-                        value: AttrValue::Float(0.5),
-                    }],
-                    vec![2, 3],
-                ),
+                op_node(StdOp::Linear, vec![0], vec![out_dim_attr(3)], vec![2, 3]),
+                op_node(StdOp::Dropout, vec![1], vec![rate_attr(0.5)], vec![2, 3]),
                 op_node(StdOp::Relu, vec![2], vec![], vec![2, 3]), // consumer A: reads dropout
                 op_node(StdOp::Softmax, vec![2], vec![], vec![2, 3]), // consumer B: reads dropout
             ],
@@ -409,24 +328,8 @@ mod tests {
             name: "M".into(),
             nodes: vec![
                 input_node("x", vec![2, 3]),
-                op_node(
-                    StdOp::Linear,
-                    vec![0],
-                    vec![OpAttr {
-                        name: "out_dim".into(),
-                        value: AttrValue::Integer(3),
-                    }],
-                    vec![2, 3],
-                ),
-                op_node(
-                    StdOp::Dropout,
-                    vec![1],
-                    vec![OpAttr {
-                        name: "rate".into(),
-                        value: AttrValue::Float(0.1),
-                    }],
-                    vec![2, 3],
-                ),
+                op_node(StdOp::Linear, vec![0], vec![out_dim_attr(3)], vec![2, 3]),
+                op_node(StdOp::Dropout, vec![1], vec![rate_attr(0.1)], vec![2, 3]),
                 op_node(StdOp::Relu, vec![2], vec![], vec![2, 3]),
             ],
             inputs: vec![0],
