@@ -497,7 +497,7 @@ fn display_for_postop_lowercase() {
 
 #[test]
 fn post_op_softmax_row_displays_as_softmax_row() {
-    use crate::ir::types::PostOp;
+    use crate::ir::PostOp;
     assert_eq!(format!("{}", PostOp::SoftmaxRow), "softmax_row");
 }
 
