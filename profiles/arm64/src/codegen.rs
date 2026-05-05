@@ -183,6 +183,18 @@ fn walk_model(model_idx: usize, model: &UirModel) -> Result<(String, FnSig), Low
                     ));
                     softmax_idx += 1;
                 }
+                // M5c: #[non_exhaustive] on StdOp requires a wildcard
+                // arm. Future ops (e.g. Tanh, Gelu, Embedding) will
+                // route here until codegen learns them. Returning
+                // LowerError::UnsupportedOp keeps the failure mode
+                // graceful (M4b-era variant, made live by this arm).
+                #[allow(unreachable_patterns)]
+                _ => {
+                    return Err(crate::types::LowerError::UnsupportedOp {
+                        op: format!("{op}"),
+                        span: node.source_span,
+                    });
+                }
             }
         }
     }
@@ -222,5 +234,12 @@ fn classify_op(
         StdOp::Relu => Ok(()),
         StdOp::Dropout => Ok(()),
         StdOp::Softmax => Ok(()),
+        // M5c: #[non_exhaustive] on StdOp requires a wildcard arm.
+        // Future ops are rejected here until codegen learns them.
+        #[allow(unreachable_patterns)]
+        _ => Err(LowerError::UnsupportedOp {
+            op: format!("{op}"),
+            span: _span,
+        }),
     }
 }

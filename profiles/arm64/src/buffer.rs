@@ -51,6 +51,20 @@ pub fn assign_buffers(model: &UirModel) -> BufferAssignment {
                                 .expect("stack frame size overflow");
                             loc
                         }
+                        // M5c: #[non_exhaustive] on StdOp requires a wildcard arm.
+                        // Future ops default to a stack-allocated intermediate buffer.
+                        #[allow(unreachable_patterns)]
+                        _ => {
+                            let elements: u64 = node.ty.shape.0.iter().copied().product();
+                            let size_bytes = (elements as usize)
+                                .checked_mul(BYTES_PER_ELEMENT)
+                                .expect("buffer size overflow: shape product * f32 size");
+                            let loc = BufferLoc::StackOffset(stack_offset);
+                            stack_offset = stack_offset
+                                .checked_add(size_bytes)
+                                .expect("stack frame size overflow");
+                            loc
+                        }
                     }
                 }
             }

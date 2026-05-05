@@ -250,7 +250,7 @@ fn run_parse(path: PathBuf, tokens_only: bool) -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                render_error_with_snippet(&source, &path, e.line, e.col, &e.message, None);
+                render_error_with_snippet(&source, &path, e.line, e.col, &e.to_string(), None);
                 ExitCode::FAILURE
             }
         }

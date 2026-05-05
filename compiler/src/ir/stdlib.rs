@@ -4,6 +4,7 @@
 
 use super::types::{AttrValue, OpAttr, Shape};
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StdOp {
     Linear,
