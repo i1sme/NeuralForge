@@ -534,3 +534,96 @@ fn fused_vs_unfused_classifier_match_numerically() {
         );
     }
 }
+
+#[test]
+fn fused_vs_unfused_mixed_args_match_numerically() {
+    if !cfg!(target_arch = "aarch64") {
+        eprintln!("skip: requires aarch64");
+        return;
+    }
+    if !common::cc_available() {
+        eprintln!("skip: requires cc");
+        return;
+    }
+
+    let src = std::fs::read_to_string("../../tests/fixtures/mixed_args.nfl").unwrap();
+    let ast = compiler::parse(&src).unwrap();
+    let uir = compiler::ir::build(&ast).unwrap();
+
+    // Build BOTH paths.
+    let fused_uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
+    let fused_asm = profiles_arm64::lower(&fused_uir).expect("fused lower");
+    let unfused_asm = profiles_arm64::lower(&uir).expect("unfused lower");
+
+    // Asm shape pre-asserts.
+    assert!(
+        fused_asm.source.contains("fmax    s0, s0, s4"),
+        "fused asm missing inline fmax"
+    );
+    // mixed_args.nfl has `linear[16, bias=true] → relu` as the first
+    // fusion candidate; the fused asm must still contain bias-add
+    // (fadd s0, s0, s5) immediately before the fmax (within one
+    // emit_linear, not in a separate function).
+    assert!(
+        fused_asm.source.contains("fadd    s0, s0, s5"),
+        "fused asm missing bias-add (fadd s0, s0, s5):\n{}",
+        fused_asm.source
+    );
+    assert!(
+        !fused_asm.source.contains(".Lrelu_"),
+        "fused asm should NOT have separate relu loops"
+    );
+    assert!(
+        unfused_asm.source.contains(".Lrelu_0_0:"),
+        "unfused asm missing relu loop label"
+    );
+
+    // Compile both, run both with same input/params, compare numerically.
+    let fused_dylib = common::compile_to_dylib(&fused_asm.source, "fused_mixed_args");
+    let unfused_dylib = common::compile_to_dylib(&unfused_asm.source, "unfused_mixed_args");
+
+    let fused_lib = unsafe { libloading::Library::new(&fused_dylib).unwrap() };
+    let unfused_lib = unsafe { libloading::Library::new(&unfused_dylib).unwrap() };
+
+    let fused_forward: libloading::Symbol<unsafe extern "C" fn(*const f32, *const f32, *mut f32)> =
+        unsafe { fused_lib.get(b"nfl_forward_MixedArgs") }.unwrap();
+    let unfused_forward: libloading::Symbol<
+        unsafe extern "C" fn(*const f32, *const f32, *mut f32),
+    > = unsafe { unfused_lib.get(b"nfl_forward_MixedArgs") }.unwrap();
+
+    // Same deterministic input + params formula as the classifier
+    // integration test. mixed_args has batch=4, input=8, output=2.
+    let params_len = fused_asm.functions[0].params_floats;
+    debug_assert_eq!(
+        params_len, unfused_asm.functions[0].params_floats,
+        "fused/unfused FnSig params_floats must agree"
+    );
+
+    let mut input = [0.0f32; 4 * 8];
+    for (i, v) in input.iter_mut().enumerate() {
+        *v = ((i as f32) % 100.0) * 0.001;
+    }
+    let mut params = vec![0.0f32; params_len];
+    for (i, v) in params.iter_mut().enumerate() {
+        *v = (((i as f32) % 1000.0) - 500.0) * 0.0001;
+    }
+
+    let mut fused_out = [0.0f32; 4 * 2];
+    let mut unfused_out = [0.0f32; 4 * 2];
+
+    unsafe {
+        fused_forward(input.as_ptr(), params.as_ptr(), fused_out.as_mut_ptr());
+        unfused_forward(input.as_ptr(), params.as_ptr(), unfused_out.as_mut_ptr());
+    }
+
+    // assert_eq! exact equality: f32 store+load is bit-preserving;
+    // bias-aware fusion (matmul → bias-add → fmax → store) only
+    // relocates WHERE relu/bias is applied, not WHICH floats compute.
+    for (i, (a, b)) in fused_out.iter().zip(unfused_out.iter()).enumerate() {
+        assert_eq!(
+            *a, *b,
+            "fused[{i}]={a} unfused[{i}]={b} — bias-aware fusion changed numerics"
+        );
+    }
+}
