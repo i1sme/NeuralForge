@@ -86,6 +86,14 @@ These findings inform Tasks 1, 5, and 7. No spec amendment required.
 
 **Spec ref:** §10. Order of operations: extract first, migrate the M5b test that hand-builds verbose `Node` literals, *then* later tasks use the helpers from the start.
 
+**Inventory of existing hand-built UIR sites** (verified against the post-M5c worktree):
+
+- `compiler/src/passes/eliminate_dropout.rs::tests` — 8 unit tests, ALREADY use locally-defined `op_node()` (line 124) and `input_node()` (line 142). Migration here is a one-line import change after promoting the helpers; test bodies are untouched.
+- `compiler/src/passes/tests.rs::pipeline_eliminates_dropout_before_fusing_linear_relu` — 1 cross-pass test using verbose `Node { kind: NodeKind::Op { ... }, ty: Type { ... }, source_span: ... }` literals. Migration = full rewrite to use helpers (Step 7).
+- `compiler/src/passes/fuse_linear_relu.rs::tests` — mixed: some tests use the parser via `build("model M …")`, others hand-roll `Node` literals (lines 197–355 region). **NOT migrated in M6.** Those are M5a/M5b stable surface; rewriting them is scope creep without M6 benefit. Leave as M5 shipped them; a future cleanup may sweep them.
+
+The four-strikes counting from the spec was a simplified model. The substantive principle: enough hand-built UIR exists across the workspace to justify a shared `test_utils` module, M6 will add more, and extraction now (before Tasks 3 and 4 write their tests) means M6 unit tests use helpers from the start rather than getting written with boilerplate and retroactively migrated.
+
 **Files:**
 - Create: `compiler/src/ir/test_utils.rs`
 - Modify: `compiler/src/ir/mod.rs`
@@ -1290,64 +1298,86 @@ Add a helper function in `profiles/arm64/src/ops/linear.rs` (or a new sibling `s
 /// Phase 1 (matmul + bias materialising the row) was emitted by the
 /// caller's j-loop; this helper appends the three reduction sweeps,
 /// all in-place over the same destination buffer.
+///
+/// Register convention inside the tail (matches existing emit_softmax):
+///   - x19 = i (saved from caller's x3 at tail entry, restored at exit)
+///   - x20 = row base address (&out[i, 0])
+///   - x21 = j (inner column counter)
+///   - s8  = row max
+///   - s9  = row sum
+///   - All five are callee-saved per AAPCS64 — they survive `bl _expf`
+///     in Phase 3. Function prologue saves x19–x23 + d8/d9 because
+///     Task 5's compute_callee_saved returns true for fused-SoftmaxRow.
 fn emit_row_wise_softmax_tail(
     s: &mut String,
     _b: u64,
     n: u64,
     linear_idx: usize,
 ) {
-    // x12 currently holds the dst buffer base; x3 holds i (row index);
-    // we re-use them. Compute the row base offset as i * n into x6.
     s.push_str(&format!("    // ----- RowWise softmax tail (linear {linear_idx}) -----\n"));
 
-    // Phase 2: row-max into s8.
+    // Save i (x3, caller-saved) into x19 (callee-saved). Phase 3's bl
+    // _expf would otherwise clobber x3, breaking the i-loop's `add x3,
+    // x3, #1; cmp x3, b; b.lt .Lloop_i` continuation that follows the
+    // tail.
+    s.push_str("    mov     x19, x3\n");                    // x19 = i
+
+    // Compute row base &out[i, 0] into x20 (callee-saved).
+    // x12 holds dst buffer base. x20 = x12 + i * n * 4.
+    s.push_str(&format!("    mov     x20, #{n}\n"));         // scratch n
+    s.push_str("    mul     x20, x19, x20\n");              // x20 = i * n
+    s.push_str("    add     x20, x12, x20, lsl #2\n");       // x20 = &out[i, 0]
+
+    // Phase 2: row-max scan into s8 (callee-saved).
     // Initialise from row[0] to avoid materialising -inf.
-    s.push_str(&format!("    mov     x4, #0\n")); // j = 0
-    s.push_str(&format!("    // load output[i, 0] into s8 (init)\n"));
-    s.push_str(&format!("    mov     x6, x3\n"));
-    s.push_str(&format!("    mov     x7, #{n}\n"));
-    s.push_str(&format!("    mul     x6, x6, x7\n")); // x6 = i * n
-    s.push_str(&format!("    add     x7, x12, x6, lsl #2\n")); // x7 = &output[i, 0]
-    s.push_str(&format!("    ldr     s8, [x7]\n"));
-    s.push_str(&format!("    mov     x4, #1\n")); // j = 1
+    s.push_str("    ldr     s8, [x20]\n");                   // max = out[i, 0]
+    s.push_str("    mov     x21, #1\n");                     // j = 1
     s.push_str(&format!(".Lsr_max_{linear_idx}:\n"));
-    s.push_str(&format!("    ldr     s0, [x7, x4, lsl #2]\n"));
-    s.push_str(&format!("    fmax    s8, s8, s0\n"));
-    s.push_str(&format!("    add     x4, x4, #1\n"));
-    s.push_str(&format!("    cmp     x4, #{n}\n"));
+    s.push_str("    ldr     s0, [x20, x21, lsl #2]\n");
+    s.push_str("    fmax    s8, s8, s0\n");
+    s.push_str("    add     x21, x21, #1\n");
+    s.push_str(&format!("    cmp     x21, #{n}\n"));
     s.push_str(&format!("    b.lt    .Lsr_max_{linear_idx}\n"));
 
-    // Phase 3: exp(x - s8) accumulated in s9.
-    s.push_str(&format!("    fmov    s9, wzr\n")); // sum = 0
-    s.push_str(&format!("    mov     x4, #0\n"));
+    // Phase 3: exp(x - s8) accumulated in s9 (callee-saved).
+    // bl _expf clobbers caller-saved (x0..x18, s0..s7); x20/x21/s8/s9
+    // survive.
+    s.push_str("    fmov    s9, wzr\n");                     // sum = 0.0
+    s.push_str("    mov     x21, #0\n");                     // j = 0
     s.push_str(&format!(".Lsr_exp_{linear_idx}:\n"));
-    s.push_str(&format!("    ldr     s0, [x7, x4, lsl #2]\n"));
-    s.push_str(&format!("    fsub    s0, s0, s8\n"));
-    s.push_str(&format!("    bl      _expf\n"));
-    s.push_str(&format!("    str     s0, [x7, x4, lsl #2]\n"));
-    s.push_str(&format!("    fadd    s9, s9, s0\n"));
-    s.push_str(&format!("    add     x4, x4, #1\n"));
-    s.push_str(&format!("    cmp     x4, #{n}\n"));
+    s.push_str("    ldr     s0, [x20, x21, lsl #2]\n");
+    s.push_str("    fsub    s0, s0, s8\n");
+    s.push_str("    bl      _expf\n");
+    s.push_str("    str     s0, [x20, x21, lsl #2]\n");      // x20/x21 still valid
+    s.push_str("    fadd    s9, s9, s0\n");
+    s.push_str("    add     x21, x21, #1\n");
+    s.push_str(&format!("    cmp     x21, #{n}\n"));
     s.push_str(&format!("    b.lt    .Lsr_exp_{linear_idx}\n"));
 
     // Phase 4: normalise by s9.
-    s.push_str(&format!("    mov     x4, #0\n"));
+    s.push_str("    mov     x21, #0\n");
     s.push_str(&format!(".Lsr_norm_{linear_idx}:\n"));
-    s.push_str(&format!("    ldr     s0, [x7, x4, lsl #2]\n"));
-    s.push_str(&format!("    fdiv    s0, s0, s9\n"));
-    s.push_str(&format!("    str     s0, [x7, x4, lsl #2]\n"));
-    s.push_str(&format!("    add     x4, x4, #1\n"));
-    s.push_str(&format!("    cmp     x4, #{n}\n"));
+    s.push_str("    ldr     s0, [x20, x21, lsl #2]\n");
+    s.push_str("    fdiv    s0, s0, s9\n");
+    s.push_str("    str     s0, [x20, x21, lsl #2]\n");
+    s.push_str("    add     x21, x21, #1\n");
+    s.push_str(&format!("    cmp     x21, #{n}\n"));
     s.push_str(&format!("    b.lt    .Lsr_norm_{linear_idx}\n"));
+
+    // Restore i to x3 so the i-loop tail's `add x3, x3, #1; cmp x3, b;
+    // b.lt .Lloop_i` continues to work as the existing M5b emit_linear
+    // shape expects.
+    s.push_str("    mov     x3, x19\n");
 }
 ```
 
 **Important caveats for the implementer:**
 
-1. **Register conventions must match the rest of `emit_linear`.** This skeleton uses `x3` for i, `x4` for j, `x6/x7` for offset arithmetic, `x12` for dst — verify these against the actual existing `emit_linear`. If `x3`/`x4` are different in the surrounding code, RENAME consistently. The body of M5b's `emit_linear` is the source of truth.
-2. **`x6` is scratched by `bl _expf`** (caller-saved). The implementation above recomputes the row pointer (`x7`) once at the start of the tail and re-uses it — `x7` is callee-saved (the function's prologue already saves x19–x23 because Task 5 made `compute_callee_saved` return true for fused-SoftmaxRow). Confirm `x7` is in fact callee-saved in the existing code; if not, use `x19`/`x20`/`x21` as needed.
-3. **Bias path inside the j-loop is unaffected.** Phase 1 of RowWise = matmul + bias-add + `str s0, [...]` — the existing M5b chain. Only the post-op inline section was deferred for RowWise.
-4. **Buffer materialisation:** the `dst_loc` materialised into `x12` already accounts for `BufferLoc::OutputReg` vs `StackOffset(...)`; the tail re-uses it.
+1. **AAPCS64 register classification.** x0–x18 are caller-saved (clobbered by `bl _expf`); x19–x29 are callee-saved (preserved). s0–s7 are caller-saved; d8–d15 (= s8–s15 for single-precision) are callee-saved. The skeleton uses x19/x20/x21 + s8/s9 for everything that must survive Phase 3's `bl _expf`.
+2. **The i counter (x3) must be saved/restored around the tail.** emit_linear's existing i-loop control uses x3 (caller-saved) — fine in M5b because no `bl` calls happen inside the loop body. M6's RowWise tail breaks this assumption (Phase 3's `bl _expf` clobbers x3). The skeleton copies `x3 → x19` at tail entry and `x19 → x3` at tail exit so the i-loop tail (`add x3, x3, #1; cmp x3, b; b.lt .Lloop_i`) keeps working unchanged.
+3. **Function prologue must save x19–x23 + d8/d9.** Task 5 already extends `compute_callee_saved` to return true for any node with `PostOp::SoftmaxRow` in `fused_post_ops`, so the prologue does the save. If that step is missed, the tail will appear to work but corrupt registers in the caller — manifesting as bizarre numeric outputs in the FFI integration test (Task 7).
+4. **Bias path inside the j-loop is unaffected.** Phase 1 of RowWise = matmul + bias-add + `str s0, [...]` — the existing M5b chain. Only the post-op inline section was deferred for RowWise.
+5. **Buffer materialisation:** the `dst_loc` materialised into x12 already accounts for `BufferLoc::OutputReg` vs `StackOffset(...)`; the tail re-uses x12 to compute `&out[i, 0]` into x20. x12 is x12 (caller-saved), but the tail uses it ONLY in the `add x20, x12, ..., lsl #2` instruction at the very start, before any `bl` call — so its caller-saved nature does not matter here.
 
 - [ ] **Step 6: Run the substring test, expect pass**
 

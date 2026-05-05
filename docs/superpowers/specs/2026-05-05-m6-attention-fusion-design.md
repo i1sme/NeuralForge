@@ -118,9 +118,12 @@ pub enum PostOp {
   protect against future variants. M6 adds exactly one variant; the
   wildcard remains as fallback.
 - `Display for PostOp` covers the new variant: `SoftmaxRow`. The
-  `nflc parse --uir` CLI renders `fused=[SoftmaxRow]` for M6-fused
-  classifier final-layer Linears (Design Principle 5: every UIR
-  extension stays inspectable through `Display`).
+  `nflc parse --uir` CLI renders `fused=[softmax_row]` for M6-fused
+  classifier final-layer Linears — lowercase snake_case, matching
+  the existing `PostOp::Relu → "relu"` Display convention used by
+  `compiler/src/ir/types.rs::NodeKind::Op`'s `Display` impl, which
+  formats `fused_post_ops` via `p.to_string()`. (Design Principle
+  5: every UIR extension stays inspectable through `Display`.)
 - The doc comment on `PostOp::SoftmaxRow` cross-references the row-wise
   emit shape: *"RowWise semantics — the emit branch in `emit_linear` is
   structurally different from `Relu`'s. See `arm64.md` §4.10."*
