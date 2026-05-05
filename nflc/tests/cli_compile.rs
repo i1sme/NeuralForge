@@ -250,3 +250,35 @@ fn compile_no_passes_and_passes_rejected() {
         "stderr missing mutually-exclusive error:\n{stderr}"
     );
 }
+
+#[test]
+fn compile_with_passes_duplicate_name_rejected() {
+    // Companion test for the duplicate-name guard in parse_compile_args
+    // (--passes a,a → error "pass 'a' specified more than once").
+    // Spec §11.4 didn't list this case, but the validation code exists
+    // and shipping it without a smoke test creates a documentation gap
+    // for future readers (holistic-review N-tier finding pre-merge).
+    let output = Command::new(nflc_bin())
+        .args([
+            "compile",
+            "../tests/fixtures/m4_linear_relu.nfl",
+            "--profile",
+            "arm64",
+            "--passes",
+            "fuse_linear_relu,fuse_linear_relu",
+        ])
+        .output()
+        .expect("failed to run nflc");
+
+    assert!(!output.status.success(), "expected failure exit");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("specified more than once"),
+        "stderr missing duplicate-pass error:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("fuse_linear_relu"),
+        "stderr should name the duplicated pass:\n{stderr}"
+    );
+}
