@@ -6,13 +6,6 @@ use crate::types::{ParamKind, ParamSlot};
 use crate::{Asm, FnSig, LowerError};
 use compiler::{NodeId, NodeKind, StdOp, Uir, UirModel};
 
-/// True iff the Linear op's attribute list includes `bias=true`.
-fn linear_has_bias(attrs: &[compiler::OpAttr]) -> bool {
-    attrs.iter().any(|a| {
-        a.name == "bias" && matches!(&a.value, compiler::AttrValue::Symbol(s) if s == "true")
-    })
-}
-
 /// Walk the entire UIR, returning the combined asm source + per-model FnSigs.
 pub fn walk_uir(uir: &Uir) -> Result<Asm, LowerError> {
     let mut source = String::new();
@@ -54,6 +47,7 @@ fn walk_model(model_idx: usize, model: &UirModel) -> Result<(String, FnSig), Low
             op: StdOp::Linear,
             operands,
             attrs,
+            ..
         } = &node.kind
         {
             let in_shape = &model.nodes[operands[0]].ty.shape;
@@ -72,7 +66,7 @@ fn walk_model(model_idx: usize, model: &UirModel) -> Result<(String, FnSig), Low
                 size: k * n,
             });
             params_floats += k * n;
-            if linear_has_bias(attrs) {
+            if compiler::ir::linear_has_bias(attrs) {
                 params_layout.push(ParamSlot {
                     kind: ParamKind::LinearBias,
                     origin_node: node_idx,
@@ -138,6 +132,12 @@ fn walk_model(model_idx: usize, model: &UirModel) -> Result<(String, FnSig), Low
                         .iter()
                         .find(|s| s.kind == ParamKind::LinearBias && s.origin_node == node_idx)
                         .map(|s| s.offset);
+
+                    // M5a: read fused_post_ops from the node and pass through.
+                    let NodeKind::Op { fused_post_ops, .. } = &node.kind else {
+                        unreachable!("walk_model already matched NodeKind::Op")
+                    };
+
                     body.push_str(&crate::ops::emit_linear(
                         b,
                         k,
@@ -148,7 +148,9 @@ fn walk_model(model_idx: usize, model: &UirModel) -> Result<(String, FnSig), Low
                         dst_loc,
                         weight_offset,
                         bias_offset,
-                    ));
+                        node.source_span,
+                        fused_post_ops,
+                    )?);
                     linear_idx += 1;
                 }
                 StdOp::Relu => {

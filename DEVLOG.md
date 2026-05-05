@@ -14,6 +14,118 @@ Format for each entry:
 
 ---
 
+## 2026-05-04 — Milestone 5a closed: kernel fusion (linear → relu) + UIR-pass framework
+
+### What was done
+- Introduced `compiler::passes` UIR-pass infrastructure: `UirPass` trait
+  with mandatory `name()` + functional `run(&Uir) -> Result<Uir, PassError>`,
+  `default_pipeline()`, `run_pipeline()`. `PassError` `#[non_exhaustive]`
+  with `InvalidInput` variant carrying span; `span()` accessor returns
+  `Span` directly with a documented migration plan if a future variant
+  ever lacks one.
+- Implemented `FuseLinearRelu` pass — finds `Linear (no bias=true,
+  no existing fused_post_ops, single consumer) → Relu`, merges via
+  `Linear.fused_post_ops = vec![PostOp::Relu]`, removes Relu node, remaps
+  references with fresh NodeIds via per-model functional rebuild. 10 inline
+  unit tests cover all spec edge cases (terminal, chain, multi-consumer-
+  relu allowed, multi-consumer-linear forbidden, bias-true skip, double-
+  fusion skip, softmax→relu skip, NodeId remap).
+- Extended UIR types: new `pub enum PostOp { Relu }` `#[non_exhaustive]`,
+  separate from `StdOp` by design (Softmax/Dropout/Linear don't fit as
+  post-ops). `NodeKind::Op` gains `fused_post_ops: Vec<PostOp>` field.
+  `Display for Node` renders optional `fused=[<list>]` suffix only when
+  non-empty (back-compat for M3c+ `nflc parse <file> --uir` output).
+- Relocated `linear_has_bias` from `profiles/arm64::codegen` to
+  `compiler::ir::stdlib` so passes can use it.
+- Profile changes: `profiles/arm64::emit_linear` accepts `node_span`
+  and `fused_post_ops`, returns `Result<String, LowerError>`. Materialises
+  `s4 = 0.0` once if any `PostOp::Relu` in `fused_post_ops`. Emits
+  `fmax s0, s0, s4` between bias-add and store. The required catch-all
+  arm on the `match post_op` (mandatory for `#[non_exhaustive]` PostOp)
+  returns `LowerError::UnsupportedPostOp` (new variant).
+- CLI: refactored arg-parsing into `parse_compile_args` stateful parser
+  (replaces the 3-arm slice-position match). New `--no-fuse` flag.
+  Default mode applies `passes::run_pipeline` between `ir::build` and
+  `profile.lower`; `--no-fuse` skips. `note:` lines emit to **stderr**
+  only after the pipeline succeeds (strict stdout/stderr discipline:
+  stdout = asm only, pipeable to `cc`).
+- Integration test `fused_vs_unfused_classifier_match_numerically`
+  exercises `classifier.nfl` (2 internal fusions) on both paths,
+  asserts `assert_eq!` (bit-exact, not epsilon) on all 320 output
+  elements. Existing M4b integration tests switched to the default-fused
+  path; numerical assertions hold automatically by bit-exactness.
+- 3 CLI smoke tests via `Command::new(env!("CARGO_BIN_EXE_nflc"))`:
+  default-runs-fusion, --no-fuse-skips, unknown-flag-rejected.
+- `parse_compile_args` rejects flag-as-path early (e.g.
+  `nflc compile --no-fuse --profile arm64` errors with a clear message
+  rather than producing a confusing `cannot read --no-fuse`).
+
+### Decisions made
+None new. All design decisions captured in
+`docs/superpowers/specs/2026-05-04-m5a-kernel-fusion-design.md` during
+brainstorming. This session executed the plan in
+`docs/superpowers/plans/2026-05-04-m5a-kernel-fusion.md` (11 tasks,
+22 commits including review-driven polish).
+
+### Pre-decided architectural call
+> **Fusion lives at UIR-pass level, not codegen-time peephole.** Two
+> reasons (per user during brainstorming): visibility (consumer counts
+> are visible only on the UIR — Linear→Relu fusion is safe iff Linear has
+> exactly one consumer, which is invisible to a peephole walking codegen
+> dispatch arms) + profile isolation (`PROJECT_SPEC.md` design principle 3
+> — profiles consume already-fused graphs and emit accordingly; the
+> fusion logic itself is profile-agnostic).
+>
+> Right separation of concerns: UIR-passes decide *what* fuses;
+> codegen decides *how* to emit fused ops.
+
+### Problems encountered
+- None blocking. A handful of plan-text rough edges were caught by code
+  reviewers and fixed inline:
+  - Task 7 plan emitted the `note: applied passes` line *before* running
+    the pipeline; on a pass error, the user would see a misleading
+    success-style message followed by the error. Moved the note into the
+    `Ok` arm.
+  - Task 8 plan used a loose `|| stderr.contains("error:")` fallback in
+    the unknown-flag assertion that would silently pass for any error
+    path. Tightened to the strict `unknown flag: --frobnicate` substring.
+  - Task 4 plan prose said "9 tests" but enumerated 10; implementer
+    delivered all 10 (correct), and the plan's count was an undercount.
+  - Task 9 plan hardcoded the params length (`535040`); switched to
+    `fused_asm.functions[0].params_floats` so the test follows the
+    fixture if it ever changes.
+- Test count grew slightly past the plan target (173 vs. 170) because
+  review polish added two defensive tests:
+  `pipeline_halts_on_first_error_and_propagates` (Task 3 review N-2) and
+  `unsupported_post_op_display_and_span_round_trip` (Task 5 review N-3).
+
+### Known tech debt (carried forward)
+1. `EliminateDropout` pass deferred to M5b. The dropout-as-noop alias in
+   `buffer.rs::assign_buffers` (M4b) continues to handle dropout at
+   profile level; M5b moves removal up to UIR-pass.
+2. `linear[bias=true] → relu` fusion deferred to M5b. M5a's pass
+   condition explicitly excludes `linear_has_bias` candidates.
+3. `--passes=X,Y` filter syntax deferred to M5b. M5a only has the
+   binary `--no-fuse` flag; `name()` foundation is in place.
+4. Profile guide doc updates deferred to M5c. The fusion section,
+   asm patterns, and CLI flag docs land in `docs/profile_guide/arm64.md`
+   when M5c closes M5.
+5. Snapshot tests via `insta` not introduced in M5a (substring asserts
+   sufficient at this scope).
+
+### Next step
+**Milestone 5a complete.** Recovers M4a's in-place relu performance via
+a pass-based fusion infrastructure that future passes (`EliminateDropout`,
+bias-aware fusion, M6+ multi-pattern fusion) can extend without changing
+the profile contract.
+
+M5b adds bias-aware fusion + `EliminateDropout` + `--passes=X,Y` filter.
+M5c closes M5 with profile guide doc updates and PROJECT_SPEC milestone
+close-out. Brainstorming for M5b runs in a fresh worktree once main is
+updated post-M5a-merge.
+
+---
+
 ## 2026-05-04 — Milestone 4b closed: arm64 profile covers all 5 M3 fixtures end-to-end
 
 ### What was done

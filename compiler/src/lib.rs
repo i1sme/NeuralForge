@@ -28,6 +28,10 @@ pub fn parse(source: &str) -> Result<NflSource, ParseError> {
 pub mod ir;
 
 pub use ir::{
-    AttrValue, BuildError, BuildErrorKind, Node, NodeId, NodeKind, OpAttr, Shape, StdOp, Type, Uir,
-    UirModel,
+    AttrValue, BuildError, BuildErrorKind, Node, NodeId, NodeKind, OpAttr, PostOp, Shape, StdOp,
+    Type, Uir, UirModel,
 };
+
+pub mod passes;
+
+pub use passes::{default_pipeline, run_pipeline, PassError, UirPass};

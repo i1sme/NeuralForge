@@ -25,6 +25,33 @@ pub struct Node {
     pub source_span: Span,
 }
 
+/// Post-operations that fuse into a producer's output store.
+///
+/// `#[non_exhaustive]` — M5b/M6+ may add Gelu, Tanh, Sigmoid. Each variant
+/// is meaningful as "applied to one element after the producer computes it,
+/// before storing"; not all StdOps fit (Softmax needs row-context, Dropout
+/// is no-op at inference, Linear can't post-op another Linear).
+///
+/// Keeping `PostOp` distinct from `StdOp` makes the constraint explicit at
+/// type level: profiles can't mistakenly route a softmax through the
+/// post-op machinery.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostOp {
+    /// Clamp negative values to zero (`max(x, 0)`), applied per-element to
+    /// the producer's output before store.
+    Relu,
+}
+
+impl std::fmt::Display for PostOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            PostOp::Relu => "relu",
+        };
+        write!(f, "{}", name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeKind {
     Input {
@@ -34,6 +61,17 @@ pub enum NodeKind {
         op: super::stdlib::StdOp,
         operands: Vec<NodeId>,
         attrs: Vec<OpAttr>,
+        /// Fused post-operations, applied per-element after this op
+        /// produces its output, before storing. Empty for un-fused or
+        /// non-Linear ops.
+        ///
+        /// Populated only by `passes::FuseLinearRelu` (M5a) and future
+        /// fusion passes. `compiler::ir::build` always sets this to
+        /// `Vec::new()`.
+        ///
+        /// `Vec` rather than `Option` so M5b can express chains like
+        /// `[BiasAdd, Relu]` should the need arise.
+        fused_post_ops: Vec<PostOp>,
     },
 }
 
@@ -100,6 +138,7 @@ impl std::fmt::Display for Node {
                 op,
                 operands,
                 attrs,
+                fused_post_ops,
             } => {
                 let ops_s = operands
                     .iter()
@@ -118,6 +157,14 @@ impl std::fmt::Display for Node {
                         .collect::<Vec<_>>()
                         .join(", ");
                     write!(f, "    attrs=[{}]", a)?;
+                }
+                if !fused_post_ops.is_empty() {
+                    let fused_s = fused_post_ops
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    write!(f, "    fused=[{}]", fused_s)?;
                 }
                 Ok(())
             }

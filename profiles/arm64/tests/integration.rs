@@ -111,6 +111,9 @@ fn m4a_no_softmax_still_runs() {
         .expect("fixture readable");
     let ast = compiler::parse(&src).expect("parse");
     let uir = compiler::ir::build(&ast).expect("ir::build");
+    // M5a: exercise the default (fused) path — same as `nflc compile`.
+    let uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
 
     let asm = profiles_arm64::lower(&uir).expect("lower");
     assert_eq!(asm.functions.len(), 1);
@@ -170,6 +173,9 @@ fn tinymlp_full_with_softmax_runs_correctly() {
     let src = std::fs::read_to_string("../../tests/fixtures/tiny_mlp.nfl").unwrap();
     let ast = compiler::parse(&src).unwrap();
     let uir = compiler::ir::build(&ast).unwrap();
+    // M5a: exercise the default (fused) path — same as `nflc compile`.
+    let uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
     let asm = profiles_arm64::lower(&uir).expect("lower");
     let dylib_path = common::compile_to_dylib(&asm.source, "tinymlp_softmax");
 
@@ -215,6 +221,9 @@ fn mixed_args_runs_correctly() {
     let src = std::fs::read_to_string("../../tests/fixtures/mixed_args.nfl").unwrap();
     let ast = compiler::parse(&src).unwrap();
     let uir = compiler::ir::build(&ast).unwrap();
+    // M5a: exercise the default (fused) path — same as `nflc compile`.
+    let uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
     let asm = profiles_arm64::lower(&uir).expect("lower");
 
     // Confirm layout: linear[16, bias=true] + linear[output=2] (no bias) + softmax.
@@ -275,6 +284,9 @@ fn classifier_runs_correctly() {
     let src = std::fs::read_to_string("../../tests/fixtures/classifier.nfl").unwrap();
     let ast = compiler::parse(&src).unwrap();
     let uir = compiler::ir::build(&ast).unwrap();
+    // M5a: exercise the default (fused) path — same as `nflc compile`.
+    let uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
     let asm = profiles_arm64::lower(&uir).expect("lower");
 
     let sig = &asm.functions[0];
@@ -334,6 +346,9 @@ fn pipeline_styles_runs_correctly() {
     let src = std::fs::read_to_string("../../tests/fixtures/pipeline_styles.nfl").unwrap();
     let ast = compiler::parse(&src).unwrap();
     let uir = compiler::ir::build(&ast).unwrap();
+    // M5a: exercise the default (fused) path — same as `nflc compile`.
+    let uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
     let asm = profiles_arm64::lower(&uir).expect("lower");
 
     // Three models with same signature shape.
@@ -396,6 +411,9 @@ fn comments_runs_correctly() {
     let src = std::fs::read_to_string("../../tests/fixtures/comments.nfl").unwrap();
     let ast = compiler::parse(&src).unwrap();
     let uir = compiler::ir::build(&ast).unwrap();
+    // M5a: exercise the default (fused) path — same as `nflc compile`.
+    let uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
     let asm = profiles_arm64::lower(&uir).expect("lower");
 
     let sig = &asm.functions[0];
@@ -426,6 +444,93 @@ fn comments_runs_correctly() {
         assert!(
             (row_sum - 1.0).abs() < 1e-3,
             "comments row {i} sum = {row_sum}"
+        );
+    }
+}
+
+#[test]
+fn fused_vs_unfused_classifier_match_numerically() {
+    if !cfg!(target_arch = "aarch64") {
+        eprintln!("skip: requires aarch64");
+        return;
+    }
+    if !common::cc_available() {
+        eprintln!("skip: requires cc");
+        return;
+    }
+
+    let src = std::fs::read_to_string("../../tests/fixtures/classifier.nfl").unwrap();
+    let ast = compiler::parse(&src).unwrap();
+    let uir = compiler::ir::build(&ast).unwrap();
+
+    // Build BOTH paths.
+    let fused_uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
+    let fused_asm = profiles_arm64::lower(&fused_uir).expect("fused lower");
+    let unfused_asm = profiles_arm64::lower(&uir).expect("unfused lower");
+
+    // Asm shape differs as expected.
+    assert!(
+        fused_asm.source.contains("fmax    s0, s0, s4"),
+        "fused asm missing inline fmax"
+    );
+    assert!(
+        !fused_asm.source.contains(".Lrelu_"),
+        "fused asm should NOT have separate relu loops"
+    );
+    assert!(
+        unfused_asm.source.contains(".Lrelu_0_0:"),
+        "unfused asm missing first relu loop label"
+    );
+    assert!(
+        unfused_asm.source.contains(".Lrelu_0_1:"),
+        "unfused asm missing second relu loop label (classifier has 2 relus)"
+    );
+
+    // Compile both, run both with same input/params, compare numerically.
+    let fused_dylib = common::compile_to_dylib(&fused_asm.source, "fused_classifier");
+    let unfused_dylib = common::compile_to_dylib(&unfused_asm.source, "unfused_classifier");
+
+    let fused_lib = unsafe { libloading::Library::new(&fused_dylib).unwrap() };
+    let unfused_lib = unsafe { libloading::Library::new(&unfused_dylib).unwrap() };
+
+    let fused_forward: libloading::Symbol<unsafe extern "C" fn(*const f32, *const f32, *mut f32)> =
+        unsafe { fused_lib.get(b"nfl_forward_Classifier") }.unwrap();
+    let unfused_forward: libloading::Symbol<
+        unsafe extern "C" fn(*const f32, *const f32, *mut f32),
+    > = unsafe { unfused_lib.get(b"nfl_forward_Classifier") }.unwrap();
+
+    // Same deterministic input + params as classifier_runs_correctly test.
+    // Both asms describe the same model; pull params length from the FnSig
+    // instead of hardcoding so the test follows the fixture if it changes.
+    let params_len = fused_asm.functions[0].params_floats;
+    debug_assert_eq!(
+        params_len, unfused_asm.functions[0].params_floats,
+        "fused/unfused FnSig params_floats must agree"
+    );
+    let mut input = vec![0.0f32; 32 * 784];
+    for (i, v) in input.iter_mut().enumerate() {
+        *v = ((i as f32) % 100.0) * 0.001;
+    }
+    let mut params = vec![0.0f32; params_len];
+    for (i, v) in params.iter_mut().enumerate() {
+        *v = (((i as f32) % 1000.0) - 500.0) * 0.0001;
+    }
+
+    let mut fused_out = vec![0.0f32; 32 * 10];
+    let mut unfused_out = vec![0.0f32; 32 * 10];
+
+    unsafe {
+        fused_forward(input.as_ptr(), params.as_ptr(), fused_out.as_mut_ptr());
+        unfused_forward(input.as_ptr(), params.as_ptr(), unfused_out.as_mut_ptr());
+    }
+
+    // assert_eq! exact equality: f32 store+load is bit-preserving;
+    // fusion only relocates WHERE relu is applied, not WHICH floats compute.
+    for (i, (a, b)) in fused_out.iter().zip(unfused_out.iter()).enumerate() {
+        assert_eq!(
+            *a, *b,
+            "fused[{i}]={a} unfused[{i}]={b} — fusion changed numerics"
         );
     }
 }

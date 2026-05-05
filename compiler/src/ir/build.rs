@@ -198,6 +198,7 @@ pub(crate) fn build_op(
             op: std_op,
             operands: vec![input_id],
             attrs,
+            fused_post_ops: Vec::new(),
         },
         ty: Type {
             name: "Tensor".to_string(),

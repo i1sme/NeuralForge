@@ -234,3 +234,13 @@ impl std::fmt::Display for StdOp {
         write!(f, "{}", name)
     }
 }
+
+/// True iff the op's attribute list includes `bias=true`.
+///
+/// Used by the arm64 codegen profile to detect bias-add cases and by
+/// kernel-fusion passes that need to inspect the Linear's bias presence.
+pub fn linear_has_bias(attrs: &[OpAttr]) -> bool {
+    attrs
+        .iter()
+        .any(|a| a.name == "bias" && matches!(&a.value, AttrValue::Symbol(s) if s == "true"))
+}

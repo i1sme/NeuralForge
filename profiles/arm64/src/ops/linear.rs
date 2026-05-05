@@ -2,12 +2,17 @@
 
 use crate::asm::emit_imm32;
 use crate::buffer::BufferLoc;
+use crate::types::LowerError;
+use compiler::ast::Span;
+use compiler::PostOp;
 
 /// Emit AArch64 asm for a linear layer (matmul + optional bias-add).
 ///
 /// `model_idx` and `linear_idx` together uniquely name every label in the
 /// output file, which is critical when multiple models share one assembly
 /// source (e.g. pipeline_styles.nfl with 3 model definitions).
+///
+/// Task 5 added node_span + fused_post_ops; Task 6 wires PostOp dispatch.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_linear(
     b: u64,
@@ -19,13 +24,26 @@ pub fn emit_linear(
     dst_loc: BufferLoc,
     weight_offset: usize,
     bias_offset: Option<usize>,
-) -> String {
+    node_span: Span,
+    fused_post_ops: &[PostOp],
+) -> Result<String, LowerError> {
     let lid = format!("{model_idx}_{linear_idx}");
     let mut s = String::new();
     s.push_str(&format!(
-        "    ; matmul: input [{b},{k}] x weights [{k},{n}] -> output [{b},{n}]{}\n",
-        if bias_offset.is_some() { " + bias" } else { "" }
+        "    ; matmul: input [{b},{k}] x weights [{k},{n}] -> output [{b},{n}]{}{}\n",
+        if bias_offset.is_some() { " + bias" } else { "" },
+        if !fused_post_ops.is_empty() {
+            " + fused"
+        } else {
+            ""
+        },
     ));
+
+    // Materialise s4 = 0.0 once if any post-op needs it (currently only Relu does).
+    let needs_zero = fused_post_ops.iter().any(|p| matches!(p, PostOp::Relu));
+    if needs_zero {
+        s.push_str("    fmov    s4, wzr\n");
+    }
 
     s.push_str(&materialise_ptr("x11", src_loc));
     s.push_str(&materialise_ptr("x12", dst_loc));
@@ -76,12 +94,32 @@ pub fn emit_linear(
     s.push_str(&format!("    b       .Lmm_k_{lid}\n"));
     s.push_str(&format!(".Lmm_k_end_{lid}:\n"));
 
-    // Bias-add (if present) before the store: load bias[j], fadd into s0.
+    // Bias-add (if present) BEFORE post-ops.
     if bias_offset.is_some() {
         s.push_str("    ldr     s5, [x14, x4, lsl #2]\n");
         s.push_str("    fadd    s0, s0, s5\n");
     }
 
+    // M5a: post-ops inline. Order matches fused_post_ops order; M5a only
+    // expects single-element [Relu].
+    for post_op in fused_post_ops {
+        match post_op {
+            PostOp::Relu => s.push_str("    fmax    s0, s0, s4\n"),
+            // PostOp is `#[non_exhaustive]` in `compiler::ir::types`, so a
+            // wildcard arm is required even though Relu is currently the
+            // only variant — Rust treats the cross-crate match as inexhaustive.
+            // Drop the `#[allow]` once M5b adds the second PostOp variant.
+            #[allow(unreachable_patterns)]
+            _ => {
+                return Err(LowerError::UnsupportedPostOp {
+                    op: post_op.to_string(),
+                    span: node_span,
+                });
+            }
+        }
+    }
+
+    // Store (after post-ops).
     s.push_str(&format!("    mov     x8, #{n}\n"));
     s.push_str("    mul     x6, x3, x8\n");
     s.push_str("    add     x6, x6, x4\n");
@@ -95,7 +133,7 @@ pub fn emit_linear(
     s.push_str(&format!("    b       .Lmm_i_{lid}\n"));
     s.push_str(&format!(".Lmm_i_end_{lid}:\n"));
 
-    s
+    Ok(s)
 }
 
 /// Materialise a `BufferLoc` into a GPR (e.g. x11, x12). pub(crate) so relu.rs uses it too.

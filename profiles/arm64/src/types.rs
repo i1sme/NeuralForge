@@ -59,6 +59,11 @@ pub enum LowerError {
     UnsupportedOp { op: String, span: Span },
     /// Defensive: UIR contained a shape that wasn't fully resolved.
     ShapeNotConcrete { span: Span },
+    /// M5a: post-op variant not supported by this profile. Fires when a
+    /// future PostOp variant lands in `compiler::PostOp` before this profile
+    /// knows how to emit it. The `op` field carries the post-op's Display
+    /// name for diagnostics; the span points into the producing UIR node.
+    UnsupportedPostOp { op: String, span: Span },
 }
 
 impl std::fmt::Display for LowerError {
@@ -73,6 +78,9 @@ impl std::fmt::Display for LowerError {
                 f,
                 "internal: UIR shape was not fully resolved before lowering"
             ),
+            LowerError::UnsupportedPostOp { op, .. } => {
+                write!(f, "post-op '{}' is not supported by the arm64 profile", op)
+            }
         }
     }
 }
@@ -83,6 +91,7 @@ impl LowerError {
         match self {
             LowerError::UnsupportedOp { span, .. } => *span,
             LowerError::ShapeNotConcrete { span } => *span,
+            LowerError::UnsupportedPostOp { span, .. } => *span,
         }
     }
 }

@@ -30,6 +30,7 @@ mod tiny_mlp {
             op,
             operands,
             attrs,
+            ..
         } = &m.nodes[1].kind
         else {
             panic!()

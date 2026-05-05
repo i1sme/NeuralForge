@@ -418,3 +418,86 @@ fn unsupported_op_display_and_span_round_trip() {
     assert_eq!(e.span().line, span.line);
     assert_eq!(e.span().col, span.col);
 }
+
+#[test]
+fn unsupported_post_op_display_and_span_round_trip() {
+    let span = compiler::ast::Span::new(7, 3);
+    let e = LowerError::UnsupportedPostOp {
+        op: "future_post_op".into(),
+        span,
+    };
+    let msg = e.to_string();
+    assert!(
+        msg.contains("future_post_op"),
+        "Display should mention post-op name; got: {msg}"
+    );
+    assert!(
+        msg.contains("post-op"),
+        "Display should clearly mark this as a post-op error; got: {msg}"
+    );
+    assert_eq!(e.span().line, span.line);
+    assert_eq!(e.span().col, span.col);
+}
+
+#[test]
+fn fused_linear_relu_emits_fmax_before_store() {
+    use compiler::{NodeKind, PostOp};
+    // Synthetic: hand-build UIR where Linear has fused_post_ops = [Relu].
+    let mut uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n");
+    let m = &mut uir.models[0];
+    let NodeKind::Op { fused_post_ops, .. } = &mut m.nodes[1].kind else {
+        panic!("expected Op node");
+    };
+    fused_post_ops.push(PostOp::Relu);
+
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+
+    // s4 materialised once.
+    assert!(
+        s.contains("fmov    s4, wzr"),
+        "missing s4 zero materialisation:\n{s}"
+    );
+    // fmax inline before store.
+    assert!(
+        s.contains("fmax    s0, s0, s4"),
+        "missing inline fmax (relu):\n{s}"
+    );
+}
+
+#[test]
+fn fused_linear_relu_no_separate_relu_loop() {
+    use compiler::{NodeKind, PostOp};
+    // Same fixture as above. Asm must NOT contain a separate .Lrelu_*: label.
+    let mut uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n");
+    let m = &mut uir.models[0];
+    let NodeKind::Op { fused_post_ops, .. } = &mut m.nodes[1].kind else {
+        panic!()
+    };
+    fused_post_ops.push(PostOp::Relu);
+
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+    assert!(
+        !s.contains(".Lrelu_"),
+        "fused linear+relu should NOT emit a separate relu loop:\n{s}"
+    );
+}
+
+#[test]
+fn unfused_linear_still_no_fmax() {
+    // Linear without fused_post_ops: no fmax AND no s4 zero-materialisation.
+    // The two assertions together pin the un-fused asm shape: no post-op
+    // path is taken at all (neither header materialisation nor inline op).
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n");
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+    assert!(
+        !s.contains("fmax"),
+        "un-fused linear should NOT emit fmax:\n{s}"
+    );
+    assert!(
+        !s.contains("fmov    s4, wzr"),
+        "un-fused linear should NOT materialise s4 zero (only fused-relu needs it):\n{s}"
+    );
+}

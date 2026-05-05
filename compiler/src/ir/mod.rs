@@ -11,7 +11,7 @@ pub mod types;
 mod tests;
 
 pub use error::{BuildError, BuildErrorKind};
-pub use stdlib::{ArgSlot, ArgType, Signature, StdOp};
-pub use types::{AttrValue, Node, NodeId, NodeKind, OpAttr, Shape, Type, Uir, UirModel};
+pub use stdlib::{linear_has_bias, ArgSlot, ArgType, Signature, StdOp};
+pub use types::{AttrValue, Node, NodeId, NodeKind, OpAttr, PostOp, Shape, Type, Uir, UirModel};
 
 pub use build::build;
