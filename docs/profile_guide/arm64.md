@@ -94,7 +94,7 @@ downstream `match` consumers.
 
 ---
 
-## 3. Supported ops in M4b
+## 3. Supported ops
 
 | StdOp                      | Supported | Notes                                                          |
 |----------------------------|-----------|----------------------------------------------------------------|
