@@ -45,14 +45,14 @@ fn compile_default_runs_fusion() {
 }
 
 #[test]
-fn compile_with_no_fuse_skips_fusion() {
+fn compile_with_no_passes_skips_pipeline() {
     let output = Command::new(nflc_bin())
         .args([
             "compile",
             "../tests/fixtures/m4_linear_relu.nfl",
             "--profile",
             "arm64",
-            "--no-fuse",
+            "--no-passes",
         ])
         .output()
         .expect("failed to run nflc");
@@ -63,8 +63,13 @@ fn compile_with_no_fuse_skips_fusion() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
-        stderr.contains("note: passes skipped (--no-fuse)"),
+        stderr.contains("note: passes skipped (--no-passes)"),
         "stderr missing passes-skipped note:\n{stderr}"
+    );
+    // Successful skip mode does NOT emit the applied-passes note.
+    assert!(
+        !stderr.contains("note: applied passes:"),
+        "stderr should not contain 'applied passes' when passes are skipped:\n{stderr}"
     );
 
     // Unfused asm: separate relu loop, no inline fmax.
@@ -74,7 +79,7 @@ fn compile_with_no_fuse_skips_fusion() {
     );
     assert!(
         !stdout.contains("fmax    s0, s0, s4"),
-        "stdout has inline fmax (fusion incorrectly applied in --no-fuse mode):\n{stdout}"
+        "stdout has inline fmax (fusion incorrectly applied in --no-passes mode):\n{stdout}"
     );
 }
 
