@@ -12,7 +12,7 @@ use compiler::PostOp;
 /// output file, which is critical when multiple models share one assembly
 /// source (e.g. pipeline_styles.nfl with 3 model definitions).
 ///
-/// Task 5 added node_span + fused_post_ops; Task 6 wires PostOp dispatch.
+/// M6 added `node_span` and `fused_post_ops` and wired the `PostOp::SoftmaxRow` dispatch (see `arm64.md` §4.10).
 #[allow(clippy::too_many_arguments)]
 pub fn emit_linear(
     b: u64,
@@ -109,7 +109,7 @@ pub fn emit_linear(
             // SoftmaxRow is row-wise; handled after the matmul loops.
             PostOp::SoftmaxRow => {}
             // PostOp is `#[non_exhaustive]`; wildcard required.
-            // Drop the `#[allow]` when a third PostOp variant lands.
+            // Drop the `#[allow]` when a third `PostOp` variant lands.
             #[allow(unreachable_patterns)]
             _ => {
                 return Err(LowerError::UnsupportedPostOp {
@@ -161,7 +161,7 @@ pub fn emit_linear(
                 s.push_str(&format!("    mov     x8, #{n}\n"));
                 s.push_str("    mul     x20, x19, x8\n");
 
-                // Pass 1: max → s8.
+                // Phase 2: row-max → s8.
                 s.push_str("    movz    w0, #0x0000\n");
                 s.push_str("    movk    w0, #0xFF80, lsl #16\n");
                 s.push_str("    fmov    s8, w0\n");
@@ -176,7 +176,7 @@ pub fn emit_linear(
                 s.push_str(&format!("    b       .Lfsmx_max_{lid}\n"));
                 s.push_str(&format!(".Lfsmx_max_end_{lid}:\n"));
 
-                // Pass 2: exp(x - max) → dst, accumulate sum → s9.
+                // Phase 3: exp(x − max), sum → s9.
                 s.push_str("    fmov    s9, wzr\n");
                 s.push_str("    mov     x21, #0\n");
                 s.push_str(&format!(".Lfsmx_exp_{lid}:\n"));
@@ -194,7 +194,7 @@ pub fn emit_linear(
                 s.push_str(&format!("    b       .Lfsmx_exp_{lid}\n"));
                 s.push_str(&format!(".Lfsmx_exp_end_{lid}:\n"));
 
-                // Pass 3: normalize.
+                // Phase 4: normalise by s9.
                 s.push_str("    mov     x21, #0\n");
                 s.push_str(&format!(".Lfsmx_norm_{lid}:\n"));
                 s.push_str(&format!("    cmp     x21, #{n}\n"));
@@ -212,7 +212,7 @@ pub fn emit_linear(
                 s.push_str(&format!(".Lfsmx_i_end_{lid}:\n"));
             }
             // PostOp is `#[non_exhaustive]`; wildcard required for cross-crate
-            // match completeness. Drop the `#[allow]` when a third PostOp lands.
+            // match completeness. Drop the `#[allow]` when a third `PostOp` variant lands.
             #[allow(unreachable_patterns)]
             _ => {
                 return Err(LowerError::UnsupportedPostOp {

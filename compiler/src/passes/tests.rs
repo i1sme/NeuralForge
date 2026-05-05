@@ -66,7 +66,7 @@ fn empty_pipeline_returns_input_clone() {
 /// Synthetic always-failing pass: lets us verify pipeline halts on
 /// `Err` and propagates the error unchanged. Without this test, a
 /// future refactor of `run_pipeline` could accidentally swallow
-/// errors and only Task 4's tests would (incidentally) catch it.
+/// errors and only the canonical-order test would (incidentally) catch it.
 struct FailPass;
 
 impl UirPass for FailPass {

@@ -42,8 +42,11 @@ impl UirPass for EliminateDropout {
 /// has an extra leading consumer-count step (FuseLinearRelu's victim
 /// criterion 5 — single-consumer Linear — needs the precomputed map;
 /// EliminateDropout has no consumer-count constraint and can skip it).
-/// Extraction into a shared helper is deferred to M6+ when a third pass
-/// with the same rebuild pattern lands ("three strikes then refactor").
+/// Three identical 3-step rebuild patterns now exist (this pass,
+/// `FuseLinearRelu`, and `FuseLinearSoftmax` — all M6-current).
+/// Extraction of the shared helper is deferred to M7+ — the trigger
+/// has fired, but the M6 close-out elected not to pack the refactor
+/// into the same milestone. Carry-forward in DEVLOG.
 fn eliminate_one_model(model: &UirModel) -> Result<UirModel, PassError> {
     // Step 1: identify victims (every Dropout node).
     let victims: HashSet<NodeId> = model

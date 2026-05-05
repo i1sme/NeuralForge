@@ -82,12 +82,14 @@ fn node_uses_softmax(node: &Node) -> bool {
     use compiler::PostOp;
     match &node.kind {
         NodeKind::Op {
-            op: StdOp::Softmax, ..
-        } => true,
-        NodeKind::Op { fused_post_ops, .. } => fused_post_ops
-            .iter()
-            .any(|p| matches!(p, PostOp::SoftmaxRow)),
-        _ => false,
+            op, fused_post_ops, ..
+        } => {
+            matches!(op, StdOp::Softmax)
+                || fused_post_ops
+                    .iter()
+                    .any(|p| matches!(p, PostOp::SoftmaxRow))
+        }
+        NodeKind::Input { .. } => false,
     }
 }
 
@@ -100,12 +102,16 @@ pub fn compute_is_leaf(model: &UirModel) -> bool {
     !model.nodes.iter().any(node_uses_softmax)
 }
 
-/// Set of callee-saved registers used by the model's body. M4b: `{d8, d9}`
-/// and `{x19-x23}` iff softmax is present.
+/// Set of callee-saved registers used by the model's body. M6: `{d8, d9}`
+/// and `{x19-x23}` iff any node calls `bl _expf` — either a standalone
+/// `StdOp::Softmax` or a `Linear` carrying `PostOp::SoftmaxRow` in its
+/// `fused_post_ops`. See `node_uses_softmax`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RegSet {
     pub d8_d9: bool,
-    /// x19-x23 are used by emit_softmax to hold loop state across `bl _expf`.
+    /// x19-x23 are used by `emit_softmax` (standalone path) and by the
+    /// row-wise softmax tail in `emit_linear` (M6 fused path; see
+    /// `arm64.md` §4.10) to hold loop state across `bl _expf`.
     pub x19_x23: bool,
 }
 

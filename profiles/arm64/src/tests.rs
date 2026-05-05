@@ -502,7 +502,7 @@ fn unfused_linear_still_no_fmax() {
     );
 }
 
-// ── Task 5 analyzer tests: PostOp::SoftmaxRow via default pipeline ───────────
+// ── M6 analyzer tests: PostOp::SoftmaxRow via default pipeline ───────────────
 
 #[test]
 fn is_leaf_false_for_fused_softmax_row_linear() {
@@ -536,7 +536,7 @@ fn callee_saved_includes_d8_d9_for_fused_softmax_row() {
     assert!(regs.x19_x23, "fused-SoftmaxRow Linear needs x19-x23 saved");
 }
 
-// ── Task 6 asm-shape tests: four-phase softmax tail via default pipeline ──────
+// ── M6 asm-shape tests: four-phase softmax tail via default pipeline ──────────
 
 #[test]
 fn emit_linear_with_softmax_row_post_op_emits_three_phase_softmax() {
