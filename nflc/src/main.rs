@@ -67,8 +67,10 @@ struct CompileArgs {
     path: PathBuf,
     profile: String,
     output: Option<PathBuf>,
-    no_passes: bool,             // renamed from no_fuse (M5b §4.3)
-    passes: Option<Vec<String>>, // None = default; Some(list) = filter (M5b §4.4)
+    no_passes: bool,
+    /// `None` = run `default_pipeline()`; `Some(list)` = filter to listed
+    /// names (canonical order preserved regardless of user order).
+    passes: Option<Vec<String>>,
 }
 
 fn parse_compile_args(args: &[String]) -> Result<CompileArgs, String> {
@@ -139,8 +141,10 @@ fn parse_compile_args(args: &[String]) -> Result<CompileArgs, String> {
     }
 
     // Validate --passes content against the canonical pass registry.
+    // The list is for *validation only* here — `run_compile` builds the
+    // actual filtered pipeline from `default_pipeline()` independently.
     if let Some(ref names) = passes {
-        let canonical_names: Vec<String> = compiler::passes::default_pipeline()
+        let available_names: Vec<String> = compiler::passes::default_pipeline()
             .iter()
             .map(|p| p.name().to_owned())
             .collect();
@@ -155,10 +159,10 @@ fn parse_compile_args(args: &[String]) -> Result<CompileArgs, String> {
 
         // Unknown-name check (dynamic available list).
         for n in names {
-            if !canonical_names.iter().any(|c| c == n) {
+            if !available_names.iter().any(|c| c == n) {
                 return Err(format!(
                     "unknown pass '{n}' (available: {})",
-                    canonical_names.join(", ")
+                    available_names.join(", ")
                 ));
             }
         }
