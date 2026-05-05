@@ -27,9 +27,9 @@ fn compile_default_runs_fusion() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    // stderr has the applied-passes note.
+    // stderr has the applied-passes note (M5b: two passes in canonical order).
     assert!(
-        stderr.contains("note: applied passes: fuse_linear_relu"),
+        stderr.contains("note: applied passes: eliminate_dropout, fuse_linear_relu"),
         "stderr missing applied-passes note:\n{stderr}"
     );
 
@@ -45,14 +45,14 @@ fn compile_default_runs_fusion() {
 }
 
 #[test]
-fn compile_with_no_fuse_skips_fusion() {
+fn compile_with_no_passes_skips_pipeline() {
     let output = Command::new(nflc_bin())
         .args([
             "compile",
             "../tests/fixtures/m4_linear_relu.nfl",
             "--profile",
             "arm64",
-            "--no-fuse",
+            "--no-passes",
         ])
         .output()
         .expect("failed to run nflc");
@@ -63,8 +63,13 @@ fn compile_with_no_fuse_skips_fusion() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
-        stderr.contains("note: passes skipped (--no-fuse)"),
+        stderr.contains("note: passes skipped (--no-passes)"),
         "stderr missing passes-skipped note:\n{stderr}"
+    );
+    // Successful skip mode does NOT emit the applied-passes note.
+    assert!(
+        !stderr.contains("note: applied passes:"),
+        "stderr should not contain 'applied passes' when passes are skipped:\n{stderr}"
     );
 
     // Unfused asm: separate relu loop, no inline fmax.
@@ -74,7 +79,7 @@ fn compile_with_no_fuse_skips_fusion() {
     );
     assert!(
         !stdout.contains("fmax    s0, s0, s4"),
-        "stdout has inline fmax (fusion incorrectly applied in --no-fuse mode):\n{stdout}"
+        "stdout has inline fmax (fusion incorrectly applied in --no-passes mode):\n{stdout}"
     );
 }
 
@@ -101,5 +106,179 @@ fn compile_unknown_flag_rejected() {
     assert!(
         stderr.contains("unknown flag: --frobnicate"),
         "stderr missing unknown-flag error for '--frobnicate':\n{stderr}"
+    );
+}
+
+#[test]
+fn compile_with_passes_filter_runs_only_selected() {
+    // --passes fuse_linear_relu against m4_linear_relu.nfl (which has
+    // no dropout). The filter exercise is purely about pipeline
+    // selection: stderr should show only the named pass; asm should
+    // still contain inline fmax (since FuseLinearRelu is in the
+    // filtered set).
+    let output = Command::new(nflc_bin())
+        .args([
+            "compile",
+            "../tests/fixtures/m4_linear_relu.nfl",
+            "--profile",
+            "arm64",
+            "--passes",
+            "fuse_linear_relu",
+        ])
+        .output()
+        .expect("failed to run nflc");
+
+    assert!(output.status.success(), "exit failure: {:?}", output);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("note: applied passes: fuse_linear_relu"),
+        "stderr should show only fuse_linear_relu in applied list:\n{stderr}"
+    );
+    // Specifically: the canonical two-pass form (which would start
+    // 'note: applied passes: eliminate_dropout, fuse_linear_relu') must
+    // not appear when the filter retained only fuse_linear_relu. We pin
+    // the exact prefix `note: applied passes: eliminate_dropout` rather
+    // than the bare name `eliminate_dropout` because the latter could
+    // also match unrelated diagnostic text in future stderr additions.
+    assert!(
+        !stderr.contains("note: applied passes: eliminate_dropout"),
+        "stderr applied-passes note should NOT start with eliminate_dropout when filter retained only fuse_linear_relu:\n{stderr}"
+    );
+    // Fusion still applied.
+    assert!(
+        stdout.contains("fmax    s0, s0, s4"),
+        "stdout should have inline fmax (fusion in filtered set):\n{stdout}"
+    );
+}
+
+#[test]
+fn compile_with_passes_unknown_name_rejected() {
+    let output = Command::new(nflc_bin())
+        .args([
+            "compile",
+            "../tests/fixtures/m4_linear_relu.nfl",
+            "--profile",
+            "arm64",
+            "--passes",
+            "foo",
+        ])
+        .output()
+        .expect("failed to run nflc");
+
+    assert!(!output.status.success(), "expected failure exit");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Strict: must mention BOTH the offending name AND an "available:"
+    // listing. The exact contents of the available list are dynamic
+    // (M6+ may add passes); substring match on "available:" keeps the
+    // test resilient.
+    assert!(
+        stderr.contains("unknown pass 'foo'"),
+        "stderr missing unknown-pass error for 'foo':\n{stderr}"
+    );
+    assert!(
+        stderr.contains("available:"),
+        "stderr missing 'available:' substring (dynamic list):\n{stderr}"
+    );
+}
+
+#[test]
+fn compile_with_passes_order_warning() {
+    // User writes the two passes in REVERSE of canonical order.
+    // CLI should still produce correct asm (canonical order applied)
+    // AND emit a divergence note so the user knows their order was
+    // overridden.
+    let output = Command::new(nflc_bin())
+        .args([
+            "compile",
+            "../tests/fixtures/m4_linear_relu.nfl",
+            "--profile",
+            "arm64",
+            "--passes",
+            "fuse_linear_relu,eliminate_dropout",
+        ])
+        .output()
+        .expect("failed to run nflc");
+
+    assert!(output.status.success(), "exit failure: {:?}", output);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // BOTH notes must appear: applied-passes (in canonical order) AND
+    // the divergence warning. They are separate eprintln! calls per
+    // spec §9.3 — substring checks are independent.
+    assert!(
+        stderr.contains("note: applied passes: eliminate_dropout, fuse_linear_relu"),
+        "stderr missing canonical-order applied-passes note:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("user-specified order ignored"),
+        "stderr missing order-divergence warning:\n{stderr}"
+    );
+    // Stdout still has the expected fused-asm shape (canonical order
+    // produces the same asm as the no-flag default).
+    assert!(
+        stdout.contains("fmax    s0, s0, s4"),
+        "stdout missing inline fmax (canonical order should still fuse):\n{stdout}"
+    );
+}
+
+#[test]
+fn compile_no_passes_and_passes_rejected() {
+    let output = Command::new(nflc_bin())
+        .args([
+            "compile",
+            "../tests/fixtures/m4_linear_relu.nfl",
+            "--profile",
+            "arm64",
+            "--no-passes",
+            "--passes",
+            "fuse_linear_relu",
+        ])
+        .output()
+        .expect("failed to run nflc");
+
+    assert!(!output.status.success(), "expected failure exit");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("mutually exclusive"),
+        "stderr missing mutually-exclusive error:\n{stderr}"
+    );
+}
+
+#[test]
+fn compile_with_passes_duplicate_name_rejected() {
+    // Companion test for the duplicate-name guard in parse_compile_args
+    // (--passes a,a → error "pass 'a' specified more than once").
+    // Spec §11.4 didn't list this case, but the validation code exists
+    // and shipping it without a smoke test creates a documentation gap
+    // for future readers (holistic-review N-tier finding pre-merge).
+    let output = Command::new(nflc_bin())
+        .args([
+            "compile",
+            "../tests/fixtures/m4_linear_relu.nfl",
+            "--profile",
+            "arm64",
+            "--passes",
+            "fuse_linear_relu,fuse_linear_relu",
+        ])
+        .output()
+        .expect("failed to run nflc");
+
+    assert!(!output.status.success(), "expected failure exit");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("specified more than once"),
+        "stderr missing duplicate-pass error:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("fuse_linear_relu"),
+        "stderr should name the duplicated pass:\n{stderr}"
     );
 }

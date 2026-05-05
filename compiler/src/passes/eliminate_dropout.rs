@@ -1,0 +1,491 @@
+//! `dropout` elimination pass (M5b).
+//!
+//! At inference time, dropout is a no-op (it only randomises during
+//! training, which NFL v0.1 does not support). This pass removes every
+//! Dropout node from the UIR, remapping its consumers to the dropout's
+//! operand. After this pass, the `BufferLoc::Alias(operand)` machinery
+//! in `profiles/arm64::buffer.rs` is unreachable in default mode (still
+//! reachable for `--no-passes` and `--passes` filters that exclude this
+//! pass). Profile remains complete relative to its input grammar — see
+//! spec §4.2.
+//!
+//! Functional: returns a fresh Uir with renumbered NodeIds.
+
+use super::{PassError, UirPass};
+use crate::ir::types::{Node, NodeKind};
+use crate::ir::StdOp;
+use crate::{NodeId, Uir, UirModel};
+use std::collections::{HashMap, HashSet};
+
+pub struct EliminateDropout;
+
+impl UirPass for EliminateDropout {
+    fn name(&self) -> &str {
+        "eliminate_dropout"
+    }
+
+    fn run(&self, uir: &Uir) -> Result<Uir, PassError> {
+        let mut new_models = Vec::with_capacity(uir.models.len());
+        for model in &uir.models {
+            new_models.push(eliminate_one_model(model)?);
+        }
+        Ok(Uir { models: new_models })
+    }
+}
+
+/// Precondition: `model.nodes` is in topological order — every operand
+/// NodeId is strictly less than the consumer's NodeId. `ir::build`
+/// guarantees this.
+///
+/// Note: this 3-step skeleton (identify victims → rebuild with remap →
+/// remap inputs/output) echoes `FuseLinearRelu::fuse_one_model`, which
+/// has an extra leading consumer-count step (FuseLinearRelu's victim
+/// criterion 5 — single-consumer Linear — needs the precomputed map;
+/// EliminateDropout has no consumer-count constraint and can skip it).
+/// Extraction into a shared helper is deferred to M6+ when a third pass
+/// with the same rebuild pattern lands ("three strikes then refactor").
+fn eliminate_one_model(model: &UirModel) -> Result<UirModel, PassError> {
+    // Step 1: identify victims (every Dropout node).
+    let victims: HashSet<NodeId> = model
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(id, node)| match &node.kind {
+            NodeKind::Op {
+                op: StdOp::Dropout, ..
+            } => Some(id),
+            _ => None,
+        })
+        .collect();
+
+    // Step 2: build new model — skip victims, remap operands.
+    let mut new_nodes: Vec<Node> = Vec::with_capacity(model.nodes.len());
+    let mut id_map: HashMap<NodeId, NodeId> = HashMap::new();
+
+    for (old_id, node) in model.nodes.iter().enumerate() {
+        if victims.contains(&old_id) {
+            // Dropout's operand becomes Dropout's "result" id-wise.
+            // NFL grammar (§stdlib::Signature for `dropout`) guarantees
+            // exactly one operand; ir::build always produces
+            // `operands: vec![input_id]`. The debug_assert! catches any
+            // future grammar / hand-built UIR that violates the invariant
+            // before the index access panics.
+            let operands = match &node.kind {
+                NodeKind::Op { operands, .. } => operands,
+                _ => unreachable!("victim must be Op (filter-step established this)"),
+            };
+            debug_assert_eq!(
+                operands.len(),
+                1,
+                "Dropout must have exactly one operand (NFL grammar invariant)"
+            );
+            let operand_old_id = operands[0];
+            let operand_new_id = id_map[&operand_old_id];
+            id_map.insert(old_id, operand_new_id);
+            continue;
+        }
+
+        let mut new_node = node.clone();
+        if let NodeKind::Op { operands, .. } = &mut new_node.kind {
+            for op in operands.iter_mut() {
+                *op = id_map[op];
+            }
+        }
+
+        let new_id = new_nodes.len();
+        new_nodes.push(new_node);
+        id_map.insert(old_id, new_id);
+    }
+
+    // Step 3: remap inputs + output.
+    let new_inputs: Vec<NodeId> = model.inputs.iter().map(|id| id_map[id]).collect();
+    let new_output = id_map[&model.output];
+
+    Ok(UirModel {
+        name: model.name.clone(),
+        nodes: new_nodes,
+        inputs: new_inputs,
+        output: new_output,
+        source_span: model.source_span,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::Span;
+    use crate::ir::types::{AttrValue, OpAttr, Shape, Type};
+    use crate::Uir;
+
+    /// Build a Node with `NodeKind::Op` and a tensor type. Local helper
+    /// used by the hand-built UIR tests in this module. Kept private —
+    /// per spec §4.5, no shared helper between EliminateDropout and
+    /// FuseLinearRelu (rule of three).
+    fn op_node(op: StdOp, operands: Vec<NodeId>, attrs: Vec<OpAttr>, shape: Vec<u64>) -> Node {
+        Node {
+            kind: NodeKind::Op {
+                op,
+                operands,
+                attrs,
+                fused_post_ops: vec![],
+            },
+            ty: Type {
+                name: "Tensor".into(),
+                shape: Shape(shape),
+            },
+            source_span: Span::new(1, 1),
+        }
+    }
+
+    /// Build a `NodeKind::Input` node with a tensor type. Companion to
+    /// `op_node`; same private-test-helper rationale (spec §4.5).
+    fn input_node(name: &str, shape: Vec<u64>) -> Node {
+        Node {
+            kind: NodeKind::Input { name: name.into() },
+            ty: Type {
+                name: "Tensor".into(),
+                shape: Shape(shape),
+            },
+            source_span: Span::new(1, 1),
+        }
+    }
+
+    #[test]
+    fn pass_name_is_stable() {
+        assert_eq!(EliminateDropout.name(), "eliminate_dropout");
+    }
+
+    #[test]
+    fn empty_uir_passes_unchanged() {
+        let uir = Uir { models: Vec::new() };
+        let out = EliminateDropout.run(&uir).expect("ok");
+        assert_eq!(out.models.len(), 0);
+    }
+
+    #[test]
+    fn removes_terminal_dropout() {
+        // input → linear → dropout    (output IS the dropout)
+        // After: input → linear   (output is the linear's new id)
+        let model = UirModel {
+            name: "M".into(),
+            nodes: vec![
+                input_node("x", vec![2, 3]),
+                op_node(
+                    StdOp::Linear,
+                    vec![0],
+                    vec![OpAttr {
+                        name: "out_dim".into(),
+                        value: AttrValue::Integer(2),
+                    }],
+                    vec![2, 2],
+                ),
+                op_node(
+                    StdOp::Dropout,
+                    vec![1],
+                    vec![OpAttr {
+                        name: "rate".into(),
+                        value: AttrValue::Float(0.5),
+                    }],
+                    vec![2, 2],
+                ),
+            ],
+            inputs: vec![0],
+            output: 2, // dropout
+            source_span: Span::new(1, 1),
+        };
+        let uir = Uir {
+            models: vec![model],
+        };
+
+        let out = EliminateDropout.run(&uir).expect("ok");
+        let m = &out.models[0];
+        assert_eq!(m.nodes.len(), 2, "dropout node should be removed");
+        assert_eq!(m.output, 1, "output should remap to linear's new id");
+        assert_eq!(m.inputs, vec![0]);
+        // Surviving linear has its operand still pointing at input (id 0).
+        let NodeKind::Op { operands, .. } = &m.nodes[1].kind else {
+            panic!()
+        };
+        assert_eq!(operands, &vec![0]);
+    }
+
+    #[test]
+    fn removes_internal_dropout() {
+        // input → linear → dropout → softmax    (terminal softmax)
+        // After: input → linear → softmax
+        let model = UirModel {
+            name: "M".into(),
+            nodes: vec![
+                input_node("x", vec![2, 3]),
+                op_node(
+                    StdOp::Linear,
+                    vec![0],
+                    vec![OpAttr {
+                        name: "out_dim".into(),
+                        value: AttrValue::Integer(3),
+                    }],
+                    vec![2, 3],
+                ),
+                op_node(
+                    StdOp::Dropout,
+                    vec![1],
+                    vec![OpAttr {
+                        name: "rate".into(),
+                        value: AttrValue::Float(0.3),
+                    }],
+                    vec![2, 3],
+                ),
+                op_node(StdOp::Softmax, vec![2], vec![], vec![2, 3]),
+            ],
+            inputs: vec![0],
+            output: 3, // softmax
+            source_span: Span::new(1, 1),
+        };
+        let uir = Uir {
+            models: vec![model],
+        };
+
+        let out = EliminateDropout.run(&uir).expect("ok");
+        let m = &out.models[0];
+        assert_eq!(m.nodes.len(), 3, "dropout removed; 3 survivors");
+        // Softmax (now id 2) reads linear (now id 1) directly.
+        let NodeKind::Op { op, operands, .. } = &m.nodes[2].kind else {
+            panic!()
+        };
+        assert!(matches!(op, StdOp::Softmax));
+        assert_eq!(operands, &vec![1usize]);
+        assert_eq!(m.output, 2);
+    }
+
+    #[test]
+    fn removes_chained_dropouts() {
+        // input → linear → dropout → dropout → relu
+        // After: input → linear → relu  (both dropouts collapsed)
+        let model = UirModel {
+            name: "M".into(),
+            nodes: vec![
+                input_node("x", vec![2, 3]),
+                op_node(
+                    StdOp::Linear,
+                    vec![0],
+                    vec![OpAttr {
+                        name: "out_dim".into(),
+                        value: AttrValue::Integer(3),
+                    }],
+                    vec![2, 3],
+                ),
+                op_node(
+                    StdOp::Dropout,
+                    vec![1],
+                    vec![OpAttr {
+                        name: "rate".into(),
+                        value: AttrValue::Float(0.2),
+                    }],
+                    vec![2, 3],
+                ),
+                op_node(
+                    StdOp::Dropout,
+                    vec![2],
+                    vec![OpAttr {
+                        name: "rate".into(),
+                        value: AttrValue::Float(0.4),
+                    }],
+                    vec![2, 3],
+                ),
+                op_node(StdOp::Relu, vec![3], vec![], vec![2, 3]),
+            ],
+            inputs: vec![0],
+            output: 4, // relu
+            source_span: Span::new(1, 1),
+        };
+        let uir = Uir {
+            models: vec![model],
+        };
+
+        let out = EliminateDropout.run(&uir).expect("ok");
+        let m = &out.models[0];
+        assert_eq!(m.nodes.len(), 3, "both dropouts removed");
+        // Relu (now id 2) reads linear (now id 1) directly — both dropouts collapsed.
+        let NodeKind::Op { op, operands, .. } = &m.nodes[2].kind else {
+            panic!()
+        };
+        assert!(matches!(op, StdOp::Relu));
+        assert_eq!(operands, &vec![1usize]);
+        assert_eq!(m.output, 2);
+    }
+
+    #[test]
+    fn preserves_when_no_dropout() {
+        // input → linear → relu (no dropout). Pass acts as identity.
+        let model = UirModel {
+            name: "M".into(),
+            nodes: vec![
+                input_node("x", vec![2, 3]),
+                op_node(
+                    StdOp::Linear,
+                    vec![0],
+                    vec![OpAttr {
+                        name: "out_dim".into(),
+                        value: AttrValue::Integer(3),
+                    }],
+                    vec![2, 3],
+                ),
+                op_node(StdOp::Relu, vec![1], vec![], vec![2, 3]),
+            ],
+            inputs: vec![0],
+            output: 2,
+            source_span: Span::new(1, 1),
+        };
+        let uir = Uir {
+            models: vec![model],
+        };
+
+        let out = EliminateDropout.run(&uir).expect("ok");
+        let m = &out.models[0];
+        assert_eq!(m.nodes.len(), 3);
+        assert_eq!(m.inputs, vec![0]);
+        assert_eq!(m.output, 2);
+        // NodeIds renumbered 0..N (identity here since no nodes were dropped).
+        let NodeKind::Op { op: op1, .. } = &m.nodes[1].kind else {
+            panic!()
+        };
+        assert!(matches!(op1, StdOp::Linear));
+        let NodeKind::Op {
+            op: op2, operands, ..
+        } = &m.nodes[2].kind
+        else {
+            panic!()
+        };
+        assert!(matches!(op2, StdOp::Relu));
+        assert_eq!(operands, &vec![1usize]);
+    }
+
+    #[test]
+    fn multi_consumer_dropout() {
+        // input → linear → dropout → { relu, softmax }   (dropout has two consumers)
+        // After: input → linear → { relu, softmax }   (both consumers remap to linear)
+        let model = UirModel {
+            name: "M".into(),
+            nodes: vec![
+                input_node("x", vec![2, 3]),
+                op_node(
+                    StdOp::Linear,
+                    vec![0],
+                    vec![OpAttr {
+                        name: "out_dim".into(),
+                        value: AttrValue::Integer(3),
+                    }],
+                    vec![2, 3],
+                ),
+                op_node(
+                    StdOp::Dropout,
+                    vec![1],
+                    vec![OpAttr {
+                        name: "rate".into(),
+                        value: AttrValue::Float(0.5),
+                    }],
+                    vec![2, 3],
+                ),
+                op_node(StdOp::Relu, vec![2], vec![], vec![2, 3]), // consumer A: reads dropout
+                op_node(StdOp::Softmax, vec![2], vec![], vec![2, 3]), // consumer B: reads dropout
+            ],
+            inputs: vec![0],
+            output: 3, // relu
+            source_span: Span::new(1, 1),
+        };
+        let uir = Uir {
+            models: vec![model],
+        };
+
+        let out = EliminateDropout.run(&uir).expect("ok");
+        let m = &out.models[0];
+        assert_eq!(m.nodes.len(), 4, "dropout removed; 4 survivors");
+        // Both relu and softmax now read linear (id 1) directly.
+        let NodeKind::Op {
+            op: op_a,
+            operands: ops_a,
+            ..
+        } = &m.nodes[2].kind
+        else {
+            panic!()
+        };
+        let NodeKind::Op {
+            op: op_b,
+            operands: ops_b,
+            ..
+        } = &m.nodes[3].kind
+        else {
+            panic!()
+        };
+        assert!(matches!(op_a, StdOp::Relu));
+        assert!(matches!(op_b, StdOp::Softmax));
+        assert_eq!(
+            ops_a,
+            &vec![1usize],
+            "relu should remap dropout-operand to linear"
+        );
+        assert_eq!(
+            ops_b,
+            &vec![1usize],
+            "softmax should remap dropout-operand to linear"
+        );
+        // Output (was relu's old id 3) → relu's new id 2.
+        assert_eq!(m.output, 2);
+    }
+
+    #[test]
+    fn model_inputs_and_output_remapped() {
+        // input → linear → dropout → relu (terminal relu).
+        // Defensive: explicit assertions on both inputs and output remap correctness.
+        let model = UirModel {
+            name: "M".into(),
+            nodes: vec![
+                input_node("x", vec![2, 3]),
+                op_node(
+                    StdOp::Linear,
+                    vec![0],
+                    vec![OpAttr {
+                        name: "out_dim".into(),
+                        value: AttrValue::Integer(3),
+                    }],
+                    vec![2, 3],
+                ),
+                op_node(
+                    StdOp::Dropout,
+                    vec![1],
+                    vec![OpAttr {
+                        name: "rate".into(),
+                        value: AttrValue::Float(0.1),
+                    }],
+                    vec![2, 3],
+                ),
+                op_node(StdOp::Relu, vec![2], vec![], vec![2, 3]),
+            ],
+            inputs: vec![0],
+            output: 3, // relu
+            source_span: Span::new(1, 1),
+        };
+        let uir = Uir {
+            models: vec![model],
+        };
+
+        let out = EliminateDropout.run(&uir).expect("ok");
+        let m = &out.models[0];
+
+        // Input id 0 was Input — preserved as 0 in output.
+        assert_eq!(
+            m.inputs,
+            vec![0],
+            "inputs should remap through id_map (identity for input nodes)"
+        );
+        // Output was relu's old id 3 — should remap to relu's new id 2.
+        assert_eq!(m.output, 2);
+        // Verify the structure is intact.
+        assert_eq!(m.nodes.len(), 3);
+        let NodeKind::Op { op, operands, .. } = &m.nodes[2].kind else {
+            panic!()
+        };
+        assert!(matches!(op, StdOp::Relu));
+        assert_eq!(operands, &vec![1usize]);
+    }
+}

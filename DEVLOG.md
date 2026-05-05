@@ -14,6 +14,127 @@ Format for each entry:
 
 ---
 
+## 2026-05-05 — Milestone 5b closed: bias-aware fusion + EliminateDropout + --passes filter
+
+### What was done
+- Lifted M5a's `if linear_has_bias { continue; }` guard in
+  `FuseLinearRelu`. `linear[bias=true] → relu` now fuses into a single
+  `emit_linear` block that stacks `matmul → bias-add → fmax → store`.
+  No profile-side changes — `emit_linear` already supported the asm
+  shape; only the pass-level rejection blocked it.
+- Added `compiler::passes::eliminate_dropout::EliminateDropout` —
+  a new UIR-pass that removes every Dropout node from the graph,
+  remapping consumers and `model.inputs` / `model.output` to the
+  dropout's operand. Functional 3-step rebuild (identify victims →
+  rebuild with id-remap → remap inputs/output). 8 inline unit tests
+  cover terminal-dropout, internal-dropout, chained dropouts,
+  multi-consumer dropout, identity-when-no-dropout, and explicit
+  inputs/output remap correctness.
+- `default_pipeline()` now registers BOTH passes in canonical order
+  `[EliminateDropout, FuseLinearRelu]`. Order matters: without it,
+  `linear → dropout → relu` patterns would never fuse. The doc-comment
+  documents the dependency. M6+ may revisit if a third pass needs
+  non-trivial coordination.
+- New end-to-end pipeline test
+  `pipeline_eliminates_dropout_before_fusing_linear_relu` proves the
+  order-dependency: hand-built UIR `linear → dropout → relu` collapses
+  to two nodes (input + fused linear with `fused_post_ops == [Relu]`)
+  through the full pipeline.
+- CLI: `--no-fuse` renamed to `--no-passes`. Clean break — no alias,
+  no `#[allow(dead_code)]` shim, `grep "no_fuse|--no-fuse"` against
+  `nflc/src/`, `compiler/src/`, and `profiles/` confirms zero residue.
+  New `--passes <list>` flag for filtered runs: comma-separated,
+  validated against the dynamic `default_pipeline()` registry, mutually
+  exclusive with `--no-passes`, emits a stderr `note:` when user-typed
+  order diverges from canonical.
+- 4 new CLI smoke tests cover `--passes` filter, unknown-name
+  rejection (with dynamic available list), order-divergence warning,
+  and mutually-exclusive interaction. `compile_with_no_fuse_skips_fusion`
+  renamed to `compile_with_no_passes_skips_pipeline` (assertion strings
+  updated to new flag/note shape).
+- Integration test `fused_vs_unfused_mixed_args_match_numerically`
+  proves bit-exact equivalence for the bias-aware case using
+  `mixed_args.nfl` (which has `linear[16, bias=true] → relu` as its
+  first internal layer). Mirrors M5a's classifier test pattern with
+  one additional load-bearing pre-assert (`fadd s0, s0, s5` inside
+  fused linear) — pins that bias-add survives the lift.
+- Existing M4b/M5a integration tests (`mixed_args_runs_correctly`,
+  `classifier_runs_correctly`, `fused_vs_unfused_classifier_match_numerically`,
+  others) continue to pass without changes — the pipeline-order
+  switch is automatic via M5a Task 10's adaptation.
+
+### Decisions made
+None new. All design decisions captured in
+`docs/superpowers/specs/2026-05-05-m5b-bias-fusion-eliminate-dropout-design.md`
+during brainstorming. This session executed the plan in
+`docs/superpowers/plans/2026-05-05-m5b-bias-fusion-eliminate-dropout.md`
+(7 tasks, ~14 commits including review-driven polish).
+
+### Pre-decided architectural calls (from spec §4)
+1. **Pipeline order: `[EliminateDropout, FuseLinearRelu]`.** Hardcoded
+   in `default_pipeline()` with explanatory comment. Fixed-point /
+   dependency-declaration deferred to M6+ when a third pass with
+   non-trivial coordination lands.
+2. **Profile keeps `BufferLoc::Alias(operand)` for Dropout.** Fallback
+   for `--no-passes` mode; profile remains complete relative to its
+   input grammar. A verification tool that fails on valid UIR isn't a
+   verification tool — it's a trap.
+3. **`--no-fuse` removed without alias.** v0 has no external consumers;
+   backward-compat aliases here would be cargo-cult.
+4. **`--passes` is filter-only, canonical order enforced.** Reorder
+   mode (B-variant) deferred to M6+ if a real research case demands it.
+5. **No shared helper for victim/remap pattern.** Two passes duplicate
+   the rebuild skeleton intentionally — "three strikes then refactor"
+   rule. EliminateDropout's doc-comment flags this for the M6+ author.
+
+### Problems encountered
+- None blocking. The spec went through five review rounds during
+  brainstorming (user caught three placeholder/contradiction issues,
+  one E0505 borrow-checker bug in the pseudocode, and one
+  cross-reference typo before the plan was written). All five fixed
+  inline before implementation began.
+- Implementation surfaced one emergent breakage at Task 3: the M5a
+  CLI smoke test `compile_default_runs_fusion` asserted the
+  single-pass `applied passes:` string, which broke once
+  `default_pipeline()` grew a second pass. Implementer fixed inline
+  to keep the workspace green at every commit (sensible deviation
+  from the original task scope).
+- Test count finished at 188 (matches plan target exactly: 173 + 15).
+
+### Known tech debt (carried forward)
+1. **Profile guide doc updates** (`docs/profile_guide/arm64.md`):
+   bias-aware fusion section, `--no-passes` / `--passes` documentation,
+   EliminateDropout removal note. → **M5c**.
+2. **`PROJECT_SPEC.md` milestones table** close-out for M5 → **M5c**.
+3. **Pass-shared helper for victim/remap pattern** — defer to M6+ when
+   the third pass with the same structural pattern lands ("three
+   strikes then refactor"). DEVLOG and EliminateDropout doc-comment
+   flag the rationale.
+4. **`--passes` reorder mode (B-variant)** — only if research / debugging
+   case demands it. M6+.
+5. **Pass dependency declaration / fixed-point iteration** — when a
+   third pass with non-trivial coordination lands. M6+.
+6. **Snapshot tests via `insta`** — substring asserts continue to suffice.
+7. **`debug_assert_eq!` for fused/unfused FnSig agreement** — currently
+   in both M5a and M5b integration tests; would be strictly safer as
+   `assert_eq!` (fires once per test invocation). Not a regression;
+   noted by code review as a pre-existing pattern.
+
+### Next step
+**Milestone 5b complete.** M5 remains technically open until M5c lands
+the documentation: profile guide updates for bias-aware fusion +
+EliminateDropout + the new CLI flags, plus the PROJECT_SPEC milestones
+close-out. M5c is small (docs only, no code changes) and can be a
+single-commit milestone.
+
+After M5c: brainstorm M6 in a fresh worktree once main is updated
+post-M5b-merge. M6 is open territory — possible directions: bare-metal
+target, attention-pattern fusion (`linear → softmax_max`), x86_64
+profile, or pass-helper extraction triggered by a third pass with the
+same victim/remap structural pattern.
+
+---
+
 ## 2026-05-04 — Milestone 5a closed: kernel fusion (linear → relu) + UIR-pass framework
 
 ### What was done

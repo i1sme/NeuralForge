@@ -1,8 +1,10 @@
 //! `linear → relu` fusion pass (spec §7).
 //!
 //! Finds nodes matching the pattern:
-//!   Linear (no bias=true, fused_post_ops empty, single consumer)
+//!   Linear (fused_post_ops empty, single consumer)
 //!     → Relu (any consumer count)
+//!
+//! Works for both bias=false (M5a) and bias=true (M5b).
 //!
 //! Rewrites the graph:
 //!   - Linear gets `fused_post_ops: vec![PostOp::Relu]`.
@@ -13,7 +15,7 @@
 
 use super::{PassError, UirPass};
 use crate::ir::types::{Node, NodeKind, PostOp};
-use crate::ir::{linear_has_bias, StdOp};
+use crate::ir::StdOp;
 use crate::{NodeId, Uir, UirModel};
 use std::collections::{HashMap, HashSet};
 
@@ -68,7 +70,6 @@ fn fuse_one_model(model: &UirModel) -> Result<UirModel, PassError> {
         let linear_node = &model.nodes[linear_id];
         let NodeKind::Op {
             op: StdOp::Linear,
-            attrs,
             fused_post_ops,
             ..
         } = &linear_node.kind
@@ -76,10 +77,7 @@ fn fuse_one_model(model: &UirModel) -> Result<UirModel, PassError> {
             continue;
         };
         if !fused_post_ops.is_empty() {
-            continue; // No double-fusion in M5a.
-        }
-        if linear_has_bias(attrs) {
-            continue; // M5a scope: bias-aware fusion is M5b.
+            continue; // No double-fusion.
         }
         if *consumer_count.get(&linear_id).unwrap_or(&0) != 1 {
             continue; // Linear must have exactly one consumer (this Relu).
@@ -421,17 +419,77 @@ mod tests {
     }
 
     #[test]
-    fn does_not_fuse_when_linear_has_bias() {
+    fn fuses_when_linear_has_bias() {
+        // M5b: bias-aware fusion. Linear[bias=true] → Relu now fuses.
+        // The asm path for fused-bias-relu already worked in M5a; only
+        // the pass-level guard `if linear_has_bias { continue; }` blocked
+        // it. After M5b lifts that guard, this case fuses.
         let uir =
             build("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2, bias=true] -> relu\n");
         let out = FuseLinearRelu.run(&uir).expect("ok");
         let m = &out.models[0];
-        // 3 nodes preserved.
-        assert_eq!(m.nodes.len(), 3);
-        let NodeKind::Op { fused_post_ops, .. } = &m.nodes[1].kind else {
-            panic!()
+
+        // Original: 3 nodes (input, linear, relu); fused: 2 (input, fused linear).
+        assert_eq!(m.nodes.len(), 2, "expected 2 nodes; got: {:?}", m.nodes);
+
+        let NodeKind::Op {
+            op,
+            fused_post_ops,
+            attrs,
+            ..
+        } = &m.nodes[1].kind
+        else {
+            panic!("expected Op node");
         };
-        assert!(fused_post_ops.is_empty());
+        assert_eq!(*op, StdOp::Linear);
+        assert_eq!(fused_post_ops, &vec![PostOp::Relu]);
+        // bias=true preserved on the fused Linear (fusion does not strip the bias attribute;
+        // emit_linear reads it to decide whether to emit the bias-add inline before fmax).
+        assert!(crate::ir::linear_has_bias(attrs));
+
+        // model.output points at the fused Linear.
+        assert_eq!(m.output, 1);
+    }
+
+    #[test]
+    fn fuses_chain_with_bias() {
+        // Chain where the second linear has bias=true. Both should fuse
+        // independently — covers that bias-aware fusion composes with
+        // multi-linear chains (the fusion of one Linear doesn't disable
+        // the next Linear's fusion candidacy).
+        let uir = build(
+            "model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[4] -> relu -> linear[2, bias=true] -> relu\n"
+        );
+        let out = FuseLinearRelu.run(&uir).expect("ok");
+        let m = &out.models[0];
+
+        // Original: 5 nodes (input, linear[4], relu, linear[2,bias], relu).
+        // After fusion: 3 nodes (input, fused linear[4], fused linear[2,bias]).
+        assert_eq!(m.nodes.len(), 3);
+
+        // First fused linear: no bias, has Relu post-op.
+        let NodeKind::Op {
+            fused_post_ops: f1,
+            attrs: a1,
+            ..
+        } = &m.nodes[1].kind
+        else {
+            panic!("expected Op at n1")
+        };
+        assert_eq!(f1, &vec![PostOp::Relu]);
+        assert!(!crate::ir::linear_has_bias(a1));
+
+        // Second fused linear: bias=true, has Relu post-op.
+        let NodeKind::Op {
+            fused_post_ops: f2,
+            attrs: a2,
+            ..
+        } = &m.nodes[2].kind
+        else {
+            panic!("expected Op at n2")
+        };
+        assert_eq!(f2, &vec![PostOp::Relu]);
+        assert!(crate::ir::linear_has_bias(a2));
     }
 
     #[test]
@@ -553,7 +611,8 @@ mod tests {
         };
 
         let out = FuseLinearRelu.run(&uir).expect("ok");
-        // 3 nodes preserved (softmax → relu is not fusable; only Linear → Relu fuses in M5a).
+        // 3 nodes preserved: softmax → relu is not a fusion pattern
+        // (only Linear → Relu — with or without bias, post-M5b — fuses).
         assert_eq!(out.models[0].nodes.len(), 3);
     }
 

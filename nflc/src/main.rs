@@ -7,7 +7,8 @@
 //! - `nflc parse <file> --uir`    → build and pretty-print the UIR
 //! - `nflc compile <file> --profile <name>` → lower UIR to assembly
 //! - `nflc compile <file> --profile <name> -o <file.s>` → lower UIR to assembly, write to file
-//! - `nflc compile <file> --profile <name> [--no-fuse]` → skip optimisation passes
+//! - `nflc compile <file> --profile <name> [--no-passes]` → skip optimisation passes
+//! - `nflc compile <file> --profile <name> [--passes <list>]` → run only listed passes
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -56,28 +57,28 @@ fn print_usage() {
     println!("  nflc parse   <file.nfl> --uir              Build and pretty-print the UIR");
     println!("  nflc compile <file.nfl> --profile <name>   Lower UIR to assembly");
     println!("                          [-o <file.s>]      Output path (default: stdout)");
-    println!("                          [--no-fuse]        Skip optimisation passes (debugging)");
+    println!("                          [--no-passes]      Skip optimisation passes (debugging)");
+    println!(
+        "                          [--passes <list>]  Run only listed passes (comma-separated)"
+    );
 }
 
 struct CompileArgs {
     path: PathBuf,
     profile: String,
     output: Option<PathBuf>,
-    no_fuse: bool,
+    no_passes: bool,
+    /// `None` = run `default_pipeline()`; `Some(list)` = filter to listed
+    /// names (canonical order preserved regardless of user order).
+    passes: Option<Vec<String>>,
 }
 
 fn parse_compile_args(args: &[String]) -> Result<CompileArgs, String> {
-    // args here is everything AFTER the "compile" subcommand keyword.
-    // First positional: path. Then sweep flags.
     let mut iter = args.iter();
     let path = iter
         .next()
         .ok_or_else(|| "compile: missing <file.nfl>".to_string())?
         .clone();
-    // The first positional must be a file path. If the user wrote a flag
-    // here (e.g. `nflc compile --no-fuse --profile arm64`), refuse early
-    // with a clear message instead of letting std::fs::read_to_string
-    // produce a confusing "cannot read --no-fuse" later.
     if path.starts_with('-') {
         return Err(format!(
             "compile: expected <file.nfl> as first argument, got flag '{path}'"
@@ -86,7 +87,8 @@ fn parse_compile_args(args: &[String]) -> Result<CompileArgs, String> {
 
     let mut profile: Option<String> = None;
     let mut output: Option<PathBuf> = None;
-    let mut no_fuse = false;
+    let mut no_passes = false;
+    let mut passes: Option<Vec<String>> = None;
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -102,8 +104,28 @@ fn parse_compile_args(args: &[String]) -> Result<CompileArgs, String> {
                     .ok_or_else(|| "-o requires a value".to_string())?;
                 output = Some(PathBuf::from(v));
             }
-            "--no-fuse" => {
-                no_fuse = true;
+            "--no-passes" => {
+                no_passes = true;
+            }
+            "--passes" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| "--passes requires a value".to_string())?;
+                if v.is_empty() {
+                    return Err(
+                        "--passes value cannot be empty (use --no-passes to skip the pipeline)"
+                            .to_string(),
+                    );
+                }
+                // Strict split on `,` — no whitespace trimming. Users invoke
+                // as --passes a,b or --passes "a,b" (no spaces inside).
+                let names: Vec<String> = v.split(',').map(str::to_owned).collect();
+                if names.iter().any(|n| n.is_empty()) {
+                    return Err(format!(
+                        "--passes value '{v}' contains an empty token (use --no-passes for empty)"
+                    ));
+                }
+                passes = Some(names);
             }
             other => {
                 return Err(format!("unknown flag: {other}"));
@@ -113,11 +135,45 @@ fn parse_compile_args(args: &[String]) -> Result<CompileArgs, String> {
 
     let profile = profile.ok_or_else(|| "compile: missing --profile <name>".to_string())?;
 
+    // Mutually exclusive: --no-passes and --passes can't coexist.
+    if no_passes && passes.is_some() {
+        return Err("--no-passes and --passes are mutually exclusive".to_string());
+    }
+
+    // Validate --passes content against the canonical pass registry.
+    // The list is for *validation only* here — `run_compile` builds the
+    // actual filtered pipeline from `default_pipeline()` independently.
+    if let Some(ref names) = passes {
+        let available_names: Vec<String> = compiler::passes::default_pipeline()
+            .iter()
+            .map(|p| p.name().to_owned())
+            .collect();
+
+        // Duplicate check.
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for n in names {
+            if !seen.insert(n.as_str()) {
+                return Err(format!("pass '{n}' specified more than once in --passes"));
+            }
+        }
+
+        // Unknown-name check (dynamic available list).
+        for n in names {
+            if !available_names.iter().any(|c| c == n) {
+                return Err(format!(
+                    "unknown pass '{n}' (available: {})",
+                    available_names.join(", ")
+                ));
+            }
+        }
+    }
+
     Ok(CompileArgs {
         path: PathBuf::from(path),
         profile,
         output,
-        no_fuse,
+        no_passes,
+        passes,
     })
 }
 
@@ -295,7 +351,8 @@ fn run_compile(args: CompileArgs) -> ExitCode {
         path,
         profile,
         output: out_path,
-        no_fuse,
+        no_passes,
+        passes,
     } = args;
 
     let source = match std::fs::read_to_string(&path) {
@@ -334,19 +391,53 @@ fn run_compile(args: CompileArgs) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // M5a: run UIR-passes pipeline (default), or skip if --no-fuse.
-    let post_pass_uir = if no_fuse {
-        eprintln!("note: passes skipped (--no-fuse)");
+    // M5b: run UIR-passes pipeline with optional filter, or skip
+    // entirely if --no-passes. See spec §9.3.
+    let post_pass_uir = if no_passes {
+        eprintln!("note: passes skipped (--no-passes)");
         uir
     } else {
-        let pipeline = compiler::passes::default_pipeline();
+        let canonical = compiler::passes::default_pipeline();
+        // Own the names (Vec<String>, not Vec<&str>) so the borrow on
+        // `canonical` doesn't outlive the move into either match arm —
+        // E0505 if Vec<&str> were used here (see spec §9.3).
+        let canonical_names: Vec<String> = canonical.iter().map(|p| p.name().to_owned()).collect();
+
+        let (pipeline, divergent) = match passes {
+            None => (canonical, false),
+            Some(user_names) => {
+                // Filter canonical to retain only user-named passes,
+                // preserving canonical order.
+                let user_set: std::collections::HashSet<&str> =
+                    user_names.iter().map(String::as_str).collect();
+                let filtered: Vec<Box<dyn compiler::passes::UirPass>> = canonical
+                    .into_iter()
+                    .filter(|p| user_set.contains(p.name()))
+                    .collect();
+                let canonical_filtered_names: Vec<&str> =
+                    filtered.iter().map(|p| p.name()).collect();
+                // Order divergence: only meaningful when len >= 2.
+                // user_names is Vec<String> (owned), canonical_filtered_names
+                // is Vec<&str> (borrowed). Project user_names through
+                // String::as_str into a Vec<&str> for type-aligned `!=`.
+                let div = user_names.len() >= 2
+                    && user_names.iter().map(String::as_str).collect::<Vec<_>>()
+                        != canonical_filtered_names;
+                (filtered, div)
+            }
+        };
+
         match compiler::passes::run_pipeline(&uir, &pipeline) {
             Ok(u) => {
-                // Emit the "applied" note only after the pipeline succeeds
-                // so an error path doesn't show a misleading success line
-                // ("applied passes: X" followed by "error: pass X failed").
+                // Applied-note emitted only on success (M5a polish kept).
                 let names: Vec<&str> = pipeline.iter().map(|p| p.name()).collect();
                 eprintln!("note: applied passes: {}", names.join(", "));
+                if divergent {
+                    eprintln!(
+                        "note: pass order is canonical ({}); user-specified order ignored",
+                        canonical_names.join(", ")
+                    );
+                }
                 u
             }
             Err(e) => {
