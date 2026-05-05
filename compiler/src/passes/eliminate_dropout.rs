@@ -65,11 +65,21 @@ fn eliminate_one_model(model: &UirModel) -> Result<UirModel, PassError> {
     for (old_id, node) in model.nodes.iter().enumerate() {
         if victims.contains(&old_id) {
             // Dropout's operand becomes Dropout's "result" id-wise.
-            // NFL grammar guarantees Dropout has exactly one operand.
-            let operand_old_id = match &node.kind {
-                NodeKind::Op { operands, .. } => operands[0],
+            // NFL grammar (§stdlib::Signature for `dropout`) guarantees
+            // exactly one operand; ir::build always produces
+            // `operands: vec![input_id]`. The debug_assert! catches any
+            // future grammar / hand-built UIR that violates the invariant
+            // before the index access panics.
+            let operands = match &node.kind {
+                NodeKind::Op { operands, .. } => operands,
                 _ => unreachable!("victim must be Op (filter-step established this)"),
             };
+            debug_assert_eq!(
+                operands.len(),
+                1,
+                "Dropout must have exactly one operand (NFL grammar invariant)"
+            );
+            let operand_old_id = operands[0];
             let operand_new_id = id_map[&operand_old_id];
             id_map.insert(old_id, operand_new_id);
             continue;
@@ -127,6 +137,8 @@ mod tests {
         }
     }
 
+    /// Build a `NodeKind::Input` node with a tensor type. Companion to
+    /// `op_node`; same private-test-helper rationale (spec §4.5).
     fn input_node(name: &str, shape: Vec<u64>) -> Node {
         Node {
             kind: NodeKind::Input { name: name.into() },
