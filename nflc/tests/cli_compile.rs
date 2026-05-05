@@ -27,9 +27,9 @@ fn compile_default_runs_fusion() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    // stderr has the applied-passes note.
+    // stderr has the applied-passes note (M5b: two passes in canonical order).
     assert!(
-        stderr.contains("note: applied passes: fuse_linear_relu"),
+        stderr.contains("note: applied passes: eliminate_dropout, fuse_linear_relu"),
         "stderr missing applied-passes note:\n{stderr}"
     );
 

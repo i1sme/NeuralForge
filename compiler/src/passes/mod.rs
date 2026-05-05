@@ -55,8 +55,21 @@ pub trait UirPass {
 }
 
 /// The default pipeline of passes, applied in order.
+///
+/// Order matters: `EliminateDropout` MUST run before `FuseLinearRelu`
+/// so that `linear → dropout → relu` collapses to `linear → relu`
+/// before the fusion attempt. Reversed order leaves the pattern
+/// unfused forever — `FuseLinearRelu` would see Linear's consumer
+/// as Dropout (not Relu) and decline to fuse, then `EliminateDropout`
+/// would remove the dropout, leaving an unfused `linear → relu`.
+///
+/// M6+ may introduce a fixed-point iteration or dependency-declaration
+/// mechanism if a third pass with non-trivial coordination lands.
 pub fn default_pipeline() -> Vec<Box<dyn UirPass>> {
-    vec![Box::new(fuse_linear_relu::FuseLinearRelu)]
+    vec![
+        Box::new(eliminate_dropout::EliminateDropout),
+        Box::new(fuse_linear_relu::FuseLinearRelu),
+    ]
 }
 
 /// Run a sequence of passes, threading the UIR through each. Stops on
