@@ -155,40 +155,47 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-**Milestone 5a complete.** UIR-pass infrastructure shipped: `compiler::passes`
-module with `UirPass` trait, `default_pipeline()`, `run_pipeline()`, and
-`FuseLinearRelu` — the first fusion pass. Pass turns `Linear (no bias=true,
-single consumer) → Relu` into `Linear { fused_post_ops: [Relu] }` with the
-Relu node removed and references remapped via fresh NodeIds. Profile/arm64
-emits `fmov s4, wzr` once at function-header time and inline `fmax s0, s0, s4`
-before store (recovers M4a's in-place relu performance).
+**Milestone 5b complete.** UIR-pass infrastructure now ships TWO passes:
+`EliminateDropout` (removes dropout nodes from the graph at inference
+time) and `FuseLinearRelu` (now bias-aware — fuses both `linear → relu`
+and `linear[bias=true] → relu`). `default_pipeline()` runs them in
+canonical order `[EliminateDropout, FuseLinearRelu]` so that
+`linear → dropout → relu` patterns collapse and fuse end-to-end.
 
-CLI `nflc compile` runs `default_pipeline()` between `ir::build` and
-`profiles_arm64::lower` by default; `--no-fuse` flag skips it for verification.
-Strict stdout/stderr discipline: stdout = asm only (pipeable to `cc`); stderr =
-`note:`/`error:` diagnostics. The applied-passes note is emitted only on
-pipeline success.
+CLI: `--no-fuse` renamed to `--no-passes` (clean break, no alias).
+New `--passes <list>` filter accepts a comma-separated subset of pass
+names; canonical order is enforced regardless of user-typed order, with
+a stderr `note:` when they diverge. Mutually exclusive with `--no-passes`.
+All flag validation uses the dynamic `default_pipeline()` registry, so
+M6+ pass additions surface in error messages automatically.
+
+Profile (`profiles/arm64`) requires zero changes for M5b. `emit_linear`
+already stacks `matmul → bias-add → fmax → store` correctly, and the
+`BufferLoc::Alias(operand)` machinery for Dropout stays as the fallback
+path for `--no-passes` and `--passes` filters that exclude
+`eliminate_dropout`.
 
 Op coverage unchanged from M4 (linear ± bias, relu, dropout, softmax).
-ABI unchanged. Stack allocation, non-leaf prologue, label namespacing — all
-unchanged. The `fused_vs_unfused_classifier_match_numerically` integration
-test confirms fusion preserves numerics bit-exactly via `assert_eq!` on
-all 320 output elements of `classifier.nfl`.
+The `fused_vs_unfused_mixed_args_match_numerically` integration test
+confirms bias-aware fusion preserves numerics bit-exactly via
+`assert_eq!` on every output element of `mixed_args.nfl`. M5a's
+`fused_vs_unfused_classifier_match_numerically` continues to pass
+(regression check).
 
 3-crate workspace (`compiler` lib, `nflc` bin, `profiles/arm64` lib).
-Production code std-only; `libloading` is a test-only dev-dep. **173 tests
-passing** across lexer, parser, IR, passes (10 fusion + 4 pipeline-level),
-profile codegen (3 fusion + existing M4b), CLI smoke (3), reference-
-validation, and FFI integration. `cargo build --workspace`,
-`cargo clippy --workspace --all-targets -- -D warnings`, and
-`cargo fmt --all -- --check` are clean. CI green.
+Production code std-only; `libloading` is a test-only dev-dep. **188 tests
+passing** across lexer, parser, IR, passes (11 fusion + 8 dropout +
+5 pipeline-level), profile codegen, CLI smoke (7), reference-validation,
+and FFI integration (2 bit-exact equivalence tests — classifier and
+mixed_args). `cargo build --workspace`, `cargo clippy --workspace
+--all-targets -- -D warnings`, and `cargo fmt --all -- --check` are
+clean. CI green.
 
-The immediate next step is **Milestone 5b — bias-aware fusion +
-EliminateDropout pass**: lift the M5a `linear_has_bias` restriction so
-`linear[bias=true] → relu` fuses (with bias-add inline before the post-op),
-add `EliminateDropout` pass (removes dropout from UIR via the same NodeId-
-remap mechanism), introduce `--passes=X,Y` CLI filter syntax. After M5b:
-`compiler::passes` has 2 passes; profile guide doc updates land in M5c.
+The immediate next step is **Milestone 5c — M5 close-out documentation**:
+update `docs/profile_guide/arm64.md` with the bias-aware fusion section,
+`--no-passes` / `--passes` flag documentation, and the EliminateDropout
+removal note; update `PROJECT_SPEC.md`'s milestones table to mark M5
+fully complete. M5c is docs-only (no code changes), single-commit scope.
 
 ---
 
