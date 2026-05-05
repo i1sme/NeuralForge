@@ -196,8 +196,8 @@ if linear_has_bias(attrs) {
 }
 ```
 
-That is the entire pass-side change. The remaining four victim criteria
-hold:
+That is the entire pass-side change. The remaining five victim criteria
+hold (all carried over from M5a, none modified):
 
 1. Op is `Relu`
 2. Operands.len() == 1
@@ -263,10 +263,13 @@ impl UirPass for EliminateDropout {
 /// NodeId is strictly less than the consumer's NodeId. `ir::build`
 /// guarantees this. Same precondition as `FuseLinearRelu::fuse_one_model`.
 ///
-/// Note: this 4-step skeleton (identify victims → rebuild with remap →
-/// remap inputs/output) duplicates `FuseLinearRelu`. Extraction into a
-/// shared helper is deferred to M6+ when a third pass with the same
-/// pattern lands ("three strikes then refactor").
+/// Note: this 3-step skeleton (identify victims → rebuild with remap →
+/// remap inputs/output) echoes `FuseLinearRelu::fuse_one_model`, which
+/// has an extra leading consumer-count step (FuseLinearRelu's victim
+/// criterion 5 — single-consumer Linear — needs the precomputed map;
+/// EliminateDropout has no consumer-count constraint and can skip it).
+/// Extraction into a shared helper is deferred to M6+ when a third pass
+/// with the same rebuild pattern lands ("three strikes then refactor").
 fn eliminate_one_model(model: &UirModel) -> Result<UirModel, PassError> {
     // Step 1: identify victims (every Dropout node).
     let victims: HashSet<NodeId> = model
@@ -438,7 +441,13 @@ let post_pass_uir = if no_passes {
             let canonical_filtered_names: Vec<&str> =
                 filtered.iter().map(|p| p.name()).collect();
             // Order divergence: only meaningful when len >= 2.
-            let div = user_names.len() >= 2 && user_names != canonical_filtered_names;
+            // Both sides must be the same type for `!=`. user_names is
+            // Vec<String> (owned, from CLI); canonical_filtered_names is
+            // Vec<&str> (borrowed from boxed traits). Project user_names
+            // through `as_str` to make the types align.
+            let div = user_names.len() >= 2
+                && user_names.iter().map(String::as_str).collect::<Vec<_>>()
+                    != canonical_filtered_names;
             (filtered, div)
         }
     };
