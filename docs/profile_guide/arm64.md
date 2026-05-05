@@ -1,17 +1,20 @@
 # `arm64` Profile — AArch64 Scalar Codegen
 
-> **Status:** M5b complete (NFL v0.1). Lowers `linear` (with or without
-> `bias=true`), `relu`, `dropout` (no-op pass-through at inference), and
-> `softmax` (numerically stable 3-pass via libm `expf`) to native AArch64
+> **Status:** M6 complete (NFL v0.1). Lowers `linear` (with or without
+> `bias=true`), `relu`, `dropout` (no-op pass-through at inference),
+> `softmax` (numerically stable 3-pass via libm `expf`), and now
+> `linear → softmax` fused via `PostOp::SoftmaxRow` to native AArch64
 > Mach-O assembly. The compiler runs the default UIR-pass pipeline
-> (`EliminateDropout` + `FuseLinearRelu`) before lowering, so
-> dropout-containing models reach the profile already with dropout
-> removed, and `linear → relu` (with or without bias) reach as a
-> single fused Linear with `fused_post_ops: [Relu]`. All 5 M3
-> positive fixtures + the M4a fixture run end-to-end via FFI; bit-exact
-> equivalence between fused and unfused asm proven on classifier.nfl
-> and mixed_args.nfl integration tests.
-> **Authoritative source:** `profiles/arm64/src/` and the M4a/M4b/M5a/M5b
+> (`EliminateDropout` + `FuseLinearRelu` + `FuseLinearSoftmax`) before
+> lowering, so dropout-containing models reach the profile already with
+> dropout removed, `linear → relu` (with or without bias) fuse to a
+> single Linear with `fused_post_ops: [Relu]`, and `linear → softmax`
+> (with or without bias) fuse to a single Linear with
+> `fused_post_ops: [SoftmaxRow]`. All 5 M3 positive fixtures + the M4a
+> fixture run end-to-end via FFI; bit-exact equivalence between fused
+> and unfused asm proven on classifier.nfl and mixed_args.nfl
+> integration tests.
+> **Authoritative source:** `profiles/arm64/src/` and the M4a/M4b/M5a/M5b/M6
 > specs under `docs/superpowers/specs/`.
 
 The `arm64` profile is the first concrete codegen profile in NeuralForge. It
@@ -102,7 +105,7 @@ downstream `match` consumers.
 | `Linear` (`bias=true`)     | ✅        | Matmul + per-output bias-add inline. With `fused_post_ops: [Relu]` (default-pipeline output of `linear[bias=true] → relu`): bias-add then inline `fmax` then store — see §4.9. |
 | `Relu`                     | ✅        | Standalone (only in `--no-passes` mode, or `--passes` filter excluding `fuse_linear_relu`): separate elementwise loop, copy-with-clamp src→dst (§4.2). Default mode: fused into preceding Linear via `FuseLinearRelu` UIR pass — see §4.9. |
 | `Dropout`                  | ✅        | Standalone (only in `--no-passes` mode, or `--passes` filter excluding `eliminate_dropout`): no asm, `BufferLoc::Alias(operand)` propagation (§4.5). Default mode: removed from UIR by `EliminateDropout` UIR pass before reaching the profile. |
-| `Softmax`                  | ✅        | Numerically stable 3-pass, `bl _expf` from libm.              |
+| `Softmax`                  | ✅        | Numerically stable 3-pass (max → exp → normalise), `bl _expf` from libm. With `--no-passes` or `--passes` filter excluding `fuse_linear_softmax`: emitted as a standalone function via `emit_softmax` (labels `.Lsm_*`; see §4.4). Default pipeline (M6+): fused into the preceding Linear's `emit_linear` via `PostOp::SoftmaxRow` (row-wise tail; labels `.Lfsmx_*`; see §4.10). |
 | `Input`                    | ✅        | Marker only — `BufferLoc::InputReg` (`x0`).                   |
 
 ### Codegen-decision: `linear[N]` without `bias` attribute
@@ -351,18 +354,182 @@ so `wzr` must be moved through `s4` first.
 The post-op match block in `ops/linear.rs` is `#[allow(unreachable_patterns)]`-
 wildcarded against future `PostOp` variants (see §5 for `LowerError::UnsupportedPostOp`).
 
+### 4.10 Fused linear → softmax (row-wise)
+
+When the compiler's `FuseLinearSoftmax` UIR pass identifies a
+`linear → softmax` (or `linear[bias=true] → softmax`) pattern with the
+linear having a single consumer (and an empty `fused_post_ops` — criterion 4
+prevents `[Relu, SoftmaxRow]` stacks at the pass level), it merges them into a
+single Linear node with `fused_post_ops: vec![PostOp::SoftmaxRow]`.
+
+**Structural difference from elementwise post-ops.** Unlike `PostOp::Relu`
+(which can be inlined element-by-element inside the j-loop), softmax requires
+the full row max to be known before any element can be exponentiated. This
+means the row-wise tail CANNOT be inlined inside the matmul j-loop. The
+implementation uses a **two-pass i-loop structure**:
+
+1. **Phase 1 (i-loop A — the matmul loop):** Runs first and writes the
+   complete `[B, N]` output matrix to the dst buffer. For `PostOp::SoftmaxRow`,
+   the inline post-op slot inside the j-loop is empty (`SoftmaxRow => {}`).
+   Bias-add (if `bias=true`) still happens in this phase, before the store.
+2. **Phases 2-4 (i-loop B — separate, runs after matmul completes):** A second
+   i-loop sweeps each row for the three softmax passes.
+
+**IMPLEMENTERS: do NOT attempt per-element softmax inlining inside the j-loop.**
+The row max is not available until the entire row has been written by Phase 1.
+Any attempt to fuse Phases 2-4 into the matmul j-loop will compute incorrect
+results.
+
+**Register convention (Phases 2-4).** All registers below are AAPCS64
+callee-saved, saved by the function prologue when `compute_callee_saved`
+returns `RegSet { d8_d9: true, x19_x23: true }`:
+
+| Register | Role                                                       |
+|----------|------------------------------------------------------------|
+| `x19`    | outer row index `i`                                        |
+| `x20`    | row base offset `i * N` (element units)                    |
+| `x21`    | inner column index `j`                                     |
+| `x22`    | src pointer (= `x12`, the matmul dst — in-place)           |
+| `x23`    | dst pointer (= `x12`, same buffer — in-place)              |
+| `s8`     | per-row maximum (callee-saved FP; saved as `d8`)           |
+| `s9`     | per-row sum (callee-saved FP; saved as `d9`)               |
+
+`x12` (the matmul dst pointer) is set before the matmul loop and is still
+valid when Phases 2-4 begin. `x22` and `x23` are both set to `x12` at the
+start of the softmax i-loop; the output buffer is touched in-place throughout.
+
+**ABI notes.**
+- `compute_is_leaf` returns `false` (i.e., `LeafKind::NonLeaf`) for any model
+  containing `PostOp::SoftmaxRow` in `fused_post_ops`, because Phase 3 emits
+  `bl _expf`.
+- `compute_callee_saved` requests `{ d8_d9: true, x19_x23: true }` — same
+  as standalone `softmax`.
+- `x6` (element offset, caller-saved) is recomputed after each `bl _expf`
+  call because `_expf` may clobber all caller-saved registers (`x0..x18`).
+
+**Memory access per row.**
+The dst buffer is accessed 6 times per row element across the four phases:
+
+| Phase | Access     | Count per element |
+|-------|------------|-------------------|
+| 1     | write       | 1                 |
+| 2     | read (max)  | 1                 |
+| 3     | read + write (exp, in-place) | 2  |
+| 4     | read + write (normalise, in-place) | 2 |
+
+No separate softmax buffer is allocated. All phases share the single matmul
+output buffer.
+
+**`-inf` initialisation.** The row max `s8` is initialised to negative infinity
+using the bit-pattern load (`0xFF800000`), not from `row[0]`. This matches
+`emit_softmax` (§4.4) and avoids an off-by-one if the first element is the
+maximum:
+
+```asm
+    movz    w0, #0x0000
+    movk    w0, #0xFF80, lsl #16   ; w0 = 0xFF800000 = f32 -inf
+    fmov    s8, w0
+```
+
+**Abbreviated asm sketch.** The label suffix `{lid}` is `{model_idx}_{linear_idx}`.
+
+```asm
+; ── Phase 1: matmul + optional bias-add (i-loop A) ──────────────────────────
+; Standard M5b emit_linear shape: nested i / j / k loops.
+; Writes out[i, 0..N] for each row i. PostOp::SoftmaxRow is a no-op here
+; (the inline slot inside the j-loop is empty); store happens normally.
+
+; ── Phases 2-4: row-wise softmax tail (i-loop B, after matmul) ───────────────
+    mov     x22, x12               ; src ptr = dst ptr (in-place)
+    mov     x23, x12               ; dst ptr = same buffer
+
+    mov     x19, #0                ; i = 0  (callee-saved)
+.Lfsmx_i_{lid}:
+    cmp     x19, #B
+    b.ge    .Lfsmx_i_end_{lid}
+
+    mov     x8, #N
+    mul     x20, x19, x8           ; x20 = i * N  (row offset in elements)
+
+    ; ── Phase 2: row-max → s8 ────────────────────────────────────────────────
+    movz    w0, #0x0000
+    movk    w0, #0xFF80, lsl #16   ; s8 = -inf (bit pattern 0xFF800000)
+    fmov    s8, w0
+    mov     x21, #0
+.Lfsmx_max_{lid}:
+    cmp     x21, #N
+    b.ge    .Lfsmx_max_end_{lid}
+    add     x6, x20, x21
+    ldr     s1, [x22, x6, lsl #2]
+    fmax    s8, s8, s1
+    add     x21, x21, #1
+    b       .Lfsmx_max_{lid}
+.Lfsmx_max_end_{lid}:
+
+    ; ── Phase 3: exp(x - s8) in-place, sum → s9 ─────────────────────────────
+    fmov    s9, wzr                ; s9 = 0.0
+    mov     x21, #0
+.Lfsmx_exp_{lid}:
+    cmp     x21, #N
+    b.ge    .Lfsmx_exp_end_{lid}
+    add     x6, x20, x21
+    ldr     s0, [x22, x6, lsl #2]
+    fsub    s0, s0, s8
+    bl      _expf                  ; clobbers x0..x18, s0..s7
+    add     x6, x20, x21          ; x6 is caller-saved; recompute after bl
+    str     s0, [x23, x6, lsl #2]
+    fadd    s9, s9, s0
+    add     x21, x21, #1
+    b       .Lfsmx_exp_{lid}
+.Lfsmx_exp_end_{lid}:
+
+    ; ── Phase 4: normalise by s9 ─────────────────────────────────────────────
+    mov     x21, #0
+.Lfsmx_norm_{lid}:
+    cmp     x21, #N
+    b.ge    .Lfsmx_norm_end_{lid}
+    add     x6, x20, x21
+    ldr     s0, [x23, x6, lsl #2]
+    fdiv    s0, s0, s9
+    str     s0, [x23, x6, lsl #2]
+    add     x21, x21, #1
+    b       .Lfsmx_norm_{lid}
+.Lfsmx_norm_end_{lid}:
+
+    add     x19, x19, #1
+    b       .Lfsmx_i_{lid}
+.Lfsmx_i_end_{lid}:
+```
+
+**Bias-aware fusion.** The `linear[bias=true] → softmax` pattern fuses
+identically: Phase 1 includes the bias-add step (as in §4.3) before the store.
+Phases 2-4 are unchanged — they operate on the post-bias output.
+
+**Stacking constraints.** `FuseLinearSoftmax` criterion 4 requires the Linear's
+`fused_post_ops` to be empty before the pass will fuse a Softmax onto it. This
+is the only guard against `[Relu, SoftmaxRow]` stacks — there is no defensive
+check inside `emit_linear`. The pass-level criterion is sufficient because
+`FuseLinearRelu` runs before `FuseLinearSoftmax` in `default_pipeline()`, and a
+Linear that has already been tagged with `[Relu]` fails criterion 4 and is left
+alone by `FuseLinearSoftmax`.
+
+**Label namespace.** Fused-softmax labels use the `.Lfsmx_*` prefix to avoid
+collision with standalone `.Lsm_*` labels from `emit_softmax` if both are
+present in the same model (e.g. a model with two softmax layers where only
+one is preceded by a fusable Linear).
+
 ---
 
 ## 5. Errors
 
 `profiles_arm64::lower` returns `Result<Asm, LowerError>`. `LowerError` is
-`#[non_exhaustive]`; consumers must keep a `_ => ...` arm. Variants in M4b:
+`#[non_exhaustive]`; consumers must keep a `_ => ...` arm. Variants in M6:
 
 | Variant                      | When                                                                                              |
 |------------------------------|---------------------------------------------------------------------------------------------------|
 | `UnsupportedOp { op, span }` | Defensive: codegen doesn't know how to lower `op`. All M5b ops are supported; M5c made `StdOp` `#[non_exhaustive]`, so this variant is now reachable through the wildcard arm in `walk_model` and `classify_op` for any future `StdOp` variant before codegen catches up. |
 | `ShapeNotConcrete { span }`  | Defensive: shape wasn't fully resolved by `ir::build`. Should be unreachable.                    |
-| `UnsupportedPostOp { op, span }` | M5a: post-op variant not supported by this profile. Fires when a future `PostOp` variant lands in `compiler::PostOp` before this profile knows how to emit it (e.g., `Tanh`, `Gelu`). The post-op match in `ops/linear.rs` has a wildcard arm that returns this variant; same forward-compat pattern as `UnsupportedOp`. |
+| `UnsupportedPostOp { op, span }` | M5a: post-op variant not supported by this profile. M6 added `PostOp::SoftmaxRow` as a concrete, handled implementation — this variant never fires for `SoftmaxRow` in the default pipeline. The wildcard arm in `ops/linear.rs` remains as a forward-compat guard: it fires for any future `PostOp` variant (e.g., `Tanh`, `Gelu`) that lands in `compiler::PostOp` before this profile catches up. Same pattern as `UnsupportedOp`. |
 
 Duplicate model name detection moved up to `compiler::ir::build` in M4b
 (see `BuildErrorKind::DuplicateModelName`); profiles no longer see
@@ -426,14 +593,27 @@ To add a new profile (e.g. `x86_64`, `riscv64`):
 
 ---
 
-## 8. Limitations (M5b)
+## 8. Limitations (M6)
 
-- **No SIMD.** Scalar throughout. NEON is M6+.
+- **No SIMD.** Scalar throughout. NEON is M7+.
 - **No matmul tiling / cache blocking.** Three-nested-loop matmul;
   `mul` for indexing; per-element load/store. Performance optimisation
-  is M6+.
+  is M7+.
 - **`bl _expf` per softmax element.** No batched / vectorised exp.
-  M6+.
+  M7+.
+- **Two `PostOp` variants are supported by `emit_linear`: `Relu`
+  (Elementwise — inline `fmax s0, s0, s4` inside the j-loop;
+  see §4.9) and `SoftmaxRow` (RowWise — three sweeps after the
+  matmul i-loop; see §4.10). Stacking variants (e.g. `[Relu, SoftmaxRow]`)
+  is prevented at the pass level by `FuseLinearSoftmax` criterion 4
+  (the Linear's `fused_post_ops` must be empty before the pass will
+  fuse a Softmax onto it).**
+- **Graph-level dead-op elimination is limited to `EliminateDropout`.**
+  No general DCE pass. Other no-op shapes (e.g. `linear[out_dim=K] →
+  linear[out_dim=N]` collapsing via matmul-of-matmul) are M7+.
+- **libm `expf` is the only `expf` source** for both standalone `softmax`
+  and `SoftmaxRow` post-op. Bare-metal targets requiring a
+  Taylor/minimax `expf` are M7+ work (spec §12 OQ-3).
 - **No bare-metal target.** Requires libm at link time. M7+ for a
   Taylor-series-`exp`-based bare-metal profile.
 - **Single-snippet error rendering for duplicate-model-name.** The
@@ -442,10 +622,3 @@ To add a new profile (e.g. `x86_64`, `riscv64`):
   applies).
 - **Integration tests run only on aarch64 hosts with `cc` available.**
   Skip with logged reason elsewhere.
-- **Only `linear → relu` and `linear[bias=true] → relu` fuse.**
-  Other elementwise patterns (`linear → tanh`, `linear → gelu`, etc.)
-  require new `PostOp` variants in `compiler::PostOp` and corresponding
-  emit branches in `emit_linear`. M6+.
-- **No graph-level dead-code elimination beyond `EliminateDropout`.**
-  Other no-op shapes (e.g. `linear[out_dim=K] → linear[out_dim=N]` collapsing
-  via matmul-of-matmul) are M6+.
