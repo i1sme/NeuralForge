@@ -30,7 +30,7 @@
 //! run by default, in order. `run_pipeline(uir, &passes)` threads the
 //! UIR through each pass; on the first error the pipeline halts.
 //!
-//! Currently registered: `EliminateDropout`, `FuseLinearRelu`.
+//! Currently registered: `EliminateDropout`, `FuseLinearRelu`, `FuseLinearSoftmax`.
 //! See `default_pipeline()` for the canonical order and the
 //! reasoning behind it.
 
@@ -59,18 +59,22 @@ pub trait UirPass {
 /// The default pipeline of passes, applied in order.
 ///
 /// Order matters: `EliminateDropout` MUST run before `FuseLinearRelu`
-/// so that `linear → dropout → relu` collapses to `linear → relu`
-/// before the fusion attempt. Reversed order leaves the pattern
-/// unfused forever — `FuseLinearRelu` would see Linear's consumer
-/// as Dropout (not Relu) and decline to fuse, then `EliminateDropout`
-/// would remove the dropout, leaving an unfused `linear → relu`.
+/// and `FuseLinearSoftmax` so that `linear → dropout → relu` and
+/// `linear → dropout → softmax` collapse before the fusion attempt.
+/// Reversed order leaves patterns unfused forever — the fusion passes
+/// would see Linear's consumer as Dropout (not Relu/Softmax) and
+/// decline to fuse, then `EliminateDropout` would remove the dropout,
+/// leaving an unfused chain.
 ///
-/// M6+ may introduce a fixed-point iteration or dependency-declaration
-/// mechanism if a third pass with non-trivial coordination lands.
+/// `FuseLinearRelu` runs before `FuseLinearSoftmax`; both are
+/// independent of each other (they match disjoint post-ops), so
+/// their relative order is a stability convention, not a correctness
+/// requirement.
 pub fn default_pipeline() -> Vec<Box<dyn UirPass>> {
     vec![
         Box::new(eliminate_dropout::EliminateDropout),
         Box::new(fuse_linear_relu::FuseLinearRelu),
+        Box::new(fuse_linear_softmax::FuseLinearSoftmax),
     ]
 }
 

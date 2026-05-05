@@ -3,7 +3,7 @@
 //! Pure analyzers over `UirModel`. No asm emission. Consumed by `codegen.rs`
 //! in Task 3.
 
-use compiler::{NodeId, NodeKind, StdOp, UirModel};
+use compiler::{Node, NodeId, NodeKind, StdOp, UirModel};
 
 /// Bytes per f32 element. M4b is f32-only project-wide. M5+ may parameterise.
 const BYTES_PER_ELEMENT: usize = 4;
@@ -75,17 +75,29 @@ pub fn assign_buffers(model: &UirModel) -> BufferAssignment {
     BufferAssignment { locs, stack_bytes }
 }
 
-/// True iff the model emits no `bl`/`blr` (i.e. no softmax in M4b).
+/// Returns true iff the node uses softmax in any form — either as a standalone
+/// `StdOp::Softmax` node or as a `PostOp::SoftmaxRow` fused into a Linear node.
+/// Both paths call `bl _expf`, making the function non-leaf.
+fn node_uses_softmax(node: &Node) -> bool {
+    use compiler::PostOp;
+    match &node.kind {
+        NodeKind::Op {
+            op: StdOp::Softmax, ..
+        } => true,
+        NodeKind::Op { fused_post_ops, .. } => fused_post_ops
+            .iter()
+            .any(|p| matches!(p, PostOp::SoftmaxRow)),
+        _ => false,
+    }
+}
+
+/// True iff the model emits no `bl`/`blr` (i.e. no softmax in any form).
+///
+/// After M6 fusion, a fused `linear → softmax` node carries
+/// `PostOp::SoftmaxRow` and still calls `bl _expf` — so such a model is
+/// not a leaf even though there is no standalone `StdOp::Softmax` node.
 pub fn compute_is_leaf(model: &UirModel) -> bool {
-    !model.nodes.iter().any(|n| {
-        matches!(
-            &n.kind,
-            NodeKind::Op {
-                op: StdOp::Softmax,
-                ..
-            }
-        )
-    })
+    !model.nodes.iter().any(node_uses_softmax)
 }
 
 /// Set of callee-saved registers used by the model's body. M4b: `{d8, d9}`
@@ -108,15 +120,7 @@ impl RegSet {
 }
 
 pub fn compute_callee_saved(model: &UirModel) -> RegSet {
-    let has_softmax = model.nodes.iter().any(|n| {
-        matches!(
-            &n.kind,
-            NodeKind::Op {
-                op: StdOp::Softmax,
-                ..
-            }
-        )
-    });
+    let has_softmax = model.nodes.iter().any(node_uses_softmax);
     RegSet {
         d8_d9: has_softmax,
         x19_x23: has_softmax,
