@@ -367,8 +367,9 @@ helpers established by M4b/M5b's `emit_linear`.
 
 ## 9. Test strategy
 
-**Unit tests** in `compiler/src/passes/fuse_linear_softmax.rs`
-(`#[cfg(test)] mod tests`). Minimum:
+**Per-pass unit tests** in
+`compiler/src/passes/fuse_linear_softmax.rs` (`#[cfg(test)] mod
+tests`). Minimum:
 
 1. `fuses_linear_softmax_no_bias` — `linear → softmax` produces one
    Linear with `fused_post_ops = [SoftmaxRow]`.
@@ -382,18 +383,27 @@ helpers established by M4b/M5b's `emit_linear`.
 4. `does_not_fuse_multi_consumer_linear` — Linear with two consumers
    (Softmax + something else) is left alone (criterion 1).
 5. `identity_when_no_softmax` — UIR without Softmax is a pass no-op.
+
+**Pipeline-integration test** in `compiler/src/passes/tests.rs`
+(the cross-pass test file established by M5b — its
+`pipeline_eliminates_dropout_before_fusing_linear_relu` lives
+there, not in `fuse_linear_relu.rs`):
+
 6. `pipeline_eliminates_dropout_before_fusing_linear_softmax` —
    `linear → dropout → softmax` after `[EliminateDropout,
    FuseLinearSoftmax]` produces one fused Linear. Mirror of M5b's
-   `pipeline_eliminates_dropout_before_fusing_linear_relu`.
+   `pipeline_eliminates_dropout_before_fusing_linear_relu`, kept
+   in the same file to preserve the convention that cross-pass
+   tests live in `passes/tests.rs`.
 
-Tests 1–4 would each construct UIR by hand under M5b's pre-helper
-convention. Combined with M5b's three existing manual-UIR tests,
-the first M6 test is the four-strikes moment — and so the helper
-extraction trigger fires *before* test 1 is written, not after
-test 4. In practice tests 1–4 are written through the new helpers
-from the start; the boilerplate is never duplicated four times.
-See §10 for the explicit order of operations.
+All six tests would construct UIR by hand under M5b's pre-helper
+convention (tests 1–5 in `fuse_linear_softmax.rs`, test 6 in
+`passes/tests.rs`). Combined with M5b's three existing manual-UIR
+tests, the first M6 test is the four-strikes moment — and so the
+helper extraction trigger fires *before* test 1 is written, not
+after the sixth boilerplate paste. In practice the six tests are
+written through the new helpers from the start; the boilerplate
+is never duplicated. See §10 for the explicit order of operations.
 
 **Existing test update** — `default_pipeline_is_canonical_order` in
 `compiler/src/passes/tests.rs` (added in M5b) currently asserts
@@ -405,8 +415,11 @@ regression during implementation.
 
 **CLI smoke** in `nflc/tests/cli.rs`: extend the existing
 `--passes` filter test with a `--passes fuse_linear_softmax` case.
-Asserts the compiled UIR contains the fused Linear after the
-filtered pipeline runs.
+Asserts the compiled assembly reflects the fused row-wise emit
+shape (substring-style stdout-asm check, mirroring M5b's `fmax
+s0, s0, s4` assertion style for fused-Relu). The exact substring
+to assert is decided in plan-phase Task 0 once the §8 sketch is
+verified against `emit_softmax`.
 
 **FFI integration** in `profiles/arm64/tests/integration.rs`: new
 `fused_vs_unfused_softmax_match_numerically`. Structurally a copy of
