@@ -39,6 +39,7 @@ use crate::Uir;
 
 pub mod eliminate_dropout;
 pub mod fuse_linear_relu;
+pub mod fuse_linear_softmax;
 
 #[cfg(test)]
 mod tests;
