@@ -1,0 +1,10 @@
+# Smallest fixture exercising linear[bias=true] -> softmax for M6.
+# Used by profiles/arm64/tests/integration.rs:
+#   fused_vs_unfused_softmax_match_numerically
+# to cover the bias-aware path through emit_linear's RowWise tail.
+
+model SoftmaxWithBias [batch=4, input=8, output=3]:
+    x: Tensor[batch, input]
+
+    x -> linear[16] -> relu
+      -> linear[output, bias=true] -> softmax

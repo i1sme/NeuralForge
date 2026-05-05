@@ -536,6 +536,112 @@ fn fused_vs_unfused_classifier_match_numerically() {
 }
 
 #[test]
+fn fused_vs_unfused_softmax_match_numerically() {
+    if !cfg!(target_arch = "aarch64") {
+        eprintln!("skip: requires aarch64");
+        return;
+    }
+    if !common::cc_available() {
+        eprintln!("skip: requires cc");
+        return;
+    }
+
+    // Cover BOTH no-bias and bias-aware fused-softmax paths.
+    for (fixture_path, fn_name, batch, input_dim, output_dim) in [
+        (
+            "../../tests/fixtures/classifier.nfl",
+            "nfl_forward_Classifier",
+            32_usize,
+            784_usize,
+            10_usize,
+        ),
+        (
+            "../../tests/fixtures/softmax_with_bias.nfl",
+            "nfl_forward_SoftmaxWithBias",
+            4_usize,
+            8_usize,
+            3_usize,
+        ),
+    ] {
+        let src =
+            std::fs::read_to_string(fixture_path).unwrap_or_else(|e| panic!("{fixture_path}: {e}"));
+        let ast = compiler::parse(&src).unwrap();
+        let uir = compiler::ir::build(&ast).unwrap();
+
+        let fused_uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+            .expect("pipeline ok");
+        let fused_asm = profiles_arm64::lower(&fused_uir).expect("fused lower");
+        let unfused_asm = profiles_arm64::lower(&uir).expect("unfused lower");
+
+        // Asm structural validation using ACTUAL label prefixes:
+        // fused RowWise tail uses .Lfsmx_*, standalone emit_softmax uses .Lsm_*.
+        assert!(
+            fused_asm.source.contains("bl      _expf"),
+            "{fixture_path}: fused asm missing bl _expf in row-wise tail"
+        );
+        assert!(
+            !fused_asm.source.contains(".Lsm_"),
+            "{fixture_path}: fused asm should NOT have standalone softmax loop labels (.Lsm_)"
+        );
+        assert!(
+            fused_asm.source.contains(".Lfsmx_"),
+            "{fixture_path}: fused asm missing row-wise softmax tail labels (.Lfsmx_)"
+        );
+        assert!(
+            unfused_asm.source.contains(".Lsm_"),
+            "{fixture_path}: unfused asm should have standalone softmax loop labels (.Lsm_)"
+        );
+
+        let label = fn_name.trim_start_matches("nfl_forward_");
+        let fused_dylib = common::compile_to_dylib(&fused_asm.source, &format!("fused_{label}"));
+        let unfused_dylib =
+            common::compile_to_dylib(&unfused_asm.source, &format!("unfused_{label}"));
+
+        let fused_lib = unsafe { libloading::Library::new(&fused_dylib).unwrap() };
+        let unfused_lib = unsafe { libloading::Library::new(&unfused_dylib).unwrap() };
+
+        // Dynamic symbol lookup — match M5b's idiomatic style.
+        let sym_bytes = format!("{fn_name}\0").into_bytes();
+        let fused_forward: libloading::Symbol<
+            unsafe extern "C" fn(*const f32, *const f32, *mut f32),
+        > = unsafe { fused_lib.get(&sym_bytes).unwrap() };
+        let unfused_forward: libloading::Symbol<
+            unsafe extern "C" fn(*const f32, *const f32, *mut f32),
+        > = unsafe { unfused_lib.get(&sym_bytes).unwrap() };
+
+        let params_len = fused_asm.functions[0].params_floats;
+        assert_eq!(
+            params_len, unfused_asm.functions[0].params_floats,
+            "{fixture_path}: fused/unfused param layout mismatch"
+        );
+
+        let mut input = vec![0.0f32; batch * input_dim];
+        for (i, v) in input.iter_mut().enumerate() {
+            *v = ((i as f32) % 100.0) * 0.001;
+        }
+        let mut params = vec![0.0f32; params_len];
+        for (i, v) in params.iter_mut().enumerate() {
+            *v = (((i as f32) % 1000.0) - 500.0) * 0.0001;
+        }
+
+        let mut fused_out = vec![0.0f32; batch * output_dim];
+        let mut unfused_out = vec![0.0f32; batch * output_dim];
+
+        unsafe {
+            fused_forward(input.as_ptr(), params.as_ptr(), fused_out.as_mut_ptr());
+            unfused_forward(input.as_ptr(), params.as_ptr(), unfused_out.as_mut_ptr());
+        }
+
+        for (i, (a, b)) in fused_out.iter().zip(unfused_out.iter()).enumerate() {
+            assert_eq!(
+                *a, *b,
+                "{fixture_path}: fused[{i}]={a} unfused[{i}]={b} — fusion changed numerics"
+            );
+        }
+    }
+}
+
+#[test]
 fn fused_vs_unfused_mixed_args_match_numerically() {
     if !cfg!(target_arch = "aarch64") {
         eprintln!("skip: requires aarch64");
