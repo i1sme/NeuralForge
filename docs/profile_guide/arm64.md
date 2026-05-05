@@ -1,12 +1,18 @@
 # `arm64` Profile — AArch64 Scalar Codegen
 
-> **Status:** M4b complete (NFL v0.1). Lowers `linear` (with or without
+> **Status:** M5b complete (NFL v0.1). Lowers `linear` (with or without
 > `bias=true`), `relu`, `dropout` (no-op pass-through at inference), and
 > `softmax` (numerically stable 3-pass via libm `expf`) to native AArch64
-> Mach-O assembly. All 5 M3 positive fixtures + the M4a fixture run
-> end-to-end via FFI.
-> **Authoritative source:** `profiles/arm64/src/` and the M4a/M4b specs under
-> `docs/superpowers/specs/`.
+> Mach-O assembly. The compiler runs the default UIR-pass pipeline
+> (`EliminateDropout` + `FuseLinearRelu`) before lowering, so
+> dropout-containing models reach the profile already with dropout
+> removed, and `linear → relu` (with or without bias) reach as a
+> single fused Linear with `fused_post_ops: [Relu]`. All 5 M3
+> positive fixtures + the M4a fixture run end-to-end via FFI; bit-exact
+> equivalence between fused and unfused asm proven on classifier.nfl
+> and mixed_args.nfl integration tests.
+> **Authoritative source:** `profiles/arm64/src/` and the M4a/M4b/M5a/M5b
+> specs under `docs/superpowers/specs/`.
 
 The `arm64` profile is the first concrete codegen profile in NeuralForge. It
 takes a `compiler::Uir` and emits AArch64 assembly (Mach-O syntax) callable as a
@@ -92,10 +98,10 @@ downstream `match` consumers.
 
 | StdOp                      | Supported | Notes                                                          |
 |----------------------------|-----------|----------------------------------------------------------------|
-| `Linear` (no `bias` attr)  | ✅        | Pure matmul.                                                  |
-| `Linear` (`bias=true`)     | ✅        | Matmul + per-output bias-add inline.                          |
-| `Relu`                     | ✅        | Separate elementwise loop, copy-with-clamp from src to dst.   |
-| `Dropout`                  | ✅        | No-op at inference: `BufferLoc::Alias(operand)` propagation.  |
+| `Linear` (no `bias` attr)  | ✅        | Pure matmul. With `fused_post_ops: [Relu]` (default-pipeline output of `linear → relu`): adds inline `fmax s0, s0, s4` post-op before store — see §4.9. |
+| `Linear` (`bias=true`)     | ✅        | Matmul + per-output bias-add inline. With `fused_post_ops: [Relu]` (default-pipeline output of `linear[bias=true] → relu`): bias-add then inline `fmax` then store — see §4.9. |
+| `Relu`                     | ✅        | Standalone (only in `--no-passes` mode, or `--passes` filter excluding `fuse_linear_relu`): separate elementwise loop, copy-with-clamp src→dst (§4.2). Default mode: fused into preceding Linear via `FuseLinearRelu` UIR pass — see §4.9. |
+| `Dropout`                  | ✅        | Standalone (only in `--no-passes` mode, or `--passes` filter excluding `eliminate_dropout`): no asm, `BufferLoc::Alias(operand)` propagation (§4.5). Default mode: removed from UIR by `EliminateDropout` UIR pass before reaching the profile. |
 | `Softmax`                  | ✅        | Numerically stable 3-pass, `bl _expf` from libm.              |
 | `Input`                    | ✅        | Marker only — `BufferLoc::InputReg` (`x0`).                   |
 
@@ -306,6 +312,45 @@ producing labels of the form:
 For single-model fixtures the `model_idx` is always `0`, so labels look
 like `.Lmm_i_0_0:`.
 
+### 4.9 Fused linear → relu (with optional bias-add)
+
+When the compiler's `FuseLinearRelu` UIR pass identifies a
+`linear → relu` (or `linear[bias=true] → relu`) pattern with the
+linear having a single consumer, it merges them into a single Linear
+node with `fused_post_ops: vec![PostOp::Relu]`. The `emit_linear`
+emitter consumes that field and produces:
+
+```asm
+    ; once at function-header time (before the matmul i-loop):
+    fmov    s4, wzr             ; materialise 0.0 — needed by fmax post-op below
+
+    ; ... (matmul i/j/k loops, accumulating sum in s0) ...
+    ; ... (k-loop end) ...
+
+    ; bias-add (if bias_offset.is_some()) — same as §4.3:
+    ldr     s5, [x14, x4, lsl #2]
+    fadd    s0, s0, s5
+
+    ; M5a NEW: post-ops inline, between bias-add and store.
+    ; For PostOp::Relu, the implementation emits one fmax per element:
+    fmax    s0, s0, s4          ; relu — clamps negative to 0.0
+
+    ; ... (store + j/i increments) ...
+```
+
+Order is fixed: `matmul → bias-add (if any) → post-ops → store`.
+This recovers M4a's in-place relu pattern and saves one
+intermediate buffer round-trip vs the unfused `Linear → Relu` chain
+(§4.1 + §4.2).
+
+The `fmov s4, wzr` materialisation happens **once** at function-header
+time, conditional on `fused_post_ops.iter().any(|p| matches!(p, PostOp::Relu))`
+— not per-element. AArch64 `fmax` requires both operands in FP regs,
+so `wzr` must be moved through `s4` first.
+
+The post-op match block in `ops/linear.rs` is `#[allow(unreachable_patterns)]`-
+wildcarded against future `PostOp` variants (see §5 for `LowerError::UnsupportedPostOp`).
+
 ---
 
 ## 5. Errors
@@ -315,8 +360,9 @@ like `.Lmm_i_0_0:`.
 
 | Variant                      | When                                                                                              |
 |------------------------------|---------------------------------------------------------------------------------------------------|
-| `UnsupportedOp { op, span }` | Defensive: codegen doesn't know how to lower `op`. All M4b ops are supported; this fires only if M5+ adds a new op before codegen catches up. |
+| `UnsupportedOp { op, span }` | Defensive: codegen doesn't know how to lower `op`. All M5b ops are supported; M5c made `StdOp` `#[non_exhaustive]`, so this variant is now reachable through the wildcard arm in `walk_model` and `classify_op` for any future `StdOp` variant before codegen catches up. |
 | `ShapeNotConcrete { span }`  | Defensive: shape wasn't fully resolved by `ir::build`. Should be unreachable.                    |
+| `UnsupportedPostOp { op, span }` | M5a: post-op variant not supported by this profile. Fires when a future `PostOp` variant lands in `compiler::PostOp` before this profile knows how to emit it (e.g., `Tanh`, `Gelu`). The post-op match in `ops/linear.rs` has a wildcard arm that returns this variant; same forward-compat pattern as `UnsupportedOp`. |
 
 Duplicate model name detection moved up to `compiler::ir::build` in M4b
 (see `BuildErrorKind::DuplicateModelName`); profiles no longer see
@@ -380,15 +426,26 @@ To add a new profile (e.g. `x86_64`, `riscv64`):
 
 ---
 
-## 8. Limitations (M4b)
+## 8. Limitations (M5b)
 
-- **No SIMD.** Scalar throughout. NEON is M5+/M6.
-- **No fusion.** `linear → relu` emits two separate loops. Fusion is M5.
-- **No optimisation passes.** Three-nested-loop matmul; `mul` for indexing;
-  per-element load/store; `bl _expf` per softmax element. Performance is M5+.
-- **No bare-metal target.** Requires libm at link time.
+- **No SIMD.** Scalar throughout. NEON is M6+.
+- **No matmul tiling / cache blocking.** Three-nested-loop matmul;
+  `mul` for indexing; per-element load/store. Performance optimisation
+  is M6+.
+- **`bl _expf` per softmax element.** No batched / vectorised exp.
+  M6+.
+- **No bare-metal target.** Requires libm at link time. M7+ for a
+  Taylor-series-`exp`-based bare-metal profile.
 - **Single-snippet error rendering for duplicate-model-name.** The
   `note: previously defined at` line is plain text, not a second `^`
-  snippet. Multi-snippet (rustc-style) upgrade is M4c-or-later.
+  snippet. Multi-snippet (rustc-style) upgrade is M4c-or-later (still
+  applies).
 - **Integration tests run only on aarch64 hosts with `cc` available.**
   Skip with logged reason elsewhere.
+- **Only `linear → relu` and `linear[bias=true] → relu` fuse.**
+  Other elementwise patterns (`linear → tanh`, `linear → gelu`, etc.)
+  require new `PostOp` variants in `compiler::PostOp` and corresponding
+  emit branches in `emit_linear`. M6+.
+- **No graph-level dead-code elimination beyond `EliminateDropout`.**
+  Other no-op shapes (e.g. `linear[out_dim=K] → linear[out_dim=N]` collapsing
+  via matmul-of-matmul) are M6+.
