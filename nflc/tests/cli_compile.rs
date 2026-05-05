@@ -137,10 +137,15 @@ fn compile_with_passes_filter_runs_only_selected() {
         stderr.contains("note: applied passes: fuse_linear_relu"),
         "stderr should show only fuse_linear_relu in applied list:\n{stderr}"
     );
-    // The other registered pass should NOT appear in the applied list.
+    // Specifically: the canonical two-pass form (which would start
+    // 'note: applied passes: eliminate_dropout, fuse_linear_relu') must
+    // not appear when the filter retained only fuse_linear_relu. We pin
+    // the exact prefix `note: applied passes: eliminate_dropout` rather
+    // than the bare name `eliminate_dropout` because the latter could
+    // also match unrelated diagnostic text in future stderr additions.
     assert!(
         !stderr.contains("note: applied passes: eliminate_dropout"),
-        "stderr should NOT have eliminate_dropout in applied list when filtered:\n{stderr}"
+        "stderr applied-passes note should NOT start with eliminate_dropout when filter retained only fuse_linear_relu:\n{stderr}"
     );
     // Fusion still applied.
     assert!(
