@@ -192,6 +192,15 @@ fn pipeline_eliminates_dropout_before_fusing_linear_relu() {
         m.nodes
     );
 
+    // n0 is still the original Input node (renumber is identity here
+    // because no input nodes were victims). Defensive check — guards
+    // against a future pass accidentally reordering nodes.
+    assert!(
+        matches!(m.nodes[0].kind, NodeKind::Input { .. }),
+        "n0 must be the Input node after pipeline; got: {:?}",
+        m.nodes[0].kind
+    );
+
     // The fused linear has fused_post_ops == [Relu].
     let NodeKind::Op {
         op, fused_post_ops, ..

@@ -30,8 +30,9 @@
 //! run by default, in order. `run_pipeline(uir, &passes)` threads the
 //! UIR through each pass; on the first error the pipeline halts.
 //!
-//! M5a registers exactly one pass: `FuseLinearRelu`. M5b adds
-//! `EliminateDropout`. Subsequent milestones add more.
+//! Currently registered: `EliminateDropout`, `FuseLinearRelu`.
+//! See `default_pipeline()` for the canonical order and the
+//! reasoning behind it.
 
 use crate::ast::Span;
 use crate::Uir;
