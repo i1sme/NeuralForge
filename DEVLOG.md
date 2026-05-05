@@ -14,6 +14,172 @@ Format for each entry:
 
 ---
 
+## 2026-05-05 — Milestone 5c closed: M5 cycle close-out (docs sync + small consistency fixes)
+
+### What was done
+- Applied 13 of 17 findings from the M5b post-merge holistic review
+  (Option B scope from the brainstorming session). 5 findings explicitly
+  deferred to M6+ (1.2 shared `Diagnostic` trait, 2.1 `BuildError::span()`
+  accessor, 4.1 test-helper extraction, 6.1 pass struct visibility,
+  DEVLOG-1 `debug_assert_eq!` → `assert_eq!`).
+- Code consistency (3 small Rust changes + cascade fixes the plan
+  didn't anticipate):
+  - `impl std::error::Error for PassError` (`compiler/src/passes/mod.rs`).
+  - `impl std::error::Error for LowerError` (`profiles/arm64/src/types.rs`).
+  - All five workspace error types now implement `std::error::Error`
+    uniformly (`BuildError`, `ParseError`, `LexError`, `PassError`,
+    `LowerError`).
+  - `nflc/src/main.rs` — four `&e.message` call sites (lines 253, 338,
+    343, 369) → `&e.to_string()` for `render_error_with_snippet`
+    consistency. The plan only cited line 253; code review caught the
+    other three.
+  - `#[non_exhaustive]` on `compiler::ir::stdlib::StdOp`. Cascade
+    surfaced THREE locations needing wildcard arms (the plan named one):
+    `profiles/arm64/src/codegen.rs::walk_model` (`LowerError::UnsupportedOp`),
+    `profiles/arm64/src/codegen.rs::classify_op` (also `UnsupportedOp`),
+    and `profiles/arm64/src/buffer.rs::assign_buffers` (defaults to
+    stack-allocated, identical to `Linear|Softmax` arm — `classify_op`
+    rejects unknown ops downstream so this allocation is harmless).
+    `LowerError::UnsupportedOp` lost its `#[allow(dead_code)]` attribute
+    (M4b-era — variant is now reachable through two cascade arms).
+  - All three wildcard arms use `#[allow(unreachable_patterns)]` —
+    same pattern M5a's `emit_linear` uses for the `PostOp` wildcard.
+- `PROJECT_SPEC.md`:
+  - Milestones table M5 row updated to "5a + 5b + 5c complete" with
+    accurate description of UIR-pass framework + two passes + CLI
+    flags + bit-exact integration tests.
+  - Open Questions section: retired two answered questions (NFL v0.1
+    grammar frozen at M1; static stack memory model decided at M4b).
+    Moved to a new "Decisions (formerly open, now resolved)"
+    sub-section preserving the historical record.
+- `docs/profile_guide/arm64.md` brought from M4b-era to M5b-current:
+  - Status header updated to M5b complete.
+  - §3 supported-ops table: Linear/Relu/Dropout rows extended to
+    document their default-fused vs `--no-passes` behavior.
+    §3 heading also lost the "in M4b" version tag (it was stale; the
+    table content carries sub-milestone provenance per row).
+  - New §4.9 "Fused linear → relu (with optional bias-add)"
+    documenting the `fmov s4, wzr` once + inline `fmax s0, s0, s4`
+    asm shape, the `matmul → bias-add → post-op → store` ordering,
+    and the wildcard for future `PostOp` variants.
+  - §5 errors table: added `UnsupportedPostOp` row (M5a) + annotated
+    `UnsupportedOp` with the M5c `StdOp` `#[non_exhaustive]` change.
+  - §8 Limitations rewrite: removed false claims ("No fusion", "No
+    optimisation passes"); added accurate M5b limitations (only
+    `Relu` post-op fuses; no graph-DCE beyond `EliminateDropout`).
+- `docs/language_reference/uir.md` brought from M3c-era to M5a-current:
+  - §1: `profiles/generic/` (never existed) replaced with `profiles/arm64/`
+    + post-M5b pipeline-default-passes context.
+  - §2 `NodeKind::Op` struct rendering: added the `fused_post_ops:
+    Vec<PostOp>` field with comment.
+  - §2 immutability rationale rewritten to describe the functional
+    pass model (M5+ passes return fresh `Uir`, not in-place edits).
+  - §7 "Mutation API" item: replaced "M5 introduces mutation" with
+    accurate description of the functional pass model.
+- `CLAUDE.md`:
+  - Design Principle 5 ("Human oversight"): replaced false "viewer
+    always exists" with accurate "every output must be inspectable;
+    `nflc parse --uir` is the current renderer until the M7+ viewer
+    tool ships". The `viewer/` directory is currently a `.gitkeep`
+    placeholder.
+  - "What NOT to Do" line about viewer: rephrased to cite the
+    `Display` impls in `compiler/src/ir/types.rs` as the actual
+    rendering surface to keep extending.
+  - "Adding a new architecture profile" recipe: replaced the
+    `profiles/generic/` reference (deleted before M4a shipped) with
+    `profiles/arm64/` + the actual public surface to replicate.
+  - "Current Status" section: rewritten to reflect M5 fully closed
+    (5a + 5b + 5c), the consistency improvements from M5c, and the
+    open M6 candidate directions.
+
+### Decisions made
+None new. M5c is purely drift-fix execution against the holistic-review
+punch-list. No architectural calls were made — the punch-list IS the
+spec, and Option B (drift-fix only, no test-helper extraction yet) was
+chosen with the user before plan-writing.
+
+### Holistic review process — worth recording for M6+
+The M5b post-merge holistic review (single thorough subagent dispatch,
+spec/structure/cross-cutting/docs/PR-body scan) found 17 findings vs.
+the per-task reviews' typical 1-3 findings each. Of the 17:
+- 13 were close-in-M5C (this milestone).
+- 4 are deferred M6+ items.
+- Almost half the findings were docs drift (4 in `arm64.md`, 3 in
+  `uir.md`, 2 in `CLAUDE.md`, 3 in `PROJECT_SPEC.md`) — the kind of
+  drift per-task reviews systematically don't catch because each task
+  reviews "did the code match the plan", not "did the docs catch up".
+
+Decision for M6+ workflow: schedule a holistic review at every
+milestone close-out, not just at v1 stability. Cost: one subagent
+dispatch (~5 min). Benefit: catches docs drift early, while context
+is fresh.
+
+### Problems encountered
+- One holistic-review finding (3.4: claimed `PROJECT_SPEC.md §4`
+  Compiler Pipeline diagram says "M5 introduces mutation") was a false
+  positive — that text doesn't exist in `PROJECT_SPEC.md`. The actual
+  mutation drift is in `docs/language_reference/uir.md` (closed by
+  Findings 7.6, 7.7 in this milestone). Reviewer probably conflated
+  the two files.
+- Task 1 plan under-specified Finding 5.1 cascade scope (named only
+  `walk_model`, missed `classify_op` and `buffer.rs::assign_buffers`).
+  Implementer caught all three when `cargo build` failed; commit
+  message was updated to document the actual file count (6 files,
+  not the planned 5).
+- Task 1 plan under-specified Finding 2.2 scope (named only line 253,
+  missed three more `&e.message` call sites at lines 338, 343, 369).
+  Code review caught the gap; followup commit closed it.
+- Both gaps were "punch-list-cited line was the obvious one; the rest
+  needed a grep". Lesson for M6+ planning: when applying findings with
+  citations to a single line, verify with `grep` that the cited
+  instance is the only one before scoping the task.
+
+### Known tech debt (carried forward to M6+)
+1. **Test-helper extraction** (`compiler/src/ir/test_utils.rs`):
+   `op_node` / `input_node` private helpers. The "three strikes" rule
+   fired with the third hand-built UIR test in M5b's
+   `pipeline_eliminates_dropout_before_fusing_linear_relu`. Holistic
+   review confirmed the threshold is met. Deferred to M6+ as the
+   first task because M6+ may surface a fourth use case that informs
+   the helper API shape (e.g., attention-pattern tests).
+2. **`BuildError::span()` accessor** to match `PassError`/`LowerError`'s
+   `span()` API. Non-breaking addition (`line`/`col` flat fields stay).
+3. **Shared `Diagnostic` trait** for the five error types. Defer until
+   either a fourth error type appears or the CLI acquires a generic
+   error-rendering path that currently duplicates per-type dispatch.
+4. **Pass struct visibility** (`EliminateDropout`, `FuseLinearRelu` →
+   `pub(crate)`?). Leave `pub` until v1 stability commitment forces a
+   decision.
+5. **`debug_assert_eq!` → `assert_eq!`** for the FnSig `params_floats`
+   agreement check in both `fused_vs_unfused_*_match_numerically`
+   integration tests. Pre-existing pattern; pre-M5b. Harden when next
+   integration test is added (M6+).
+6. **Holistic-review false-positive auditing** — find a way to
+   spot-check reviewer claims against actual file content before
+   integrating findings. Mitigates the rare 3.4-style conflation.
+7. **`format!("{op}")` vs `op.to_string()` style consistency** in the
+   profile's wildcard arms. M5a's `emit_linear` `PostOp` wildcard uses
+   `to_string()`; M5c's three new `StdOp` wildcards use `format!`.
+   Both work; harmonise in M6+ when the cascade arms get touched
+   again.
+
+### Next step
+**Milestone 5 fully complete.** Brainstorm M6 in a fresh worktree once
+M5c merges. Open scope; candidate directions (in priority order based
+on user-feedback signal):
+1. Test-helper extraction (~30 lines, M6 task 1) — closes the longest-
+   standing M5-era tech debt and creates a shared primitive M6+ tests
+   can build on.
+2. Attention-pattern fusion (`linear → softmax_max`, `linear → bias →
+   softmax`) — requires a third `PostOp` variant and possibly a
+   softmax-aware fusion pass.
+3. Bare-metal target (Taylor-series `expf` for softmax, no libm).
+4. x86_64 profile (AVX-512 / VNNI for matmul).
+5. `BuildError::span()` + shared `Diagnostic` trait if a fourth error
+   type appears.
+
+---
+
 ## 2026-05-05 — Milestone 5b closed: bias-aware fusion + EliminateDropout + --passes filter
 
 ### What was done

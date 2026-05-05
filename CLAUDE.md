@@ -95,8 +95,11 @@ NeuralForge/
 4. **AI-native syntax.** NFL is designed so LLMs can write and read it with minimal token overhead.
    Regular grammar, no exceptions, left-to-right pipeline notation.
 
-5. **Human oversight.** The viewer layer always exists. Any compiler output must be inspectable by
-   a human using the viewer tool.
+5. **Human oversight.** Every compiler output must be inspectable by a human. Until
+   the dedicated viewer tool ships (M7+), the `nflc parse <file.nfl> --uir` CLI
+   provides human-readable UIR pretty-printing via `Display for Uir`, including
+   M5a's `fused=[<list>]` suffix for fused operations. New UIR fields and node
+   kinds must extend the `Display` impls so this CLI rendering stays complete.
 
 6. **Kernel fusion by default.** The compiler must attempt to fuse consecutive elementwise
    operations. Unfused sequences are a performance bug.
@@ -146,7 +149,7 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ### When adding a new architecture profile:
 1. Create `profiles/<name>/` directory
-2. Implement the profile interface (see `profiles/generic/` as reference)
+2. Implement the profile interface (see `profiles/arm64/` as the canonical reference: `pub fn lower(&Uir) -> Result<Asm, LowerError>` plus the `Asm`, `FnSig`, `ParamSlot`, `ParamKind`, `LowerError` types)
 3. Add the profile to the compiler's profile registry
 4. Write integration tests using `tests/fixtures/`
 5. Document hardware-specific decisions in `docs/profile_guide/`
@@ -155,47 +158,67 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-**Milestone 5b complete.** UIR-pass infrastructure now ships TWO passes:
-`EliminateDropout` (removes dropout nodes from the graph at inference
-time) and `FuseLinearRelu` (now bias-aware — fuses both `linear → relu`
-and `linear[bias=true] → relu`). `default_pipeline()` runs them in
-canonical order `[EliminateDropout, FuseLinearRelu]` so that
-`linear → dropout → relu` patterns collapse and fuse end-to-end.
+**Milestone 5 fully complete (5a + 5b + 5c).** UIR-pass infrastructure ships
+two passes: `EliminateDropout` (removes dropout nodes from the graph at
+inference time) and `FuseLinearRelu` (bias-aware — fuses `linear → relu`
+and `linear[bias=true] → relu`). `default_pipeline()` runs them in canonical
+order `[EliminateDropout, FuseLinearRelu]` so that `linear → dropout → relu`
+patterns collapse and fuse end-to-end.
 
-CLI: `--no-fuse` renamed to `--no-passes` (clean break, no alias).
-New `--passes <list>` filter accepts a comma-separated subset of pass
-names; canonical order is enforced regardless of user-typed order, with
-a stderr `note:` when they diverge. Mutually exclusive with `--no-passes`.
-All flag validation uses the dynamic `default_pipeline()` registry, so
-M6+ pass additions surface in error messages automatically.
+CLI: `nflc compile` runs the default pipeline between `ir::build` and
+profile lowering. `--no-passes` skips the pipeline; `--passes <list>` runs a
+filtered subset (canonical order enforced regardless of user-typed order,
+with a stderr `note:` when they diverge). Mutually exclusive flags. All flag
+validation uses the dynamic `default_pipeline()` registry, so M6+ pass
+additions surface in error messages automatically.
 
-Profile (`profiles/arm64`) requires zero changes for M5b. `emit_linear`
-already stacks `matmul → bias-add → fmax → store` correctly, and the
-`BufferLoc::Alias(operand)` machinery for Dropout stays as the fallback
-path for `--no-passes` and `--passes` filters that exclude
-`eliminate_dropout`.
+Profile (`profiles/arm64`) is unchanged from M4b in source, but consumes the
+fused UIR by default. `emit_linear` stacks `matmul → bias-add → fmax (post-op)
+→ store` in one block; `BufferLoc::Alias(operand)` stays as the fallback for
+Dropout in `--no-passes` and exclude-eliminate_dropout filter modes.
 
-Op coverage unchanged from M4 (linear ± bias, relu, dropout, softmax).
-The `fused_vs_unfused_mixed_args_match_numerically` integration test
-confirms bias-aware fusion preserves numerics bit-exactly via
-`assert_eq!` on every output element of `mixed_args.nfl`. M5a's
-`fused_vs_unfused_classifier_match_numerically` continues to pass
-(regression check).
+Op coverage: linear (± bias), relu, dropout, softmax (NFL v0.1 inference-only).
+Two FFI integration tests pin bit-exact equivalence between fused and unfused
+asm — `fused_vs_unfused_classifier_match_numerically` (M5a) and
+`fused_vs_unfused_mixed_args_match_numerically` (M5b).
+
+Cross-cutting consistency (M5c): all five workspace error types (`BuildError`,
+`ParseError`, `LexError`, `PassError`, `LowerError`) implement
+`std::error::Error`. `StdOp` and `PostOp` are both `#[non_exhaustive]`. The
+profile-side `match op` blocks (in `walk_model`, `classify_op`, and
+`assign_buffers`) have wildcard arms routing future ops to
+`LowerError::UnsupportedOp`.
 
 3-crate workspace (`compiler` lib, `nflc` bin, `profiles/arm64` lib).
-Production code std-only; `libloading` is a test-only dev-dep. **188 tests
+Production code std-only; `libloading` is a test-only dev-dep. **189 tests
 passing** across lexer, parser, IR, passes (11 fusion + 8 dropout +
-5 pipeline-level), profile codegen, CLI smoke (7), reference-validation,
-and FFI integration (2 bit-exact equivalence tests — classifier and
-mixed_args). `cargo build --workspace`, `cargo clippy --workspace
---all-targets -- -D warnings`, and `cargo fmt --all -- --check` are
-clean. CI green.
+5 pipeline-level), profile codegen, CLI smoke (8), reference-validation,
+and FFI integration. `cargo build --workspace`, `cargo clippy --workspace
+--all-targets -- -D warnings`, and `cargo fmt --all -- --check` all clean.
+CI green.
 
-The immediate next step is **Milestone 5c — M5 close-out documentation**:
-update `docs/profile_guide/arm64.md` with the bias-aware fusion section,
-`--no-passes` / `--passes` flag documentation, and the EliminateDropout
-removal note; update `PROJECT_SPEC.md`'s milestones table to mark M5
-fully complete. M5c is docs-only (no code changes), single-commit scope.
+Documentation: `docs/profile_guide/arm64.md` covers the M5b-current asm
+patterns including fused linear→relu (§4.9) and the `UnsupportedPostOp` /
+`UnsupportedOp` error variants. `docs/language_reference/uir.md` reflects
+the `fused_post_ops` field on `NodeKind::Op` and the functional-pass model.
+`PROJECT_SPEC.md` milestones table marks M5 complete.
+
+The immediate next step is **Milestone 6 — open scope**. Candidate
+directions documented in DEVLOG (M5b/M5c carried-forward tech debt):
+- **Test-helper extraction** (`compiler/src/ir/test_utils.rs` for the
+  hand-built UIR pattern that hit "three strikes" in M5b).
+- **Bare-metal target** (Taylor-series `expf` for softmax, no libm
+  dependency) as a second arm64-flavoured profile.
+- **Attention-pattern fusion** (`linear → softmax_max`, `linear → bias →
+  softmax`) — requires a third PostOp variant and possibly a softmax-aware
+  fusion pass, which would naturally trigger the M5b-deferred shared
+  victim/remap helper extraction.
+- **x86_64 profile** (AVX-512 / VNNI for matmul).
+- **`BuildError::span()` accessor + shared `Diagnostic` trait** if a
+  fourth error type appears or generic CLI rendering arrives (M5c findings
+  1.2, 2.1).
+
+M6 brainstorming runs in a fresh worktree once M5c is merged.
 
 ---
 
@@ -205,7 +228,10 @@ fully complete. M5c is docs-only (no code changes), single-commit scope.
 - Do not add Python bindings or framework wrappers in v1
 - Do not let a profile depend on another profile's internals
 - Do not use implicit shape broadcasting — all shapes must be explicit
-- Do not skip viewer support — every new IR node must have a viewer rendering
+- Do not skip human-readable rendering — every new IR node, field, or NodeKind
+  variant must extend the `Display` impls in `compiler/src/ir/types.rs` so the
+  `nflc parse --uir` CLI continues to render the full UIR shape. The dedicated
+  viewer tool (M7+) will consume the same `Display` output as a starting point.
 
 ---
 
