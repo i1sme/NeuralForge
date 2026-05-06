@@ -158,70 +158,84 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-**Milestone 7 fully complete.** M7 closed the M6 holistic-review carry-
-forward Finding #1: extracted the shared 3-step rebuild skeleton
-(identify victims → rebuild with id-remap → remap inputs/output)
-that had been duplicated across three passes (`EliminateDropout`,
-`FuseLinearRelu`, `FuseLinearSoftmax`) into a `pub(crate)` helper at
-`compiler/src/passes/rewriter.rs`. Plan-as-data API: `RewritePlan`
-struct holds three HashMaps (`consumer_count` precomputed by
-`new(&model)`, `victims` and `producer_post_ops` declared by callers);
-`rewrite_model(plan, model)` consumes both inputs and returns a fresh
-`UirModel`. No closures, no traits — debuggability via `dbg!(&plan)`
-and move semantics throughout.
+**Milestone 8 fully complete.** Three feature commits landed:
 
-Each of the three migrated passes shrinks ~60% (~70-100 → 26-39 lines).
-Behavior is bit-exact equivalent to M5/M6 — verified by all 21 per-pass
-unit tests, all 6 cross-pass tests, and all 3 FFI integration tests
-passing without test-body modifications.
+- `feat(m8/arm64-fix): correct dropout-as-output codegen` — closes
+  HIGH-severity bug where Dropout placed at `model.output` left
+  the caller's output buffer uninitialised. New
+  `profiles/arm64/src/ops/dropout.rs::emit_dropout_copy` (mirror of
+  `emit_relu` minus `fmax`) triggered from a `BufferLoc::OutputReg`
+  branch in `walk_model::Dropout`. Only fires with `--no-passes`
+  + dropout-at-output; default pipeline's `EliminateDropout`
+  removes the dropout before codegen otherwise.
+- `feat(m8/arm64-fix): hoist dim immediates through emit_imm32` —
+  closes MEDIUM-severity bug where 17 cmp/mov immediate sites
+  used literal `#imm` encoding (12-bit cmp / 16-bit mov),
+  silently broken on any production-scale dim. Routed all 17
+  sites through `asm::emit_imm32` with two placement strategies:
+  Group A (bl-free loops) hoists materialise once outside the
+  loop label and uses register-form cmp inside; Group B
+  (bl-containing loops, `bl _expf` clobbers caller-saved x10)
+  re-materialises at each loop top.
+- `feat(m8/viewer): UIR-verbose annotation mode` — ships the
+  PROJECT_SPEC milestone row 8 viewer deliverable. New
+  `compiler::ir::types::{VerboseUir, VerboseModel, VerboseNode}`
+  newtype wrappers with their own `Display` impls. New
+  `Uir::calls_extern_math()` and `UirModel::calls_extern_math()`
+  UIR-level predicates. New `nflc parse --uir-verbose` flag,
+  mutually exclusive with `--uir`. Annotates with top-level
+  summary (model count, total nodes, calls-extern-math),
+  per-model summary (node count, calls-extern-math), and breaks
+  fused post-ops onto separate `-> fused: <op>` lines.
 
-Op coverage: linear (± bias), relu, dropout, softmax — unchanged from
-M6. NFL v0.1 inference-only.
+3-crate workspace (`compiler` lib, `nflc` bin, `profiles/arm64`
+lib). Production code std-only. **223 tests passing** across
+lexer, parser, IR, passes, profile codegen, CLI smoke, FFI
+integration, and viewer (predicate + snapshot). `cargo build
+--workspace`, `cargo clippy --workspace --all-targets -- -D
+warnings`, `cargo fmt --all -- --check`, and `cargo test
+--workspace` all clean.
 
-Cross-cutting consistency (carried from M5c/M6): all five workspace
-error types implement `std::error::Error`; `StdOp` and `PostOp` are
-`#[non_exhaustive]`; profile-side `match` blocks have wildcard arms.
-Helper visibility `pub(crate)` keeps the implementation detail inside
-the `passes` module — lifting to `compiler/src/ir/` is deferred until
-non-pass UIR-rewrite consumers appear (OQ-8).
+Documentation: `docs/language_reference/uir.md` gained a "Viewing
+UIR" section (§7) documenting `--uir` and `--uir-verbose` and the
+`calls_extern_math` semantics. `docs/profile_guide/arm64.md`
+gained a brief "M8 codegen hardening" section. `PROJECT_SPEC.md`
+M8 row replaced with the multi-clause description following the
+M5/M6/M7 granularity.
 
-3-crate workspace (`compiler` lib, `nflc` bin, `profiles/arm64` lib).
-Production code std-only. **208 tests passing** across lexer, parser,
-IR, passes (5 helper unit + 8 dropout + 11 fuse_linear_relu + 6
-fuse_linear_softmax including the new invariant 6 test + 6 cross-pass),
-profile codegen, CLI smoke, and FFI integration. `cargo build
---workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
-`cargo fmt --all -- --check`, and `cargo test --workspace` all clean.
-
-Documentation: `arm64.md` and `uir.md` unchanged from M6 (M7 is
-compiler-side only). `PROJECT_SPEC.md` milestones table M7 row marks
-"complete"; viewer relocated to M8 row.
-
-Atomic-task-pack convention from M6 holistic-review Finding #11
-demonstrated cleanly via 4 sequential green commits (helper-create
-+ three migrations). No asm-side ↔ pass-side mutual dependencies in
-M7, so the convention applies to internal task ordering only.
-
-The immediate next step is **Milestone 8 — open scope**.
+The immediate next step is **Milestone 9 — open scope**.
 Carry-forward candidate directions:
-1. **OQ-7 per-pass `Result<UirModel, PassError>` cleanup** — the
-   M7 helper went plain (no `Result`); per-pass functions still
-   wrap. Same YAGNI debt; trivial cleanup once a real `Err`-case
-   appears or boilerplate accumulates.
-2. **OQ-9 generalising `producer_post_ops: Vec<PostOp>` to
-   `enum NodeMutation`** — fires when a fourth pass needs non-
-   PostOp producer mutation (attr change, operand replacement).
-3. **OQ-8 lifting `rewriter.rs` to `compiler/src/ir/`** — fires
-   when a non-pass UIR-rewrite consumer appears.
-4. **Human-readable viewer v0.1** (PROJECT_SPEC M8 row).
-5. **Attention-pattern extension** — Q/K/V projections, scaled
-   dot-product, axis-N softmax. Requires NFL v0.2 grammar work.
-6. **`FuseLinearPostOp` consolidation** (M5c OQ-1) — fires on
-   third access pattern OR second RowWise post-op.
-7. **Bare-metal target** (M5c OQ-3) — Taylor-series `expf`.
-8. **`BuildError::span()` + `Diagnostic` trait** (M5c OQ-4).
+1. **OQ-NEW per-pass `node_uses_softmax`/`calls_extern_math`
+   deduplication.** The arm64-side `node_uses_softmax`
+   (`profiles/arm64/src/buffer.rs:81-94`) and the new compiler-
+   side `calls_extern_math` (`compiler/src/ir/types.rs`) duplicate
+   the same predicate logic. Trigger: next change to either
+   side's predicate (e.g. when `tanh`-via-libm or any other
+   extern-math op lands).
+2. **OQ-7 per-pass `Result<UirModel, PassError>` cleanup.** From
+   M7. The per-pass `eliminate_one_model`/`fuse_one_model`
+   functions return `Result` despite never producing `Err`.
+   Trigger: first real `Err`-case in pass-level logic.
+3. **OQ-8 lifting `compiler/src/passes/rewriter.rs` to
+   `compiler/src/ir/`.** From M7. Trigger: non-pass UIR-rewrite
+   consumer appears.
+4. **OQ-9 generalising `producer_post_ops: Vec<PostOp>` to
+   `enum NodeMutation`.** From M7. Trigger: fourth pass needs
+   non-PostOp producer mutation.
+5. **Profile-level viewer annotations** — per-node footprint,
+   stack frame, callee-saved set. Spec §3 Non-goals deferred
+   these. Trigger: user request OR x86_64 profile starts
+   (validates the profile-agnostic split).
+6. **`MACHO_SYM_PREFIX` rename** to `ARM64_SYM_PREFIX` or
+   per-OS abstraction. Trigger: second profile (x86_64 or
+   riscv64) starts.
+7. **Attention-pattern grammar extension** — Q/K/V projections,
+   scaled dot-product, axis-N softmax. Requires NFL v0.2
+   grammar work.
+8. **Bare-metal target** — Taylor-series `expf` (M5c OQ-3).
+9. **`BuildError::span()` + `Diagnostic` trait** (M5c OQ-4).
 
-M8 brainstorming runs in a fresh worktree once M7 merges.
+M9 brainstorming runs in a fresh worktree once M8 merges.
 
 ---
 
