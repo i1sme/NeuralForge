@@ -57,17 +57,12 @@ model Classifier [batch=32, input=784, output=10]:
 
 ## Where to start
 
-**To understand the project:**
-1. Read `PROJECT_SPEC.md` — it has the full architecture, design principles, and milestones
-2. Read `DEVLOG.md` — it tells you what has been done and what comes next
+**To understand the project:** read `PROJECT_SPEC.md` — it has the full
+architecture, design principles, and open questions.
 
-**To contribute or continue development:**
-1. Read `CLAUDE.md` — it explains the development workflow and non-negotiable rules
-2. Check `DEVLOG.md` for the latest "Next step" entry
-3. Follow the TDD workflow: red → green → refactor
-
-**To understand a design decision:**
-Look it up in `DEVLOG.md`. Every significant decision is recorded there with its reasoning.
+**To contribute:** read `CONTRIBUTING.md` for the development workflow,
+then `DEVLOG.md` to understand what has been done and why. Every significant
+design decision is recorded there with its reasoning.
 
 ---
 
@@ -99,11 +94,10 @@ What's working today:
 - 223 tests passing across the workspace; CI green; `cargo fmt`,
   `cargo clippy -D warnings`, `cargo test --workspace` all clean
 
-Next: scope for **Milestone 9** is decided by selecting one of three open
-axes — codegen breadth, modelling depth, or deployment reach — described
-in [`PROJECT_SPEC.md` §"Strategic Roadmap"](PROJECT_SPEC.md#strategic-roadmap).
-The chosen axis seeds a fresh brainstorming round rather than picking from
-a flat list of follow-ups.
+Active development continues along three strategic axes — codegen breadth
+(x86_64 profile), modelling depth (NFL v0.2 / attention), and deployment
+reach (bare-metal `expf`) — tracked in
+[`PROJECT_SPEC.md` §"Strategic Roadmap"](PROJECT_SPEC.md#strategic-roadmap).
 
 NFL training syntax (loss, optimiser) is deferred to v0.2.
 
