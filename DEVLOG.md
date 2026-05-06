@@ -14,6 +14,174 @@ Format for each entry:
 
 ---
 
+## 2026-05-06 — Milestone 7 closed: shared 3-step rebuild helper extraction
+
+### What was done
+- **`compiler/src/passes/rewriter.rs`** — new shared helper module
+  (`pub(crate)`). `RewritePlan` struct with `#[derive(Debug)]` holds
+  three HashMaps (`consumer_count`, `victims`, `producer_post_ops`);
+  constructor `RewritePlan::new(&model)` precomputes `consumer_count`.
+  Function `rewrite_model(plan, model) -> UirModel` (plain return, no
+  `Result`) walks `model.nodes` by old NodeId in topological order,
+  branches on victim membership (redirects via `id_map`), takes
+  ownership of non-victims and remaps their operands, optionally
+  appends PostOps to producers, finally remaps `model.inputs` and
+  `model.output`.
+- **5 helper unit tests** in `rewriter.rs::tests` — pin behavior
+  independent of any migrated pass: identity-on-empty-plan, victim
+  drop + consumer redirect (4-node topology demonstrates direct
+  operand-remap, not just model.output), PostOp push to producer,
+  `model.inputs`/output remap, consumer count precomputation
+  (including the absent-from-map orphan case).
+- **Three pass migrations** (atomic units 2-4 of the M7 atomic-task-
+  pack convention):
+  - `EliminateDropout::eliminate_one_model` shrinks ~65 → ~26 lines.
+    No producer mutation — just Dropout victims redirecting to their
+    sole operand.
+  - `FuseLinearRelu::fuse_one_model` shrinks ~99 → ~39 lines. All
+    five victim criteria preserved (Relu kind, single operand, Linear
+    producer, empty `fused_post_ops`, single consumer); pushes
+    `PostOp::Relu` to producer.
+  - `FuseLinearSoftmax::fuse_one_model` shrinks ~94 → ~39 lines.
+    Mirror of FuseLinearRelu; pushes `PostOp::SoftmaxRow`.
+  - All three pass functions changed signature `&UirModel` → `UirModel`
+    (consume); `Pass::run` clones each model before calling.
+  - All 21 per-pass unit tests (8 dropout + 11 relu + 5 softmax) +
+    6 cross-pass tests + 3 FFI integration tests pass without test-
+    body modifications. Bit-exact behavior preservation verified.
+- **§8 invariant 6 unit test** —
+  `leaves_linear_dropout_softmax_chain_untouched` in
+  `fuse_linear_softmax::tests`. Closes M6 holistic-review Finding #7
+  (coverage gap for the "FuseLinearSoftmax-without-EliminateDropout"
+  degradation case).
+- **`eliminate_dropout.rs:36-49` doc-comment** retired — the
+  M7-deferred trigger fired and was closed by Task 1's helper.
+  Replaced with a forward-pointer to `compiler::passes::rewriter`.
+- **Drift-fix commit** (`4974cd7`) closed two close-in-M7 holistic-
+  review findings: stale "step 3" doc-comment references in
+  fuse_linear_relu.rs and fuse_linear_softmax.rs (replaced with
+  forward-pointers to `rewriter::rewrite_model`); three
+  `#[allow(dead_code)]` attributes in rewriter.rs removed (no longer
+  needed after Tasks 2-4 wired up all callers).
+- **Documentation closeout:** `PROJECT_SPEC.md` M7 row added marked
+  "complete"; "Human-readable viewer v0.1" relocated from M7 to M8.
+  `CLAUDE.md` "Current Status" rewritten reflecting M7 closure +
+  carry-forward candidate list. `CLAUDE.md` Design Principle 5
+  reference `(M7+)` → `(M8+)`.
+
+### Decisions made
+- **Plan-as-data API** chosen over closure-based or trait-based
+  alternatives. Plan reads naturally as "decision-table the code
+  already implicitly built"; debuggable as a value (`dbg!(&plan)`
+  works because `RewritePlan` derives `Debug`); no heap allocation
+  in the hot path. See spec §4.1 for rejected alternatives.
+- **No lifetime parameter on `RewritePlan`** — struct holds only
+  computed/declared data, not borrows. The `&UirModel` reference
+  passed to `new()` is borrowed only during construction.
+- **`rewrite_model` consumes both `plan` and `model`** (move
+  semantics). `Pass::run` clones each model at the boundary before
+  handing ownership to the consuming per-pass function.
+- **`consumer_count` always computed in `new()`** (eager, simple)
+  rather than lazy. EliminateDropout pays the O(N) walk it doesn't
+  use — negligible cost. FuseLinearRelu/FuseLinearSoftmax both read
+  the field for the single-consumer guard.
+- **`rewrite_model` returns plain `UirModel`** — no `Result`
+  wrapping. Helper has no real `Err` cases; preconditions are
+  caller's responsibility, violations panic via `id_map[…]` lookup.
+  Same YAGNI principle that ruled out defensive runtime checks.
+  Per-pass functions retain `Result` for `Pass::run` compatibility
+  (one-line `Ok(...)` wrap at the boundary).
+- **Field name `victims`** (not `redirects`) — matches spec/code
+  vocabulary; the keys ARE victims, the values tell what their
+  references redirect to.
+- **Migration order EliminateDropout → FuseLinearRelu →
+  FuseLinearSoftmax** — simplest first (lowest blast radius if
+  helper has bugs), largest test surface second (catches integration
+  mismatches), mirror third.
+- **Atomic-task-pack convention applied** — 4 sequential clean
+  commits (helper-create + three migrations) with workspace green
+  between each. Demonstrates M6 holistic-review Finding #11.
+
+### Problems encountered
+- **Brainstorm point-1 confusion:** during spec review on the M7
+  worktree, an early review reading was based on M5c-stale `origin/main`
+  state and flagged `FuseLinearSoftmax` as "doesn't exist yet". M6 had
+  already merged via PR #14 (`2f95203`); the M7 worktree HEAD had the
+  file. Resolution: when reviewing brainstorms on feature branches,
+  explicitly verify "what's in HEAD worktree" rather than relying on
+  a main-branch state mental model.
+- **Plan draft used `redirects` field name** before the user proposed
+  `victims` (more semantic). Renamed throughout.
+- **Plan draft had `RewritePlan<'a>` with `model: &'a UirModel`
+  field** — unnecessary lifetime. Caught and dropped before plan-write.
+- **Plan draft `rewrite_model` returned `Result`** — same YAGNI debt
+  as defensive runtime checks. Switched to plain `UirModel` before
+  plan-write.
+- **Helper unit test #2 originally used topology `Input → A → B`**
+  (no Op-level operand consumer of A) — would pass even if the
+  rewriter's operand-remap loop had a bug. Topology corrected to
+  `Input → A → B → C` before plan-write.
+- **§9 Task 2 test missed `use crate::Uir;` in inline imports** —
+  would have compiled via module-level convention, but spec wasn't
+  self-documenting. Fixed before plan-write.
+- **§8 migration prose said `eliminate_one_model(model)?`** instead
+  of `eliminate_one_model(model.clone())?` after the consume-model
+  signature change. E0507 risk. Fixed before plan-write.
+
+### Holistic review process — worth recording for M8+
+The M7 holistic review (single subagent dispatch, spec / structure /
+cross-cutting / docs / process scan) found 13 findings — slightly
+fewer than M6's 15. Of the 13:
+- 6 close-in-M7 (4 docs closeout + 2 drift-fix in `4974cd7`).
+- 0 carry-forward to M8+.
+- 7 acceptable deviations or process notes (line-count drift, plan
+  test-count drift, commit-message typo, M5b version tags as historical
+  pinpoints, profile unchanged, Debug-derive-beyond-template,
+  atomic-task-pack process success).
+
+Decision for M8+ continues: holistic review at every milestone close-out.
+Cost ~5 minutes of subagent time; benefit: catches docs drift early.
+
+### Known tech debt (carried forward to M8+)
+1. **OQ-7 — Per-pass `Result<UirModel, PassError>` cleanup.** The
+   per-pass `eliminate_one_model`/`fuse_one_model` functions return
+   `Result` despite never producing `Err`. Same YAGNI debt as the
+   M7-resolved `rewrite_model` Result. *Trigger:* first real
+   `Err`-case in pass-level logic, OR discomfort from `Ok(...)`
+   boilerplate accumulates across many passes. *Action:* refactor
+   per-pass to plain `UirModel`; `Pass::run` wraps once.
+2. **OQ-8 — Lifting `rewriter.rs` to `compiler/src/ir/`.**
+   *Trigger:* a non-pass UIR-rewrite consumer (UIR-build phase
+   optimisation, viewer renderer). *Action:* move module, change
+   visibility.
+3. **OQ-9 — Generalising `producer_post_ops: Vec<PostOp>` to
+   `enum NodeMutation`.** *Trigger:* fourth pass needs producer
+   mutation other than PostOp-push. *Action:* introduce
+   `enum NodeMutation`, replace map value type.
+4. **Carried over from M5c/M6** (still open per their respective
+   triggers): OQ-1 (`FuseLinearPostOp` consolidation), OQ-2
+   (type-level `PostOpKind`), OQ-3 (bare-metal `expf`), OQ-4
+   (`BuildError::span()` + `Diagnostic` trait), OQ-6
+   (`format!`/`to_string()` style consistency), M6 carry-forward
+   item 2 (`_expf` AAPCS64 smoke test), M6 carry-forward item 4
+   (CLI smoke future-proofing).
+
+### Next step
+**Milestone 7 fully complete.** Brainstorm M8 in a fresh worktree
+once M7 merges. Open scope; candidate directions:
+1. **OQ-7 per-pass `Result` cleanup** — small, decisive YAGNI
+   closeout matching M7's helper-side change.
+2. **Human-readable viewer v0.1** (PROJECT_SPEC M8 row).
+3. **OQ-9 `NodeMutation` generalisation** — fires when a fourth
+   pass needs non-PostOp mutation.
+4. **`FuseLinearPostOp` consolidation** (OQ-1) — fires on next
+   RowWise post-op.
+5. **Bare-metal target** (OQ-3).
+6. **`BuildError::span()` + `Diagnostic` trait** (OQ-4).
+7. **Attention-pattern extension** — biggest scope; needs NFL v0.2.
+
+---
+
 ## 2026-05-05 — Milestone 6 closed: attention-pattern fusion (`linear → softmax`)
 
 ### What was done

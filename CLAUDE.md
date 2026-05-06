@@ -96,7 +96,7 @@ NeuralForge/
    Regular grammar, no exceptions, left-to-right pipeline notation.
 
 5. **Human oversight.** Every compiler output must be inspectable by a human. Until
-   the dedicated viewer tool ships (M7+), the `nflc parse <file.nfl> --uir` CLI
+   the dedicated viewer tool ships (M8+), the `nflc parse <file.nfl> --uir` CLI
    provides human-readable UIR pretty-printing via `Display for Uir`, including
    M5a's `fused=[<list>]` suffix for fused operations. New UIR fields and node
    kinds must extend the `Display` impls so this CLI rendering stays complete.
@@ -158,81 +158,70 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-**Milestone 6 fully complete.** M6 extended the M5 kernel-fusion framework
-one step: `compiler::ir::PostOp::SoftmaxRow` (the third post-op variant
-on the `#[non_exhaustive]` enum), `compiler::passes::FuseLinearSoftmax`
-(bias-aware UIR pass parallel to `FuseLinearRelu`), and a row-wise emit
-branch in `profiles/arm64::emit_linear` that runs a 3-pass softmax tail
-(row-max → exp+sum → normalise) in-place on the linear output buffer
-after the matmul i-loop completes.
+**Milestone 7 fully complete.** M7 closed the M6 holistic-review carry-
+forward Finding #1: extracted the shared 3-step rebuild skeleton
+(identify victims → rebuild with id-remap → remap inputs/output)
+that had been duplicated across three passes (`EliminateDropout`,
+`FuseLinearRelu`, `FuseLinearSoftmax`) into a `pub(crate)` helper at
+`compiler/src/passes/rewriter.rs`. Plan-as-data API: `RewritePlan`
+struct holds three HashMaps (`consumer_count` precomputed by
+`new(&model)`, `victims` and `producer_post_ops` declared by callers);
+`rewrite_model(plan, model)` consumes both inputs and returns a fresh
+`UirModel`. No closures, no traits — debuggability via `dbg!(&plan)`
+and move semantics throughout.
 
-CLI: `default_pipeline()` is now `[EliminateDropout, FuseLinearRelu,
-FuseLinearSoftmax]`. `--no-passes` and `--passes <list>` continue to
-work without code changes — the filter reads pass names dynamically
-from the registry.
+Each of the three migrated passes shrinks ~60% (~70-100 → 26-39 lines).
+Behavior is bit-exact equivalent to M5/M6 — verified by all 21 per-pass
+unit tests, all 6 cross-pass tests, and all 3 FFI integration tests
+passing without test-body modifications.
 
-Profile (`profiles/arm64`): the RowWise emit branch uses callee-saved
-registers (s8 = row max, s9 = row sum, x19/x20/x21 for i/row-base/j,
-x22/x23 for src/dst pointers — all preserved across `bl _expf` per
-AAPCS64). `compute_is_leaf` and `compute_callee_saved` were extended
-via a shared `node_uses_softmax(node)` helper to detect both standalone
-`StdOp::Softmax` and `Linear` with `PostOp::SoftmaxRow` in
-`fused_post_ops`. Labels prefixed `.Lfsmx_*` to avoid collision with
-the standalone-softmax `.Lsm_*`.
+Op coverage: linear (± bias), relu, dropout, softmax — unchanged from
+M6. NFL v0.1 inference-only.
 
-Op coverage: linear (± bias), relu, dropout, softmax — all five M3
-fixtures lower end-to-end. NFL v0.1 inference-only. Two FFI integration
-tests pin bit-exact equivalence:
-`fused_vs_unfused_softmax_match_numerically` on `classifier.nfl`
-(no-bias) + `softmax_with_bias.nfl` (bias-aware). OQ-5 closed: all
-three `fused_vs_unfused_*_match_numerically` tests now use `assert_eq!`
-(not `debug_assert_eq!`) for the `params_floats` agreement check.
-
-Cross-cutting consistency (carried from M5c): all five workspace error
-types implement `std::error::Error`; `StdOp` and `PostOp` are both
-`#[non_exhaustive]`; profile-side `match` blocks have wildcard arms
-routing future ops to `LowerError::UnsupportedOp` /
-`LowerError::UnsupportedPostOp`.
+Cross-cutting consistency (carried from M5c/M6): all five workspace
+error types implement `std::error::Error`; `StdOp` and `PostOp` are
+`#[non_exhaustive]`; profile-side `match` blocks have wildcard arms.
+Helper visibility `pub(crate)` keeps the implementation detail inside
+the `passes` module — lifting to `compiler/src/ir/` is deferred until
+non-pass UIR-rewrite consumers appear (OQ-8).
 
 3-crate workspace (`compiler` lib, `nflc` bin, `profiles/arm64` lib).
-Production code std-only; `libloading` and `cc` are test-only dev-deps.
-**202 tests passing** across lexer, parser, IR, passes (5 fusion +
-8 dropout + 6 pipeline-level), profile codegen, CLI smoke (9), and
-FFI integration. `cargo build --workspace`, `cargo clippy --workspace
---all-targets -- -D warnings`, `cargo fmt --all -- --check`, and
-`cargo test --workspace` all clean. CI green.
+Production code std-only. **208 tests passing** across lexer, parser,
+IR, passes (5 helper unit + 8 dropout + 11 fuse_linear_relu + 6
+fuse_linear_softmax including the new invariant 6 test + 6 cross-pass),
+profile codegen, CLI smoke, and FFI integration. `cargo build
+--workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo fmt --all -- --check`, and `cargo test --workspace` all clean.
 
-Documentation: `docs/profile_guide/arm64.md` §3 supported-ops table
-documents the fused-vs-unfused split for Softmax; new §4.10 "Fused
-linear → softmax (row-wise)" carries the full asm sketch, register
-convention table, AAPCS64 callee-saved notes, the explicit warning
-that row-wise differs structurally from elementwise (do NOT inline
-softmax per element), memory and ABI notes, bias-aware fusion, and
-stacking constraints. §5 errors and §8 Limitations were updated.
-`docs/language_reference/uir.md` §2 lists `SoftmaxRow` alongside
-`Relu` in the `fused_post_ops` field description with the lowercase
-snake_case Display convention. `PROJECT_SPEC.md` milestones table
-M6 row marks "complete".
+Documentation: `arm64.md` and `uir.md` unchanged from M6 (M7 is
+compiler-side only). `PROJECT_SPEC.md` milestones table M7 row marks
+"complete"; viewer relocated to M8 row.
 
-The immediate next step is **Milestone 7 — open scope**. Carry-forward
-candidate directions (priority-ordered from the M6 holistic review):
-1. **Shared 3-step rebuild helper extraction.** Three identical bodies
-   now exist in `eliminate_dropout.rs`, `fuse_linear_relu.rs`,
-   `fuse_linear_softmax.rs`. The "three strikes" trigger fired in M6
-   but extraction was deferred to keep M6 focused.
-2. **`FuseLinearPostOp` consolidation** (M5c OQ-1) — fires on a third
-   access pattern or a second RowWise post-op.
-3. **Type-level `PostOpKind` distinction** (M5c OQ-2) — same trigger
-   plus emit-shape divergence between RowWise variants.
-4. **Bare-metal target** (M5c OQ-3) — Taylor-series `expf` for softmax,
-   no libm dependency.
-5. **Attention-pattern extension** beyond `linear → softmax`: Q/K/V
-   projections, scaled dot-product, axis-N softmax. Requires NFL v0.2
-   grammar work first.
-6. **`BuildError::span()` accessor + shared `Diagnostic` trait** (M5c
-   OQ-4) if a fourth error type or generic CLI rendering arrives.
+Atomic-task-pack convention from M6 holistic-review Finding #11
+demonstrated cleanly via 4 sequential green commits (helper-create
++ three migrations). No asm-side ↔ pass-side mutual dependencies in
+M7, so the convention applies to internal task ordering only.
 
-M7 brainstorming runs in a fresh worktree once M6 merges.
+The immediate next step is **Milestone 8 — open scope**.
+Carry-forward candidate directions:
+1. **OQ-7 per-pass `Result<UirModel, PassError>` cleanup** — the
+   M7 helper went plain (no `Result`); per-pass functions still
+   wrap. Same YAGNI debt; trivial cleanup once a real `Err`-case
+   appears or boilerplate accumulates.
+2. **OQ-9 generalising `producer_post_ops: Vec<PostOp>` to
+   `enum NodeMutation`** — fires when a fourth pass needs non-
+   PostOp producer mutation (attr change, operand replacement).
+3. **OQ-8 lifting `rewriter.rs` to `compiler/src/ir/`** — fires
+   when a non-pass UIR-rewrite consumer appears.
+4. **Human-readable viewer v0.1** (PROJECT_SPEC M8 row).
+5. **Attention-pattern extension** — Q/K/V projections, scaled
+   dot-product, axis-N softmax. Requires NFL v0.2 grammar work.
+6. **`FuseLinearPostOp` consolidation** (M5c OQ-1) — fires on
+   third access pattern OR second RowWise post-op.
+7. **Bare-metal target** (M5c OQ-3) — Taylor-series `expf`.
+8. **`BuildError::span()` + `Diagnostic` trait** (M5c OQ-4).
+
+M8 brainstorming runs in a fresh worktree once M7 merges.
 
 ---
 
