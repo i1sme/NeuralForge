@@ -405,7 +405,7 @@ fn rewrite_plan_new_counts_consumers_correctly() {
     // Expected counts:
     //   Input(0): 1 (consumed by A's operand list)
     //   A(1): 2 (consumed by B and C)
-    //   B(2): absent from map (no consumers — B is unused output)
+    //   B(2): absent from map (no consumers — B is an orphan node)
     //   C(3): 1 (model.output += 1)
     let model = UirModel {
         name: "M".into(),
