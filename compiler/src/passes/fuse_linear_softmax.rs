@@ -265,4 +265,52 @@ mod tests {
         };
         assert!(fused_post_ops.is_empty());
     }
+
+    #[test]
+    fn leaves_linear_dropout_softmax_chain_untouched() {
+        use crate::ir::test_utils::{input_node, op_node, out_dim_attr, rate_attr};
+        use crate::ir::types::NodeKind;
+        use crate::ir::StdOp;
+        use crate::{Uir, UirModel};
+
+        // Construct: Input → Linear → Dropout → Softmax.
+        // Run ONLY FuseLinearSoftmax (NOT default_pipeline — that would
+        // EliminateDropout first and remove the blocking Dropout).
+        // Spec §8 invariant 6 (arm64.md §4.10 in M6): Linear's sole
+        // consumer is Dropout, not Softmax → criterion 2 fails → no
+        // fusion happens.
+        let model = UirModel {
+            name: "M".into(),
+            nodes: vec![
+                input_node("x", vec![2, 3]),
+                op_node(StdOp::Linear, vec![0], vec![out_dim_attr(2)], vec![2, 2]),
+                op_node(StdOp::Dropout, vec![1], vec![rate_attr(0.5)], vec![2, 2]),
+                op_node(StdOp::Softmax, vec![2], vec![], vec![2, 2]),
+            ],
+            inputs: vec![0],
+            output: 3,
+            source_span: crate::ast::Span::new(1, 1),
+        };
+        let uir = Uir {
+            models: vec![model],
+        };
+
+        let out = super::FuseLinearSoftmax.run(&uir).expect("pass ok");
+        let m = &out.models[0];
+
+        // Untouched: 4 nodes preserved, Linear's fused_post_ops empty,
+        // Softmax-node still exists at index 3.
+        assert_eq!(m.nodes.len(), 4);
+        let NodeKind::Op { fused_post_ops, .. } = &m.nodes[1].kind else {
+            panic!("expected Op at index 1")
+        };
+        assert!(fused_post_ops.is_empty(), "Linear should not be fused");
+        assert!(matches!(
+            m.nodes[3].kind,
+            NodeKind::Op {
+                op: StdOp::Softmax,
+                ..
+            }
+        ));
+    }
 }
