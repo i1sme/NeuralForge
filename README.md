@@ -51,7 +51,7 @@ model Classifier [batch=32, input=784, output=10]:
 | `language/` | NFL grammar (`grammar.ebnf`, frozen at v0.1) |
 | `tests/fixtures/` | Sample `.nfl` files used in integration tests |
 | `docs/` | Language reference (`grammar.md`, `uir.md`) and profile guide (`arm64.md`) |
-| `viewer/` | Reserved for the standalone viewer tool (M7+); rendering today is via `nflc parse --uir` |
+| `viewer/` | Reserved for a future standalone viewer tool; rendering today is via `nflc parse --uir` (compact) and `nflc parse --uir-verbose` (annotated) |
 
 ---
 
@@ -73,28 +73,37 @@ Look it up in `DEVLOG.md`. Every significant decision is recorded there with its
 
 ## Project status
 
-**Milestone 5 fully closed (5a + 5b + 5c).** The compiler stack is end-to-end
-working for inference-only NFL v0.1, with a complete arm64 profile and a
-kernel-fusion pipeline.
+**Milestone 8 fully closed.** The compiler stack is end-to-end working for
+inference-only NFL v0.1, with a complete arm64 profile, a multi-pass
+kernel-fusion pipeline that includes the attention-shape `linear → softmax`
+pattern, hardened large-dimension codegen, and a v0.1 UIR viewer.
 
 What's working today:
 
 - Lexer, parser, typed AST, Universal IR (UIR)
 - AArch64 scalar code generation: `linear` (with or without bias), `relu`,
-  `dropout`, `softmax` (libm `expf`)
-- UIR-pass framework with two passes shipped — `EliminateDropout` (removes
-  inference-time-noop Dropout) and `FuseLinearRelu` (bias-aware fusion of
-  `linear → relu`)
-- CLI: `nflc parse` (with `--uir` rendering) and `nflc compile` (with
-  `--no-passes` and `--passes <list>` filters)
-- Bit-exact fused-vs-unfused FFI integration tests on the `classifier`
-  and `mixed_args` fixtures
-- 189 tests passing across the workspace; CI green; `cargo fmt`,
+  `dropout`, `softmax` (libm `expf`); large-dimension immediates routed
+  uniformly through a single emit helper so dims above the 12-bit cmp
+  range now compile cleanly
+- UIR-pass framework with three passes shipped — `EliminateDropout`
+  (removes inference-time-noop Dropout), `FuseLinearRelu` (bias-aware
+  fusion of `linear → relu`), and `FuseLinearSoftmax` (attention-pattern
+  fusion of `linear → softmax` into a row-wise emit branch)
+- CLI: `nflc parse` (with `--uir` compact and `--uir-verbose` annotated
+  rendering) and `nflc compile` (with `--no-passes` and `--passes <list>`
+  filters)
+- Bit-exact fused-vs-unfused FFI integration tests across all
+  fusion-eligible fixtures
+- Viewer v0.1: `nflc parse --uir-verbose` renders annotated UIR with
+  top-level and per-model summaries, and fused post-ops on indented lines
+- 223 tests passing across the workspace; CI green; `cargo fmt`,
   `cargo clippy -D warnings`, `cargo test --workspace` all clean
 
-Next: **Milestone 6 — attention-pattern fusion** (`linear → softmax`
-fused into a row-wise emit branch). Design spec at
-[`docs/superpowers/specs/2026-05-05-m6-attention-fusion-design.md`](docs/superpowers/specs/2026-05-05-m6-attention-fusion-design.md).
+Next: scope for **Milestone 9** is decided by selecting one of three open
+axes — codegen breadth, modelling depth, or deployment reach — described
+in [`PROJECT_SPEC.md` §"Strategic Roadmap"](PROJECT_SPEC.md#strategic-roadmap).
+The chosen axis seeds a fresh brainstorming round rather than picking from
+a flat list of follow-ups.
 
 NFL training syntax (loss, optimiser) is deferred to v0.2.
 
@@ -114,6 +123,7 @@ Parse an NFL file and print the AST or UIR:
 ```sh
 cargo run -p nflc -- parse tests/fixtures/classifier.nfl
 cargo run -p nflc -- parse tests/fixtures/classifier.nfl --uir
+cargo run -p nflc -- parse tests/fixtures/classifier.nfl --uir-verbose
 ```
 
 Compile to AArch64 assembly:
@@ -149,7 +159,7 @@ vectorisation, an x86_64 profile, and a RISC-V profile are future work.
 - **Explicit over implicit** — shapes and types are always declared, never inferred silently
 - **Profile isolation** — each hardware target is a self-contained module
 - **AI-native syntax** — NFL is designed to be written and read by both humans and LLMs
-- **Human oversight** — every compiler output is inspectable; today via `nflc parse --uir`, with a dedicated viewer tool planned for M7+
+- **Human oversight** — every compiler output is inspectable; viewer v0.1 ships today via `nflc parse --uir` (compact) and `nflc parse --uir-verbose` (annotated), with a dedicated standalone viewer tool reserved for future profile-level annotation work
 
 ---
 
