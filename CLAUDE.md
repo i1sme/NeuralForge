@@ -158,84 +158,17 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-**Milestone 8 fully complete.** Three feature commits landed:
+**Milestone 8 complete. 223 tests passing.** All workspace gates clean
+(`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo fmt --all -- --check`, `cargo test --workspace`).
 
-- `feat(m8/arm64-fix): correct dropout-as-output codegen` — closes
-  HIGH-severity bug where Dropout placed at `model.output` left
-  the caller's output buffer uninitialised. New
-  `profiles/arm64/src/ops/dropout.rs::emit_dropout_copy` (mirror of
-  `emit_relu` minus `fmax`) triggered from a `BufferLoc::OutputReg`
-  branch in `walk_model::Dropout`. Only fires with `--no-passes`
-  + dropout-at-output; default pipeline's `EliminateDropout`
-  removes the dropout before codegen otherwise.
-- `feat(m8/arm64-fix): hoist dim immediates through emit_imm32` —
-  closes MEDIUM-severity bug where 17 cmp/mov immediate sites
-  used literal `#imm` encoding (12-bit cmp / 16-bit mov),
-  silently broken on any production-scale dim. Routed all 17
-  sites through `asm::emit_imm32` with two placement strategies:
-  Group A (bl-free loops) hoists materialise once outside the
-  loop label and uses register-form cmp inside; Group B
-  (bl-containing loops, `bl _expf` clobbers caller-saved x10)
-  re-materialises at each loop top.
-- `feat(m8/viewer): UIR-verbose annotation mode` — ships the
-  PROJECT_SPEC milestone row 8 viewer deliverable. New
-  `compiler::ir::types::{VerboseUir, VerboseModel, VerboseNode}`
-  newtype wrappers with their own `Display` impls. New
-  `Uir::calls_extern_math()` and `UirModel::calls_extern_math()`
-  UIR-level predicates. New `nflc parse --uir-verbose` flag,
-  mutually exclusive with `--uir`. Annotates with top-level
-  summary (model count, total nodes, calls-extern-math),
-  per-model summary (node count, calls-extern-math), and breaks
-  fused post-ops onto separate `-> fused: <op>` lines.
-
-3-crate workspace (`compiler` lib, `nflc` bin, `profiles/arm64`
-lib). Production code std-only. **223 tests passing** across
-lexer, parser, IR, passes, profile codegen, CLI smoke, FFI
-integration, and viewer (predicate + snapshot). `cargo build
---workspace`, `cargo clippy --workspace --all-targets -- -D
-warnings`, `cargo fmt --all -- --check`, and `cargo test
---workspace` all clean.
-
-Documentation: `docs/language_reference/uir.md` gained a "Viewing
-UIR" section (§7) documenting `--uir` and `--uir-verbose` and the
-`calls_extern_math` semantics. `docs/profile_guide/arm64.md`
-gained a brief "M8 codegen hardening" section. `PROJECT_SPEC.md`
-M8 row replaced with the multi-clause description following the
-M5/M6/M7 granularity.
-
-The immediate next step is **Milestone 9 — open scope**.
-Carry-forward candidate directions:
-1. **OQ-NEW per-pass `node_uses_softmax`/`calls_extern_math`
-   deduplication.** The arm64-side `node_uses_softmax`
-   (`profiles/arm64/src/buffer.rs:81-94`) and the new compiler-
-   side `calls_extern_math` (`compiler/src/ir/types.rs`) duplicate
-   the same predicate logic. Trigger: next change to either
-   side's predicate (e.g. when `tanh`-via-libm or any other
-   extern-math op lands).
-2. **OQ-7 per-pass `Result<UirModel, PassError>` cleanup.** From
-   M7. The per-pass `eliminate_one_model`/`fuse_one_model`
-   functions return `Result` despite never producing `Err`.
-   Trigger: first real `Err`-case in pass-level logic.
-3. **OQ-8 lifting `compiler/src/passes/rewriter.rs` to
-   `compiler/src/ir/`.** From M7. Trigger: non-pass UIR-rewrite
-   consumer appears.
-4. **OQ-9 generalising `producer_post_ops: Vec<PostOp>` to
-   `enum NodeMutation`.** From M7. Trigger: fourth pass needs
-   non-PostOp producer mutation.
-5. **Profile-level viewer annotations** — per-node footprint,
-   stack frame, callee-saved set. Spec §3 Non-goals deferred
-   these. Trigger: user request OR x86_64 profile starts
-   (validates the profile-agnostic split).
-6. **`MACHO_SYM_PREFIX` rename** to `ARM64_SYM_PREFIX` or
-   per-OS abstraction. Trigger: second profile (x86_64 or
-   riscv64) starts.
-7. **Attention-pattern grammar extension** — Q/K/V projections,
-   scaled dot-product, axis-N softmax. Requires NFL v0.2
-   grammar work.
-8. **Bare-metal target** — Taylor-series `expf` (M5c OQ-3).
-9. **`BuildError::span()` + `Diagnostic` trait** (M5c OQ-4).
-
-M9 brainstorming runs in a fresh worktree once M8 merges.
+Strategic direction: see `PROJECT_SPEC.md` §"Strategic Roadmap" — three open
+axes (codegen breadth, modelling depth, deployment reach) presented as a
+dependency graph. The next milestone is decided by selecting one axis to
+advance via fresh brainstorming, not by picking from a flat list. Trigger-driven
+cleanup items (OQ-NEW, OQ-7, OQ-8, OQ-9, M5c OQ-4) live in `PROJECT_SPEC.md`
+§"Open Questions" / "Trigger-driven cleanup" and stay dormant until their
+trigger fires.
 
 ---
 

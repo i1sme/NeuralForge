@@ -162,11 +162,50 @@ NeuralForge is designed so that LLMs can write, read, and reason about NFL code 
 
 ---
 
+## Strategic Roadmap
+
+A dependency graph (not a schedule) of the open strategic axes. Each row shows
+what unlocks what; choosing the next milestone means choosing one axis to
+advance. Trigger-driven cleanup is intentionally excluded — it activates on
+its own trigger condition and lives under "Open Questions" below.
+
+```
+x86_64 profile → MACHO_SYM_PREFIX rename
+NFL v0.2 grammar → attention ops → profile-level viewer annotations
+bare-metal expf → drop libm dependency
+```
+
+- **Axis 1 — codegen breadth.** Adding a second concrete profile (x86_64)
+  validates the profile-isolation principle; the per-OS symbol-prefix rename
+  falls out as a natural consequence of the work, not as a separately-scheduled
+  milestone.
+- **Axis 2 — modelling depth.** NFL v0.2 grammar unblocks attention patterns
+  (Q/K/V projections, scaled dot-product, axis-N softmax). Profile-level viewer
+  annotations (per-node footprint, stack frame, callee-saved set) follow once a
+  non-trivial attention model lowers end-to-end, and double as a profile-agnostic
+  split validation.
+- **Axis 3 — deployment reach.** Replacing the `bl _expf` libm call with a
+  Taylor-series `expf` removes the only runtime dependency, unlocking bare-metal
+  targets.
+
+---
+
 ## Open Questions
 
+### Design questions
 - Training syntax design: when and how to introduce loss/optimiser constructs (planned for v0.2)
 - How profiles handle quantisation (INT8, FP16, BF16)?
 - Distribution format for compiled binaries
+
+### Trigger-driven cleanup
+Items raised during a milestone that intentionally do not get scheduled — they
+activate when their trigger condition fires.
+
+- **OQ-NEW** (M8) — duplicated `node_uses_softmax` / `calls_extern_math` predicates between `profiles/arm64/src/buffer.rs` and `compiler/src/ir/types.rs`. *Trigger: next change to either predicate (e.g. `tanh`-via-libm or any other extern-math op).*
+- **OQ-7** (M7) — per-pass `eliminate_one_model` / `fuse_one_model` return `Result<UirModel, PassError>` despite never producing `Err`. *Trigger: first real `Err`-case in pass-level logic.*
+- **OQ-8** (M7) — `compiler/src/passes/rewriter.rs` could lift to `compiler/src/ir/`. *Trigger: a non-pass UIR-rewrite consumer appears.*
+- **OQ-9** (M7) — `producer_post_ops: Vec<PostOp>` could generalise to `enum NodeMutation`. *Trigger: a fourth pass needs non-PostOp producer mutation.*
+- **M5c OQ-4** — `BuildError::span()` + `Diagnostic` trait for richer error reporting. *Trigger: error-reporting ergonomics become a real pain point in a downstream milestone.*
 
 ## Decisions (formerly open, now resolved)
 
