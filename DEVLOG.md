@@ -14,6 +14,95 @@ Format for each entry:
 
 ---
 
+## 2026-05-06 — M9 framing: Strategic Roadmap added; carry-forward list split into axes vs trigger-driven OQs
+
+### What was done
+- **`PROJECT_SPEC.md`** — new `## Strategic Roadmap` section
+  inserted between First Milestones and Open Questions. Three
+  open strategic axes presented as a dependency graph:
+  `x86_64 profile → MACHO_SYM_PREFIX rename`;
+  `NFL v0.2 grammar → attention ops → profile-level viewer annotations`;
+  `bare-metal expf → drop libm dependency`. Each axis annotated with
+  one paragraph (codegen breadth / modelling depth / deployment reach).
+- **`PROJECT_SPEC.md`** — `## Open Questions` restructured into
+  two subsections: `### Design questions` (existing 3 bullets
+  unchanged: training syntax, quantisation, distribution format)
+  and `### Trigger-driven cleanup` (5 OQs migrated from CLAUDE.md
+  carry-forward list — OQ-NEW, OQ-7, OQ-8, OQ-9, M5c OQ-4 — each
+  with its trigger condition explicit).
+- **`CLAUDE.md`** `## Current Status` — trimmed from ~80-line M8
+  summary + 9-item carry-forward list down to one factual state
+  line (`Milestone 8 complete. 223 tests passing.`) + workspace-gate
+  one-liner + pointer to `PROJECT_SPEC.md` §Strategic Roadmap and
+  §Open Questions / Trigger-driven cleanup.
+
+### Decisions made
+
+**Roadmap = dependency graph, not a task plan with deadlines.**
+The artefact is literally three rows of "what unlocks what". No
+sequencing across axes, no estimates, no scope checklists.
+Rationale: without this framing the project risks burning M9, M10,
+M11 on trigger-driven cleanup and emerging three iterations later
+with the same fundamental capabilities — that is maintenance, not
+strategic progress. Choosing the next milestone means choosing
+which axis to advance, which is a deliberate decision rather than
+a "what's interesting today" pick.
+
+**Trigger-driven OQs (OQ-NEW, OQ-7, OQ-8, OQ-9, M5c OQ-4) stay
+out of the roadmap, in `## Open Questions / ### Trigger-driven
+cleanup`.** They activate on their own trigger condition (next
+predicate change, first real `Err`-case, fourth-pass non-PostOp
+mutation, etc.) and explicitly should not be planned in advance —
+that would defeat the trigger mechanism. Putting them in the
+strategic roadmap would conflate "we choose to do this" with
+"this fires when X happens".
+
+**Roadmap lives in `PROJECT_SPEC.md`, not a separate
+`ROADMAP.md`.** The spec is already the single source of truth
+for what the project is and where it's heading; splitting the
+roadmap into a second document creates a synchronisation surface
+that has to be maintained when strategy shifts. Alternative C
+(replacing the carry-forward list in CLAUDE.md "Current Status")
+was rejected because Current Status is a *where we are now*
+snapshot, not a *where we're going* document — mixing them loses
+both signals.
+
+**`CLAUDE.md` "Current Status" keeps one factual state line in
+addition to the spec pointer.** Without this, the next session's
+context-load loses the instant answer to "where are we now"
+(would require an extra read of the spec or `git log` to
+reconstruct). The pointer-only design was rejected for that
+reason.
+
+**M5c OQ-4 (`BuildError::span()` + `Diagnostic` trait) classified
+as trigger-driven cleanup**, with a soft trigger
+("error-reporting ergonomics become a real pain point").
+Justification: it does not fit any of the three strategic axes
+and is not transformative on its own — closer in shape to OQ-7/8/9
+than to attention-grammar / x86_64 / bare-metal. Risk: if
+diagnostics never become painful, this stays dormant
+indefinitely. Acceptable: that is exactly the trigger semantic.
+
+### Problems encountered
+- None blocking. Pure planning / repo-bookkeeping session.
+- One classification ambiguity (M5c OQ-4) resolved as above.
+
+### Next step
+Brainstorm M9 = pick one of the three strategic axes. The
+structure for that brainstorm is now constrained: not "what's
+interesting today" but "which axis advances first, given the
+dependency graph". The trade-off to surface during brainstorming:
+unlocking-power (axis 2 has the deepest dependency chain so
+delivers the most leverage per milestone — grammar + UIR + arm64
+codegen + viewer in one direction) versus blast-radius
+information value (axis 1 forces the first real
+profile-isolation test, which validates the riskiest design
+assumption in the project). Axis 3 (bare-metal `expf`) is the
+smallest and most self-contained — a good fit if the next
+milestone needs to be small.
+
+---
+
 ## 2026-05-06 — Milestone 8 closed: arm64 codegen hardening + viewer v0.1
 
 ### What was done
