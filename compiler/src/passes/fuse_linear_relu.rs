@@ -14,10 +14,9 @@
 //! Functional: returns a fresh Uir with renumbered NodeIds.
 
 use super::{PassError, UirPass};
-use crate::ir::types::{Node, NodeKind, PostOp};
+use crate::ir::types::{NodeKind, PostOp};
 use crate::ir::StdOp;
-use crate::{NodeId, Uir, UirModel};
-use std::collections::{HashMap, HashSet};
+use crate::{Uir, UirModel};
 
 pub struct FuseLinearRelu;
 
@@ -29,7 +28,7 @@ impl UirPass for FuseLinearRelu {
     fn run(&self, uir: &Uir) -> Result<Uir, PassError> {
         let mut new_models = Vec::with_capacity(uir.models.len());
         for model in &uir.models {
-            new_models.push(fuse_one_model(model)?);
+            new_models.push(fuse_one_model(model.clone())?);
         }
         Ok(Uir { models: new_models })
     }
@@ -40,20 +39,9 @@ impl UirPass for FuseLinearRelu {
 /// guarantees this. Violations cause `id_map[…]` panics in step 3,
 /// not a `PassError` — defensive checks would be belt-and-suspenders
 /// for an invariant the type system can't (yet) express.
-fn fuse_one_model(model: &UirModel) -> Result<UirModel, PassError> {
-    // Step 1: consumer counts.
-    let mut consumer_count: HashMap<NodeId, usize> = HashMap::new();
-    for node in &model.nodes {
-        if let NodeKind::Op { operands, .. } = &node.kind {
-            for &op_id in operands {
-                *consumer_count.entry(op_id).or_insert(0) += 1;
-            }
-        }
-    }
-    *consumer_count.entry(model.output).or_insert(0) += 1;
+fn fuse_one_model(model: UirModel) -> Result<UirModel, PassError> {
+    let mut plan = super::rewriter::RewritePlan::new(&model);
 
-    // Step 2: identify victims (Relu nodes that fold into producer Linear).
-    let mut victim_to_producer: HashMap<NodeId, NodeId> = HashMap::new();
     for (relu_id, relu_node) in model.nodes.iter().enumerate() {
         let NodeKind::Op {
             op: StdOp::Relu,
@@ -67,77 +55,28 @@ fn fuse_one_model(model: &UirModel) -> Result<UirModel, PassError> {
             continue;
         }
         let linear_id = operands[0];
-        let linear_node = &model.nodes[linear_id];
         let NodeKind::Op {
             op: StdOp::Linear,
             fused_post_ops,
             ..
-        } = &linear_node.kind
+        } = &model.nodes[linear_id].kind
         else {
             continue;
         };
         if !fused_post_ops.is_empty() {
             continue; // No double-fusion.
         }
-        if *consumer_count.get(&linear_id).unwrap_or(&0) != 1 {
+        if *plan.consumer_count.get(&linear_id).unwrap_or(&0) != 1 {
             continue; // Linear must have exactly one consumer (this Relu).
         }
-        victim_to_producer.insert(relu_id, linear_id);
+        plan.victims.insert(relu_id, linear_id);
+        plan.producer_post_ops
+            .entry(linear_id)
+            .or_default()
+            .push(PostOp::Relu);
     }
 
-    let victims: HashSet<NodeId> = victim_to_producer.keys().copied().collect();
-    // M5a invariant: each Linear in `victim_to_producer.values()` appears
-    // exactly once (each Linear has at most one consuming Relu, by the
-    // single-consumer guard). Hence pushing one `PostOp::Relu` per
-    // matched producer is correct. M5b multi-victim fusion will need a
-    // count-per-producer to push the right number of post-ops.
-    let producers_of_victims: HashSet<NodeId> = victim_to_producer.values().copied().collect();
-
-    // Step 3: build new model.
-    let mut new_nodes: Vec<Node> = Vec::with_capacity(model.nodes.len());
-    let mut id_map: HashMap<NodeId, NodeId> = HashMap::new();
-
-    for (old_id, node) in model.nodes.iter().enumerate() {
-        if victims.contains(&old_id) {
-            // Skip pushing; map old victim id → producer's new id.
-            let producer_old_id = victim_to_producer[&old_id];
-            let producer_new_id = id_map[&producer_old_id];
-            id_map.insert(old_id, producer_new_id);
-            continue;
-        }
-
-        // Clone + remap operands.
-        let mut new_node = node.clone();
-        if let NodeKind::Op {
-            operands,
-            fused_post_ops,
-            ..
-        } = &mut new_node.kind
-        {
-            for op in operands.iter_mut() {
-                *op = id_map[op];
-            }
-            if producers_of_victims.contains(&old_id) {
-                fused_post_ops.push(PostOp::Relu);
-            }
-        }
-
-        let new_id = new_nodes.len();
-        new_nodes.push(new_node);
-        id_map.insert(old_id, new_id);
-    }
-
-    // Step 4: remap inputs + output.
-    let new_inputs: Vec<NodeId> = model.inputs.iter().map(|id| id_map[id]).collect();
-    let new_output = id_map[&model.output];
-
-    Ok(UirModel {
-        name: model.name.clone(),
-        nodes: new_nodes,
-        inputs: new_inputs,
-        output: new_output,
-        source_span: model.source_span,
-    })
+    Ok(super::rewriter::rewrite_model(plan, model))
 }
 
 #[cfg(test)]
