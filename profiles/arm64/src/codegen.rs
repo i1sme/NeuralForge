@@ -109,6 +109,7 @@ fn walk_model(model_idx: usize, model: &UirModel) -> Result<(String, FnSig), Low
     let mut linear_idx = 0usize;
     let mut relu_idx = 0usize;
     let mut softmax_idx = 0usize;
+    let mut dropout_idx = 0usize;
     for (node_idx, node) in model.nodes.iter().enumerate() {
         if let NodeKind::Op { op, operands, .. } = &node.kind {
             match op {
@@ -164,8 +165,23 @@ fn walk_model(model_idx: usize, model: &UirModel) -> Result<(String, FnSig), Low
                     relu_idx += 1;
                 }
                 StdOp::Dropout => {
-                    // No asm emitted: BufferLoc::Alias(operand) ensures
-                    // downstream ops read from the operand's buffer directly.
+                    let src_loc = resolve_loc(&assignment.locs, operands[0]);
+                    let dst_loc = resolve_loc(&assignment.locs, node_idx);
+                    if matches!(dst_loc, crate::buffer::BufferLoc::OutputReg) {
+                        // Bug-fix path (M8): dropout-as-output requires explicit copy
+                        // because BufferLoc::Alias redirection doesn't apply when this
+                        // node IS the output. See `ops/dropout.rs` module doc.
+                        let total: u64 = node.ty.shape.0.iter().product();
+                        body.push_str(&crate::ops::emit_dropout_copy(
+                            total,
+                            model_idx,
+                            dropout_idx,
+                            src_loc,
+                            dst_loc,
+                        ));
+                        dropout_idx += 1;
+                    }
+                    // else BufferLoc::Alias: no asm — downstream reads operand directly.
                 }
                 StdOp::Softmax => {
                     let in_shape = &model.nodes[operands[0]].ty.shape;

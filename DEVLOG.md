@@ -14,6 +14,116 @@ Format for each entry:
 
 ---
 
+## 2026-05-06 — Milestone 8 closed: arm64 codegen hardening + viewer v0.1
+
+### What was done
+- **`profiles/arm64/src/ops/dropout.rs`** — new `emit_dropout_copy`
+  (mirror of `emit_relu` minus `fmax`). Triggered from a new
+  `BufferLoc::OutputReg` branch in `codegen.rs::walk_model`'s
+  `StdOp::Dropout` arm. Closes HIGH-severity bug: dropout placed
+  at `model.output` previously left the caller's output buffer
+  uninitialised. `debug_assert!` guards the OutputReg invariant
+  at the function top.
+- **`profiles/arm64/src/ops/{linear,relu,softmax}.rs`** — 17
+  immediate sites (12 cmp + 5 mov) routed through `asm::emit_imm32`.
+  Two placement strategies: Group A hoist-outside-loop for bl-free
+  emitters (relu, matmul body) with distinct registers per nesting
+  level (x10/x15/x16); Group B re-materialise-at-loop-top for
+  bl-containing emitters (standalone softmax, RowWise softmax tail)
+  where `bl _expf` clobbers caller-saved x10. Closes MEDIUM-severity
+  bug: any production-scale dim (transformer hidden_dim 4096+, LLM
+  vocab 30k+, classifier with > 4095 classes) previously failed to
+  assemble or failed silently.
+- **`compiler/src/ir/types.rs`** — three newtype wrappers
+  (`VerboseUir`, `VerboseModel`, `VerboseNode`), each with their
+  own `Display` impl. Plus `calls_extern_math` predicate methods
+  on `Uir` and `UirModel`. UIR-level predicate (no profile
+  coupling). Default `Display` for the underlying types unchanged.
+- **`nflc/src/main.rs`** — new `--uir-verbose` flag on `parse`
+  subcommand, mutually exclusive with `--uir`. Help text updated.
+- **`docs/language_reference/uir.md`** — new "Viewing UIR" section
+  (§7) documenting both flags and the `calls-extern-math` semantics.
+- **`docs/profile_guide/arm64.md`** — new "M8 codegen hardening"
+  section: dropout-as-output copy + dim-immediate uniformity.
+- **New fixtures:** `tests/fixtures/{dropout_only,large_classifier_k,
+  large_classifier_n}.nfl`.
+- **15 new tests:** asm-shape positive checks (1 dropout-copy + 4
+  Group A/B), 4 FFI integration (2 dropout-only variants + 2
+  large_classifier), 3 predicate sub-cases, 1 verbose snapshot, 2
+  CLI smoke (verbose render + mutual-exclusion). Test count
+  208 → 223.
+
+### Decisions made
+- **Single PR with 3 atomic feature commits + holistic-review +
+  closeout commits**, mirroring M5/M6/M7. No cross-commit
+  dependencies.
+- **`emit_dropout_copy` uses `emit_imm32` from birth** — Commit 1's
+  new emitter ships with the new pattern, so Commit 2 patches
+  exactly 17 pre-existing sites, not 18. No "TODO patch in
+  Commit 2" debt.
+- **Mov-site replacement reuses hoisted registers in Group A** —
+  `mov x8, x15` / `mov x8, x16` instead of re-materialising via
+  `emit_imm32`. Principle: avoid illegal immediates, not "always
+  call the helper".
+- **Group B accepts 1-2 movz/movk per loop iteration** in
+  bl-containing loops. Adding x10 to the prologue's callee-saved
+  set was rejected as out-of-scope blast radius; `bl _expf` is
+  hundreds of cycles, < 1% relative overhead.
+- **Newtype wrappers over `fmt_verbose` methods** — idiomatic Rust
+  composition, no API pollution. Default `Display` unchanged.
+- **`calls_extern_math` placed on UIR side, predicate logic
+  duplicated with profile-side `node_uses_softmax`.** Deduplication
+  is backlog OQ-NEW; trigger is next predicate-logic change.
+- **No new error variant for dim-out-of-range** — `emit_imm32`
+  already asserts on u32::MAX, ~1000× any realistic NN dim.
+  YAGNI.
+- **`--uir-verbose` documented in `uir.md`** (UIR rendering
+  interface) rather than `arm64.md` (profile-specific). Reasoning:
+  viewer is profile-agnostic.
+
+### Problems encountered
+- **Plan self-review caught two errors before commit:** FFI ABI
+  signature was `(input, output, params)` in plan draft (wrong);
+  actual ABI is `(input, params, output)`. Plan also referenced
+  non-existent `common::cc_link` / `common::lower_fixture` helpers;
+  existing convention is inline `read_to_string` + parse + build +
+  run_pipeline + lower + `compile_to_dylib` + `libloading::Library`.
+  Both fixed in plan-review commit before execution.
+- **Code-quality reviewer flagged `dst_loc` as structurally
+  redundant in `emit_dropout_copy`** — caller always guards on
+  `BufferLoc::OutputReg`, making `materialise_ptr` always emit
+  the same fixed instruction. Resolved by adding
+  `debug_assert!(matches!(dst_loc, BufferLoc::OutputReg), ...)`
+  at the function top to document the invariant without
+  removing future flexibility. Quality reviewer's negative-`fmax`
+  test assertion also added.
+- **Existing tests pinned literal-imm cmps** — `relu_emits_separate
+  _loop_with_fmov_zero_and_fmax` and `linear_emits_matmul_loops_
+  with_fmadd` had assertions on `cmp x9, #4` / `cmp x3, #2` etc.
+  Updated to register-form (`cmp x9, x10` / `cmp x3, x10` etc.) as
+  part of Tasks 6-7. Caught by full workspace test runs.
+- **fmt drift caught at Task 5** — Tasks 3 and 4 implementer
+  subagents didn't run `cargo fmt --all` before reporting. Pre-
+  Commit-1 fmt-check failed. Resolved by running fmt then
+  proceeding to commit.
+- **Holistic-review subagent caught 3 close-in findings** (CLAUDE.md
+  Design Principle 5 stale "Until…ships (M8+)" hedge,
+  CLAUDE.md "What NOT to Do" stale `(M7+)` label, uir.md status
+  header still saying "Milestone 6 complete"). All fixed in
+  `729a3e9 chore(m8/holistic)` before docs closeout.
+
+### Next step
+M9 brainstorming runs in a fresh worktree once M8 merges. Carry-
+forward candidates: OQ-NEW (lift `node_uses_softmax` to single
+source via `calls_extern_math`), OQ-7 (per-pass Result cleanup),
+OQ-8 (lift rewriter to compiler/src/ir/), OQ-9 (NodeMutation
+generalisation), profile-level viewer annotations,
+MACHO_SYM_PREFIX rename when second profile starts, attention-
+pattern grammar (NFL v0.2), bare-metal target,
+BuildError::span() + Diagnostic trait.
+
+---
+
 ## 2026-05-06 — Milestone 7 closed: shared 3-step rebuild helper extraction
 
 ### What was done

@@ -62,28 +62,35 @@ pub fn emit_linear(
         }
     }
 
+    // M8: hoist matmul loop bounds into x10/x15/x16 once, before the
+    // i-loop label. All bl-free cmps inside use register form. Stride
+    // movs reuse the hoisted registers (no re-materialise).
+    s.push_str(&emit_imm32("x10", b as usize));
+    s.push_str(&emit_imm32("x15", n as usize));
+    s.push_str(&emit_imm32("x16", k as usize));
+
     s.push_str("    mov     x3, #0\n");
     s.push_str(&format!(".Lmm_i_{lid}:\n"));
-    s.push_str(&format!("    cmp     x3, #{b}\n"));
+    s.push_str("    cmp     x3, x10\n");
     s.push_str(&format!("    b.ge    .Lmm_i_end_{lid}\n"));
 
     s.push_str("    mov     x4, #0\n");
     s.push_str(&format!(".Lmm_j_{lid}:\n"));
-    s.push_str(&format!("    cmp     x4, #{n}\n"));
+    s.push_str("    cmp     x4, x15\n");
     s.push_str(&format!("    b.ge    .Lmm_j_end_{lid}\n"));
 
     s.push_str("    fmov    s0, wzr\n");
     s.push_str("    mov     x5, #0\n");
     s.push_str(&format!(".Lmm_k_{lid}:\n"));
-    s.push_str(&format!("    cmp     x5, #{k}\n"));
+    s.push_str("    cmp     x5, x16\n");
     s.push_str(&format!("    b.ge    .Lmm_k_end_{lid}\n"));
 
-    s.push_str(&format!("    mov     x8, #{k}\n"));
+    s.push_str("    mov     x8, x16\n");
     s.push_str("    mul     x6, x3, x8\n");
     s.push_str("    add     x6, x6, x5\n");
     s.push_str("    ldr     s1, [x11, x6, lsl #2]\n");
 
-    s.push_str(&format!("    mov     x8, #{n}\n"));
+    s.push_str("    mov     x8, x15\n");
     s.push_str("    mul     x7, x5, x8\n");
     s.push_str("    add     x7, x7, x4\n");
     s.push_str("    ldr     s2, [x13, x7, lsl #2]\n");
@@ -120,8 +127,8 @@ pub fn emit_linear(
         }
     }
 
-    // Store (after elementwise post-ops, before row-wise post-ops like SoftmaxRow).
-    s.push_str(&format!("    mov     x8, #{n}\n"));
+    // Store after elementwise post-ops. Reuse hoisted x15 (= n).
+    s.push_str("    mov     x8, x15\n");
     s.push_str("    mul     x6, x3, x8\n");
     s.push_str("    add     x6, x6, x4\n");
     s.push_str("    str     s0, [x12, x6, lsl #2]\n");
@@ -155,10 +162,11 @@ pub fn emit_linear(
 
                 s.push_str("    mov     x19, #0\n");
                 s.push_str(&format!(".Lfsmx_i_{lid}:\n"));
-                s.push_str(&format!("    cmp     x19, #{b}\n"));
+                s.push_str(&emit_imm32("x10", b as usize));
+                s.push_str("    cmp     x19, x10\n");
                 s.push_str(&format!("    b.ge    .Lfsmx_i_end_{lid}\n"));
 
-                s.push_str(&format!("    mov     x8, #{n}\n"));
+                s.push_str(&emit_imm32("x8", n as usize));
                 s.push_str("    mul     x20, x19, x8\n");
 
                 // Phase 2: row-max → s8.
@@ -167,7 +175,8 @@ pub fn emit_linear(
                 s.push_str("    fmov    s8, w0\n");
                 s.push_str("    mov     x21, #0\n");
                 s.push_str(&format!(".Lfsmx_max_{lid}:\n"));
-                s.push_str(&format!("    cmp     x21, #{n}\n"));
+                s.push_str(&emit_imm32("x10", n as usize));
+                s.push_str("    cmp     x21, x10\n");
                 s.push_str(&format!("    b.ge    .Lfsmx_max_end_{lid}\n"));
                 s.push_str("    add     x6, x20, x21\n");
                 s.push_str("    ldr     s1, [x22, x6, lsl #2]\n");
@@ -180,7 +189,8 @@ pub fn emit_linear(
                 s.push_str("    fmov    s9, wzr\n");
                 s.push_str("    mov     x21, #0\n");
                 s.push_str(&format!(".Lfsmx_exp_{lid}:\n"));
-                s.push_str(&format!("    cmp     x21, #{n}\n"));
+                s.push_str(&emit_imm32("x10", n as usize));
+                s.push_str("    cmp     x21, x10\n");
                 s.push_str(&format!("    b.ge    .Lfsmx_exp_end_{lid}\n"));
                 s.push_str("    add     x6, x20, x21\n");
                 s.push_str("    ldr     s0, [x22, x6, lsl #2]\n");
@@ -197,7 +207,8 @@ pub fn emit_linear(
                 // Phase 4: normalise by s9.
                 s.push_str("    mov     x21, #0\n");
                 s.push_str(&format!(".Lfsmx_norm_{lid}:\n"));
-                s.push_str(&format!("    cmp     x21, #{n}\n"));
+                s.push_str(&emit_imm32("x10", n as usize));
+                s.push_str("    cmp     x21, x10\n");
                 s.push_str(&format!("    b.ge    .Lfsmx_norm_end_{lid}\n"));
                 s.push_str("    add     x6, x20, x21\n");
                 s.push_str("    ldr     s0, [x23, x6, lsl #2]\n");

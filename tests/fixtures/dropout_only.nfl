@@ -1,0 +1,8 @@
+# Model with only Input and Dropout nodes.
+# The Dropout IS the model output. This exercises the dropout-as-output
+# code path that passes must handle without removing this node.
+
+model OnlyDropout [b=2, k=4]:
+    x: Tensor[b, k]
+
+    x -> dropout[rate=0.1]

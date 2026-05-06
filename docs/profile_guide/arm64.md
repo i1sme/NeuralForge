@@ -1,7 +1,8 @@
 # `arm64` Profile — AArch64 Scalar Codegen
 
-> **Status:** M6 complete (NFL v0.1). Lowers `linear` (with or without
-> `bias=true`), `relu`, `dropout` (no-op pass-through at inference),
+> **Status:** M8 complete (NFL v0.1). Lowers `linear` (with or without
+> `bias=true`), `relu`, `dropout` (no-op pass-through at inference, or
+> explicit copy-loop when dropout IS model output — see §M8),
 > `softmax` (numerically stable 3-pass via libm `expf`), and now
 > `linear → softmax` fused via `PostOp::SoftmaxRow` to native AArch64
 > Mach-O assembly. The compiler runs the default UIR-pass pipeline
@@ -13,8 +14,10 @@
 > `fused_post_ops: [SoftmaxRow]`. All 5 M3 positive fixtures + the M4a
 > fixture run end-to-end via FFI; bit-exact equivalence between fused
 > and unfused asm proven on classifier.nfl and mixed_args.nfl
-> integration tests.
-> **Authoritative source:** `profiles/arm64/src/` and the M4a/M4b/M5a/M5b/M6
+> integration tests. M8 adds dim-immediate uniformity via
+> `asm::emit_imm32` (production-scale dims now compile correctly) and
+> the dropout-as-output copy-loop fix.
+> **Authoritative source:** `profiles/arm64/src/` and the M4a/M4b/M5a/M5b/M6/M7/M8
 > specs under `docs/superpowers/specs/`.
 
 The `arm64` profile is the first concrete codegen profile in NeuralForge. It
@@ -246,14 +249,18 @@ pattern (`0xFF800000` for f32) into a GPR and `fmov sN, wN`:
     fmov    s8, w0
 ```
 
-### 4.5 Dropout (aliasing, no asm)
+### 4.5 Dropout (aliasing, no asm; or copy-loop when model output)
 
 Dropout at inference is identity. The buffer-assignment first-pass
 (`buffer.rs::assign_buffers`) returns `BufferLoc::Alias(operand_id)` for
 dropout nodes. **No asm is emitted** for dropout — the dispatcher's
 `StdOp::Dropout =>` arm is empty. Downstream ops reading dropout's output
 resolve the alias chain through `resolve_loc` to the operand's actual
-`BufferLoc`.
+`BufferLoc`. Exception (M8): when a Dropout node IS `model.output`,
+`assign_buffers` returns `BufferLoc::OutputReg` (the caller's `x2` pointer)
+instead, and codegen emits an explicit copy-loop via
+`ops/dropout.rs::emit_dropout_copy`. See the M8 codegen hardening section
+for details.
 
 ### 4.6 Intermediate buffers (stack-allocated)
 
@@ -622,3 +629,47 @@ To add a new profile (e.g. `x86_64`, `riscv64`):
   applies).
 - **Integration tests run only on aarch64 hosts with `cc` available.**
   Skip with logged reason elsewhere.
+
+---
+
+## M8 codegen hardening
+
+### Dropout-as-output copy
+
+Dropout is identity at inference time, and `assign_buffers`
+returns `BufferLoc::Alias(operand)` for any Dropout node that is
+NOT the model output — downstream ops read the operand's buffer
+directly, no asm needed. When a Dropout node IS `model.output`,
+however, alias-redirection no longer applies: `assign_buffers`
+returns `BufferLoc::OutputReg` (the caller's `x2` pointer), and
+codegen must explicitly copy the operand's buffer into it. The
+`StdOp::Dropout` arm in `codegen.rs::walk_model` branches on
+`dst_loc` and emits a copy-loop via `ops/dropout.rs::emit_dropout_copy`
+in this case (mirror of `emit_relu`'s structure minus `fmax`).
+This path is exercised only with `--no-passes` and dropout placed
+at the model output; the default pipeline's `EliminateDropout` pass
+removes the dropout before codegen sees it.
+
+### Dim-immediate uniformity
+
+ARM64 `cmp Xn, #imm` encodes a 12-bit immediate (0-4095, optionally
+shifted by 12); `mov Xn, #imm` encodes 16-bit (0-65535). All loop-
+bound and stride dimensions in matmul, relu, softmax, and the fused
+RowWise softmax tail flow through `asm::emit_imm32` (movz + optional
+movk) instead of literal-imm encoding. Two placement strategies:
+
+- **Group A (bl-free loops)**: hoist materialise once before the
+  loop label, register-form `cmp` inside. Matmul body uses three
+  distinct registers (x10 ← b, x15 ← n, x16 ← k); stride-load movs
+  reuse the hoisted regs (`mov x8, x16` etc) instead of re-
+  materialising. Inner-loop cmp has zero runtime cost.
+- **Group B (bl-containing loops)**: re-materialise into x10 at
+  each loop top (after label, before cmp). `bl _expf` clobbers
+  caller-saved registers including x10, so hoisting outside the
+  loop is impossible without expanding the prologue's callee-saved
+  set (deferred). 1-2 movz/movk per iteration is < 1% overhead vs
+  the cost of `bl _expf` itself.
+
+`emit_imm32` asserts `value <= u32::MAX as usize`, providing a
+clear failure mode for hypothetical dimensions beyond 4 billion
+elements (~1000× any realistic NN dim).

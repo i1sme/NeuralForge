@@ -1,5 +1,6 @@
 //! Softmax (per-row stable, libm expf) codegen.
 
+use crate::asm::emit_imm32;
 use crate::buffer::BufferLoc;
 use crate::ops::linear::materialise_ptr;
 
@@ -43,11 +44,12 @@ pub fn emit_softmax(
     // Outer per-row loop: x19 = i.
     s.push_str("    mov     x19, #0\n");
     s.push_str(&format!(".Lsm_i_{sid}:\n"));
-    s.push_str(&format!("    cmp     x19, #{b}\n"));
+    s.push_str(&emit_imm32("x10", b as usize));
+    s.push_str("    cmp     x19, x10\n");
     s.push_str(&format!("    b.ge    .Lsm_i_end_{sid}\n"));
 
     // Compute row base offsets in elements: x20 = i * k.
-    s.push_str(&format!("    mov     x8, #{k}\n"));
+    s.push_str(&emit_imm32("x8", k as usize));
     s.push_str("    mul     x20, x19, x8\n");
 
     // Pass 1: max into s8. Initialise to -inf.
@@ -56,7 +58,8 @@ pub fn emit_softmax(
     s.push_str("    fmov    s8, w0\n");
     s.push_str("    mov     x21, #0\n");
     s.push_str(&format!(".Lsm_max_{sid}:\n"));
-    s.push_str(&format!("    cmp     x21, #{k}\n"));
+    s.push_str(&emit_imm32("x10", k as usize));
+    s.push_str("    cmp     x21, x10\n");
     s.push_str(&format!("    b.ge    .Lsm_max_end_{sid}\n"));
     s.push_str("    add     x6, x20, x21\n");
     s.push_str("    ldr     s1, [x22, x6, lsl #2]\n");
@@ -71,7 +74,8 @@ pub fn emit_softmax(
     s.push_str("    fmov    s9, wzr\n");
     s.push_str("    mov     x21, #0\n");
     s.push_str(&format!(".Lsm_exp_{sid}:\n"));
-    s.push_str(&format!("    cmp     x21, #{k}\n"));
+    s.push_str(&emit_imm32("x10", k as usize));
+    s.push_str("    cmp     x21, x10\n");
     s.push_str(&format!("    b.ge    .Lsm_exp_end_{sid}\n"));
     s.push_str("    add     x6, x20, x21\n");
     s.push_str("    ldr     s0, [x22, x6, lsl #2]\n");
@@ -88,7 +92,8 @@ pub fn emit_softmax(
     // Pass 3: normalize.
     s.push_str("    mov     x21, #0\n");
     s.push_str(&format!(".Lsm_norm_{sid}:\n"));
-    s.push_str(&format!("    cmp     x21, #{k}\n"));
+    s.push_str(&emit_imm32("x10", k as usize));
+    s.push_str("    cmp     x21, x10\n");
     s.push_str(&format!("    b.ge    .Lsm_norm_end_{sid}\n"));
     s.push_str("    add     x6, x20, x21\n");
     s.push_str("    ldr     s0, [x23, x6, lsl #2]\n");

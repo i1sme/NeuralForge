@@ -52,9 +52,9 @@ fn linear_emits_matmul_loops_with_fmadd() {
     assert!(s.contains(".Lmm_i_0_0:"));
     assert!(s.contains(".Lmm_j_0_0:"));
     assert!(s.contains(".Lmm_k_0_0:"));
-    assert!(s.contains("cmp     x3, #2"));
-    assert!(s.contains("cmp     x4, #2"));
-    assert!(s.contains("cmp     x5, #3"));
+    assert!(s.contains("cmp     x3, x10"));
+    assert!(s.contains("cmp     x4, x15"));
+    assert!(s.contains("cmp     x5, x16"));
     assert!(s.contains("fmov    s0, wzr"));
     // Destination is x12 (materialised dst pointer), not raw x2.
     assert!(s.contains("str     s0, [x12,"));
@@ -68,7 +68,7 @@ fn relu_emits_separate_loop_with_fmov_zero_and_fmax() {
     assert!(s.contains("fmov    s4, wzr"));
     assert!(s.contains("fmax    s3, s3, s4"));
     assert!(s.contains(".Lrelu_0_0:"));
-    assert!(s.contains("cmp     x9, #4"));
+    assert!(s.contains("cmp     x9, x10"));
     // Relu now uses materialised src/dst pointers.
     assert!(s.contains("ldr     s3, [x11,"));
     assert!(s.contains("str     s3, [x12,"));
@@ -607,5 +607,169 @@ fn emit_linear_with_softmax_row_post_op_preserves_bias_add() {
     assert!(
         s.contains("bl      _expf"),
         "fused softmax tail missing bl _expf:\n{s}"
+    );
+}
+
+#[test]
+fn dropout_as_output_emits_copy_loop() {
+    let uir = build_uir(
+        "model OnlyDropout [b=2, k=4]:\n    x: Tensor[b, k]\n    x -> dropout[rate=0.1]\n",
+    );
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+    assert!(
+        s.contains("; dropout-as-output:"),
+        "missing dropout-as-output comment in:\n{s}"
+    );
+    assert!(
+        s.contains(".Ldropout_0_0:"),
+        "missing dropout loop label in:\n{s}"
+    );
+    assert!(
+        s.contains("ldr     s3, [x11"),
+        "missing s3 load from src ptr in:\n{s}"
+    );
+    assert!(
+        s.contains("str     s3, [x12"),
+        "missing s3 store to dst ptr in:\n{s}"
+    );
+    assert!(
+        !s.contains("fmax"),
+        "dropout copy must not clamp (no fmax expected in identity copy):\n{s}"
+    );
+}
+
+#[test]
+fn relu_uses_register_form_cmp_with_hoisted_movz() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> relu\n");
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+
+    // Hoisted materialise must appear AFTER the materialise_ptr lines
+    // (which set up x11/x12) and BEFORE the .Lrelu_ label.
+    let movz_pos = s
+        .find("movz    x10, ")
+        .expect("missing movz x10 hoist for relu loop bound");
+    let label_pos = s.find(".Lrelu_0_0:").expect("missing relu loop label");
+    assert!(
+        movz_pos < label_pos,
+        "movz x10 must precede .Lrelu_ label (hoist outside loop)"
+    );
+
+    // Inside loop, cmp uses register form against x10.
+    assert!(
+        s.contains("cmp     x9, x10"),
+        "cmp must use register form (x9, x10), not literal imm; full asm:\n{s}"
+    );
+    // Old literal-imm form must not appear for relu's bound.
+    assert!(
+        !s.contains("cmp     x9, #4"),
+        "old literal-imm cmp must be replaced; full asm:\n{s}"
+    );
+}
+
+#[test]
+fn linear_matmul_body_uses_hoisted_dim_registers() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n");
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+
+    // Three hoists must appear before the i-loop label.
+    let i_label_pos = s.find(".Lmm_i_0_0:").expect("missing matmul i-loop label");
+    for reg in ["x10", "x15", "x16"] {
+        let movz = format!("movz    {}, ", reg);
+        let pos = s
+            .find(&movz)
+            .unwrap_or_else(|| panic!("missing hoist for {reg}: \n{s}"));
+        assert!(pos < i_label_pos, "{reg} hoist must precede .Lmm_i_ label");
+    }
+
+    // Loop-bound cmps use register form.
+    assert!(s.contains("cmp     x3, x10"), "i-loop cmp must use x10");
+    assert!(s.contains("cmp     x4, x15"), "j-loop cmp must use x15");
+    assert!(s.contains("cmp     x5, x16"), "k-loop cmp must use x16");
+
+    // Mov-sites for stride reuse hoisted registers (no re-materialise).
+    assert!(
+        s.contains("mov     x8, x16"),
+        "input-stride mov must reuse hoisted k (x16)"
+    );
+    assert!(
+        s.contains("mov     x8, x15"),
+        "output-stride mov must reuse hoisted n (x15)"
+    );
+
+    // Old literal-imm cmps must not appear for matmul bounds.
+    for old in ["cmp     x3, #2", "cmp     x4, #2", "cmp     x5, #3"] {
+        assert!(
+            !s.contains(old),
+            "old literal-imm cmp '{old}' must be removed"
+        );
+    }
+}
+
+#[test]
+fn softmax_standalone_uses_register_form_cmps_re_materialised() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> softmax\n");
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+
+    // i-loop, max-loop, exp-loop, norm-loop — all four cmps register form.
+    assert!(s.contains("cmp     x19, x10"), "i-loop cmp register form");
+    // x21 is reused across max/exp/norm phases — find the cmp pattern.
+    let count_x21_cmp_x10 = s.matches("cmp     x21, x10").count();
+    assert_eq!(
+        count_x21_cmp_x10, 3,
+        "max/exp/norm phases must each cmp x21 against x10 (3 sites); got {count_x21_cmp_x10}\nfull asm:\n{s}"
+    );
+
+    // No literal-imm cmps for softmax bounds.
+    assert!(
+        !s.contains("cmp     x19, #2"),
+        "old i-loop literal-imm cmp must be removed"
+    );
+    assert!(
+        !s.contains("cmp     x21, #3"),
+        "old phase-loop literal-imm cmps must be removed"
+    );
+}
+
+#[test]
+fn linear_rowwise_softmax_tail_uses_re_materialised_cmps() {
+    use compiler::passes::{default_pipeline, run_pipeline};
+    let src = "model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[4] -> softmax\n";
+    let ast = compiler::parse(src).expect("parse");
+    let uir = compiler::ir::build(&ast).expect("ir::build");
+    let fused = run_pipeline(&uir, &default_pipeline()).expect("pipeline");
+    let asm = lower(&fused).expect("lower");
+    let s = &asm.source;
+
+    // Pipeline applies fuse_linear_softmax → emits RowWise tail.
+    assert!(
+        s.contains("; fused softmax_row:"),
+        "expected fused RowWise softmax tail; full asm:\n{s}"
+    );
+
+    // Re-materialise pattern: at each fsmx loop top, movz x10 then cmp.
+    assert!(
+        s.contains("cmp     x19, x10"),
+        "fsmx i-loop cmp register form"
+    );
+    let count_x21_cmp_x10 = s.matches("cmp     x21, x10").count();
+    // 3 phase loops in the tail (max/exp/norm) — each uses cmp x21, x10.
+    // BUT: standalone softmax (already patched in Task 8) also uses cmp x21, x10
+    // at 3 sites. So if this test fixture builds asm with both standalone softmax
+    // AND fused RowWise tail in the same model, the count would be 6.
+    // The fixture above uses linear → softmax which fuses fully; no standalone
+    // softmax should remain. So expect exactly 3 fsmx cmps.
+    assert_eq!(
+        count_x21_cmp_x10, 3,
+        "fsmx max/exp/norm cmps must each use register form (3 sites); got {count_x21_cmp_x10}\nfull asm:\n{s}"
+    );
+
+    // No literal-imm fsmx cmps remain.
+    assert!(
+        !s.contains("cmp     x19, #2"),
+        "old fsmx i-loop literal-imm cmp must be removed"
     );
 }

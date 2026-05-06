@@ -755,3 +755,197 @@ fn fused_vs_unfused_mixed_args_match_numerically() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// M8 fixture: dropout-only model (dropout IS model.output).
+// Triggers the BufferLoc::OutputReg branch in walk_model::Dropout.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dropout_only_b2_k4_no_passes() {
+    if !cfg!(target_arch = "aarch64") {
+        eprintln!("skip: integration test requires aarch64 host");
+        return;
+    }
+    if !common::cc_available() {
+        eprintln!("skip: cc not available");
+        return;
+    }
+
+    let src =
+        std::fs::read_to_string("../../tests/fixtures/dropout_only.nfl").expect("read fixture");
+    let ast = compiler::parse(&src).expect("parse");
+    let uir = compiler::ir::build(&ast).expect("ir::build");
+    // No run_pipeline — exercise raw UIR (mirror of `--no-passes`).
+    let asm = profiles_arm64::lower(&uir).expect("lower");
+
+    let dylib_path = common::compile_to_dylib(&asm.source, "dropout_only_b2_k4");
+    let lib = unsafe { libloading::Library::new(&dylib_path) }.expect("open");
+
+    let input = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+    let params: [f32; 0] = [];
+    let mut output = [0.0f32; 8];
+
+    unsafe {
+        let forward: libloading::Symbol<unsafe extern "C" fn(*const f32, *const f32, *mut f32)> =
+            lib.get(b"nfl_forward_OnlyDropout\0")
+                .expect("symbol not found");
+        forward(input.as_ptr(), params.as_ptr(), output.as_mut_ptr());
+    }
+
+    assert_eq!(
+        output, input,
+        "dropout-as-output must copy input verbatim; got {:?}",
+        output
+    );
+}
+
+#[test]
+fn dropout_only_b1_k8_no_passes() {
+    if !cfg!(target_arch = "aarch64") {
+        eprintln!("skip: integration test requires aarch64 host");
+        return;
+    }
+    if !common::cc_available() {
+        eprintln!("skip: cc not available");
+        return;
+    }
+
+    // Same total floats (8) as b=2,k=4 but b=1 — closes single-row
+    // coverage gap noted in the M8 audit.
+    let nfl_src =
+        "model OnlyDropout1 [b=1, k=8]:\n    x: Tensor[b, k]\n    x -> dropout[rate=0.1]\n";
+    let ast = compiler::parse(nfl_src).expect("parse");
+    let uir = compiler::ir::build(&ast).expect("ir::build");
+    let asm = profiles_arm64::lower(&uir).expect("lower");
+
+    let dylib_path = common::compile_to_dylib(&asm.source, "dropout_only_b1_k8");
+    let lib = unsafe { libloading::Library::new(&dylib_path) }.expect("open");
+
+    let input = [10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
+    let params: [f32; 0] = [];
+    let mut output = [0.0f32; 8];
+
+    unsafe {
+        let forward: libloading::Symbol<unsafe extern "C" fn(*const f32, *const f32, *mut f32)> =
+            lib.get(b"nfl_forward_OnlyDropout1\0")
+                .expect("symbol not found");
+        forward(input.as_ptr(), params.as_ptr(), output.as_mut_ptr());
+    }
+
+    assert_eq!(output, input, "b=1 dropout-as-output must copy verbatim");
+}
+
+// ---------------------------------------------------------------------------
+// M8 fixture: dim > 4095 along k-axis. Triggers cmp x5, #{k} and
+// mov x8, #{k} sites in matmul body — first test that actually exceeds
+// ARM64 12-bit cmp immediate.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn large_classifier_k_8192() {
+    if !cfg!(target_arch = "aarch64") {
+        eprintln!("skip: not on aarch64");
+        return;
+    }
+    if !common::cc_available() {
+        eprintln!("skip: cc not available");
+        return;
+    }
+
+    const B: usize = 2;
+    const K: usize = 8192;
+    const N: usize = 10;
+
+    let src = std::fs::read_to_string("../../tests/fixtures/large_classifier_k.nfl")
+        .expect("read fixture");
+    let ast = compiler::parse(&src).expect("parse");
+    let uir_pre = compiler::ir::build(&ast).expect("ir::build");
+    let uir = compiler::passes::run_pipeline(&uir_pre, &compiler::passes::default_pipeline())
+        .expect("pipeline");
+    let asm = profiles_arm64::lower(&uir).expect("lower");
+
+    let dylib_path = common::compile_to_dylib(&asm.source, "large_classifier_k");
+    let lib = unsafe { libloading::Library::new(&dylib_path) }.expect("open");
+
+    // Deterministic input: x[i, j] = (i * K + j) as f32 / 10000.0
+    let input: Vec<f32> = (0..B * K).map(|i| (i as f32) / 10000.0).collect();
+    // Deterministic weights: w[k, n] = ((k + n) % 7) as f32 / 100.0
+    let weights: Vec<f32> = (0..K * N)
+        .map(|i| {
+            let kk = i / N;
+            let nn = i % N;
+            (((kk + nn) % 7) as f32) / 100.0
+        })
+        .collect();
+    let mut output = vec![0.0f32; B * N];
+
+    unsafe {
+        let forward: libloading::Symbol<unsafe extern "C" fn(*const f32, *const f32, *mut f32)> =
+            lib.get(b"nfl_forward_LargeK\0").expect("symbol not found");
+        forward(input.as_ptr(), weights.as_ptr(), output.as_mut_ptr());
+    }
+
+    let matmul = reference_matmul(&input, &weights, B, K, N);
+    let expected = reference_softmax_stable(&matmul, B, N);
+
+    for (i, (got, want)) in output.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (got - want).abs() < 1e-3,
+            "k=8192 output[{i}] = {got}, expected {want}"
+        );
+    }
+}
+
+#[test]
+fn large_classifier_n_5120() {
+    if !cfg!(target_arch = "aarch64") {
+        eprintln!("skip: not on aarch64");
+        return;
+    }
+    if !common::cc_available() {
+        eprintln!("skip: cc not available");
+        return;
+    }
+
+    const B: usize = 2;
+    const K: usize = 8;
+    const N: usize = 5120;
+
+    let src = std::fs::read_to_string("../../tests/fixtures/large_classifier_n.nfl")
+        .expect("read fixture");
+    let ast = compiler::parse(&src).expect("parse");
+    let uir_pre = compiler::ir::build(&ast).expect("ir::build");
+    let uir = compiler::passes::run_pipeline(&uir_pre, &compiler::passes::default_pipeline())
+        .expect("pipeline");
+    let asm = profiles_arm64::lower(&uir).expect("lower");
+
+    let dylib_path = common::compile_to_dylib(&asm.source, "large_classifier_n");
+    let lib = unsafe { libloading::Library::new(&dylib_path) }.expect("open");
+
+    let input: Vec<f32> = (0..B * K).map(|i| (i as f32) / 10.0).collect();
+    let weights: Vec<f32> = (0..K * N)
+        .map(|i| {
+            let kk = i / N;
+            let nn = i % N;
+            (((kk + nn) % 5) as f32) / 100.0
+        })
+        .collect();
+    let mut output = vec![0.0f32; B * N];
+
+    unsafe {
+        let forward: libloading::Symbol<unsafe extern "C" fn(*const f32, *const f32, *mut f32)> =
+            lib.get(b"nfl_forward_LargeN\0").expect("symbol not found");
+        forward(input.as_ptr(), weights.as_ptr(), output.as_mut_ptr());
+    }
+
+    let matmul = reference_matmul(&input, &weights, B, K, N);
+    let expected = reference_softmax_stable(&matmul, B, N);
+
+    for (i, (got, want)) in output.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (got - want).abs() < 1e-3,
+            "n=5120 output[{i}] = {got}, expected {want}"
+        );
+    }
+}

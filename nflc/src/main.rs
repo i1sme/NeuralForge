@@ -5,6 +5,7 @@
 //! - `nflc parse <file>`        → pretty-print AST to stdout, exit 0 (or err to stderr, exit 1)
 //! - `nflc parse <file> --tokens` → pretty-print token stream to stdout
 //! - `nflc parse <file> --uir`    → build and pretty-print the UIR
+//! - `nflc parse <file> --uir-verbose` → build and pretty-print the UIR with annotated metadata
 //! - `nflc compile <file> --profile <name>` → lower UIR to assembly
 //! - `nflc compile <file> --profile <name> -o <file.s>` → lower UIR to assembly, write to file
 //! - `nflc compile <file> --profile <name> [--no-passes]` → skip optimisation passes
@@ -32,6 +33,17 @@ fn main() -> ExitCode {
         [cmd, path, flag] if cmd == "parse" && flag == "--uir" => {
             run_build_uir(PathBuf::from(path))
         }
+        [cmd, path, flag] if cmd == "parse" && flag == "--uir-verbose" => {
+            run_build_uir_verbose(PathBuf::from(path))
+        }
+        [cmd, path, f1, f2]
+            if cmd == "parse"
+                && ((f1 == "--uir" && f2 == "--uir-verbose")
+                    || (f1 == "--uir-verbose" && f2 == "--uir")) =>
+        {
+            eprintln!("error: --uir and --uir-verbose are mutually exclusive");
+            ExitCode::FAILURE
+        }
         [cmd, rest @ ..] if cmd == "compile" => match parse_compile_args(rest) {
             Ok(parsed) => run_compile(parsed),
             Err(msg) => {
@@ -55,6 +67,7 @@ fn print_usage() {
     println!("  nflc parse   <file.nfl>                    Parse and pretty-print the AST");
     println!("  nflc parse   <file.nfl> --tokens           Print the lexer's token stream");
     println!("  nflc parse   <file.nfl> --uir              Build and pretty-print the UIR");
+    println!("  nflc parse   <file.nfl> --uir-verbose      Print UIR with annotated metadata");
     println!("  nflc compile <file.nfl> --profile <name>   Lower UIR to assembly");
     println!("                          [-o <file.s>]      Output path (default: stdout)");
     println!("                          [--no-passes]      Skip optimisation passes (debugging)");
@@ -332,6 +345,33 @@ fn run_build_uir(path: PathBuf) -> ExitCode {
         Ok(ast) => match compiler::ir::build(&ast) {
             Ok(uir) => {
                 print!("{}", uir);
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                render_error_with_snippet(&source, &path, e.line, e.col, &e.to_string(), None);
+                ExitCode::FAILURE
+            }
+        },
+        Err(e) => {
+            render_error_with_snippet(&source, &path, e.line, e.col, &e.to_string(), None);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_build_uir_verbose(path: PathBuf) -> ExitCode {
+    let source = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {}", path.display(), e);
+            return ExitCode::FAILURE;
+        }
+    };
+    match compiler::parse(&source) {
+        Ok(ast) => match compiler::ir::build(&ast) {
+            Ok(uir) => {
+                use compiler::ir::types::VerboseUir;
+                print!("{}", VerboseUir(&uir));
                 ExitCode::SUCCESS
             }
             Err(e) => {
