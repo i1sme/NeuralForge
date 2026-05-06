@@ -158,6 +158,11 @@ pub fn emit_dropout_copy(
 ) -> String
 ```
 
+Internally casts `total_floats as usize` before calling
+`emit_imm32`, mirroring the existing usize-based helper signature.
+Safe on 64-bit (project's only target); `emit_imm32` further asserts
+`value <= u32::MAX as usize` which is ~1000× any realistic NN dim.
+
 **Generated asm** — direct mirror of `emit_relu` minus the zero-init
 and `fmax` (load → store, no clamp):
 
@@ -469,10 +474,15 @@ Help text in [`main.rs:60`](../../nflc/src/main.rs) area: add a line for
 1. **`calls_extern_math` predicate unit** in `compiler/src/ir/types.rs::tests`
    — three sub-cases: model with standalone `Softmax` → true; without →
    false; with fused `SoftmaxRow` only → true.
-2. **`VerboseUir` snapshot** in same module — build UIR from
-   `tests/fixtures/classifier.nfl` (or hand-built equivalent), format
-   via `VerboseUir`, compare against literal expected-string. Pins
-   format; future intentional changes update expected.
+2. **`VerboseUir` snapshot** in same module — build UIR via
+   `compiler::ir::build` from `tests/fixtures/classifier.nfl` (or
+   hand-built equivalent), format via `VerboseUir`, compare against
+   literal expected-string. Pins format; future intentional changes
+   update expected. Important: UIR must be **pre-pass** (no
+   `run_pipeline` call). `nflc parse --uir-verbose` is the parse
+   subcommand, not compile — no passes run on the rendered UIR, so
+   the snapshot must reflect un-fused operations (e.g. `linear[10]`
+   followed by separate `softmax`, not `linear[10] fused=[SoftmaxRow]`).
 3. **CLI smoke** in `nflc/tests/cli.rs` (or extending the existing
    smoke harness) — invoke `nflc parse classifier.nfl --uir-verbose`
    via `Command::new`, assert stdout contains `uir-verbose summary`,
