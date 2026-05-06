@@ -1,7 +1,7 @@
 # NFL Universal IR (UIR) — Language Reference
 
-> **Status:** Defines the UIR as of NFL v0.1 (Milestone 6 complete).
-> **Authoritative source:** `compiler/src/ir/` and the M3a/M3b/M3c/M5a/M6 specs under
+> **Status:** Defines the UIR as of NFL v0.1 (Milestone 8 complete). §7 "Viewing UIR" added M8.
+> **Authoritative source:** `compiler/src/ir/` and the M3a/M3b/M3c/M5a/M6/M8 specs under
 > `docs/superpowers/specs/`.
 
 This document explains what the UIR is, how it's structured, and the rules the

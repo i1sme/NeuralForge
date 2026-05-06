@@ -95,11 +95,11 @@ NeuralForge/
 4. **AI-native syntax.** NFL is designed so LLMs can write and read it with minimal token overhead.
    Regular grammar, no exceptions, left-to-right pipeline notation.
 
-5. **Human oversight.** Every compiler output must be inspectable by a human. Until
-   the dedicated viewer tool ships (M8+), the `nflc parse <file.nfl> --uir` CLI
-   provides human-readable UIR pretty-printing via `Display for Uir`, including
-   M5a's `fused=[<list>]` suffix for fused operations. New UIR fields and node
-   kinds must extend the `Display` impls so this CLI rendering stays complete.
+5. **Human oversight.** Every compiler output must be inspectable by a human.
+   `nflc parse <file.nfl> --uir` (compact) and `--uir-verbose` (annotated,
+   M8+) provide human-readable UIR pretty-printing. New UIR fields and node
+   kinds must extend the `Display` impls in `compiler/src/ir/types.rs` so
+   this CLI rendering stays complete.
 
 6. **Kernel fusion by default.** The compiler must attempt to fuse consecutive elementwise
    operations. Unfused sequences are a performance bug.
@@ -234,7 +234,7 @@ M8 brainstorming runs in a fresh worktree once M7 merges.
 - Do not skip human-readable rendering — every new IR node, field, or NodeKind
   variant must extend the `Display` impls in `compiler/src/ir/types.rs` so the
   `nflc parse --uir` CLI continues to render the full UIR shape. The dedicated
-  viewer tool (M7+) will consume the same `Display` output as a starting point.
+  viewer tool (M9+) will consume the same `Display`/`VerboseUir` output as a starting point.
 
 ---
 
