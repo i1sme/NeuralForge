@@ -31,6 +31,7 @@ use std::collections::HashMap;
 /// during your pass's victim-identification logic, then hand the
 /// plan to `rewrite_model(plan, model)`.
 #[allow(dead_code)]
+#[derive(Debug)]
 pub(crate) struct RewritePlan {
     /// node_id → number of consumers. Counts both `NodeKind::Op`
     /// operands referencing this node, and an extra `+1` if
@@ -89,6 +90,9 @@ impl RewritePlan {
 ///     `NodeKind::Op` kind.
 #[allow(dead_code)]
 pub(crate) fn rewrite_model(plan: RewritePlan, model: UirModel) -> UirModel {
+    // consumer_count is used by callers during plan population
+    // (e.g. fuse_linear_relu's single-consumer victim guard); the
+    // rewrite step itself doesn't need it.
     let RewritePlan {
         consumer_count: _,
         victims,
@@ -289,6 +293,11 @@ mod tests {
         //   A(1): 2 (consumed by B and C)
         //   B(2): absent from map (no consumers — B is an orphan node)
         //   C(3): 1 (model.output += 1)
+        //
+        // B is intentionally orphan to demonstrate the absent-entry
+        // contract — the consumer_count map only has entries for
+        // nodes referenced by at least one operand list or as
+        // model.output. Graph validity is not required by new().
         let model = UirModel {
             name: "M".into(),
             nodes: vec![
