@@ -203,3 +203,143 @@ impl std::fmt::Display for Uir {
         Ok(())
     }
 }
+
+// ----------------------------------------------------------------------------
+// M8: calls_extern_math predicate (Task 14)
+//
+// UIR-level predicate: true iff any operation requires linking against
+// external math. Currently: standalone Softmax or fused SoftmaxRow.
+// Does not depend on any profile.
+// ----------------------------------------------------------------------------
+
+impl UirModel {
+    /// True iff any operation in this model requires linking against
+    /// external math (currently: standalone Softmax or fused SoftmaxRow).
+    /// UIR-level predicate — does not depend on any profile.
+    pub fn calls_extern_math(&self) -> bool {
+        use crate::ir::stdlib::StdOp;
+        self.nodes.iter().any(|n| match &n.kind {
+            NodeKind::Op {
+                op, fused_post_ops, ..
+            } => {
+                matches!(op, StdOp::Softmax)
+                    || fused_post_ops
+                        .iter()
+                        .any(|p| matches!(p, PostOp::SoftmaxRow))
+            }
+            NodeKind::Input { .. } => false,
+        })
+    }
+}
+
+impl Uir {
+    pub fn calls_extern_math(&self) -> bool {
+        self.models.iter().any(UirModel::calls_extern_math)
+    }
+}
+
+// ----------------------------------------------------------------------------
+// M8: verbose viewer wrappers (Task 15)
+//
+// Newtype pattern over plain methods. Idiomatic Rust composition:
+// each wrapper has its own `Display` impl, so `write!(f, "{}",
+// VerboseModel(m))` works inside the outer `VerboseUir` impl
+// without any `fmt_verbose` boilerplate. Default `Display` for
+// `Uir`/`UirModel`/`Node` is unchanged — the compact format used by
+// `nflc parse --uir`.
+// ----------------------------------------------------------------------------
+
+pub struct VerboseUir<'a>(pub &'a Uir);
+
+impl std::fmt::Display for VerboseUir<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let total_nodes: usize = self.0.models.iter().map(|m| m.nodes.len()).sum();
+        writeln!(f, "uir-verbose summary")?;
+        writeln!(f, "  models: {}", self.0.models.len())?;
+        writeln!(f, "  total nodes: {}", total_nodes)?;
+        writeln!(
+            f,
+            "  calls-extern-math: {}",
+            if self.0.calls_extern_math() {
+                "yes"
+            } else {
+                "no"
+            }
+        )?;
+        writeln!(f)?;
+        for m in &self.0.models {
+            write!(f, "{}", VerboseModel(m))?;
+        }
+        Ok(())
+    }
+}
+
+pub struct VerboseModel<'a>(pub &'a UirModel);
+
+impl std::fmt::Display for VerboseModel<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let m = self.0;
+        writeln!(f, "uir-model {}", m.name)?;
+        let inputs = m
+            .inputs
+            .iter()
+            .map(|i| format!("n{}", i))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(f, "  inputs: [{}]", inputs)?;
+        writeln!(f, "  output: n{}", m.output)?;
+        writeln!(f, "  node count: {}", m.nodes.len())?;
+        writeln!(
+            f,
+            "  calls-extern-math: {}",
+            if m.calls_extern_math() { "yes" } else { "no" }
+        )?;
+        writeln!(f)?;
+        for (i, node) in m.nodes.iter().enumerate() {
+            write!(f, "  n{}: {}", i, VerboseNode(node))?;
+        }
+        Ok(())
+    }
+}
+
+pub struct VerboseNode<'a>(pub &'a Node);
+
+impl std::fmt::Display for VerboseNode<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0.kind {
+            NodeKind::Input { name } => {
+                writeln!(f, "input {:?}        :: {}", name, self.0.ty.shape)
+            }
+            NodeKind::Op {
+                op,
+                operands,
+                attrs,
+                fused_post_ops,
+            } => {
+                let ops_s = operands
+                    .iter()
+                    .map(|o| format!("n{}", o))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(
+                    f,
+                    "{}           :: {}    operands=[{}]",
+                    op, self.0.ty.shape, ops_s
+                )?;
+                if !attrs.is_empty() {
+                    let a = attrs
+                        .iter()
+                        .map(|a| a.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    write!(f, "    attrs=[{}]", a)?;
+                }
+                writeln!(f)?;
+                for p in fused_post_ops {
+                    writeln!(f, "       -> fused: {}", p)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}

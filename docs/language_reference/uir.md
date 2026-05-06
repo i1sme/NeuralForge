@@ -217,7 +217,44 @@ error: invalid value for dropout.rate: attribute 'rate' value 1.5 is outside [0,
 
 ---
 
-## 7. What v0.1 doesn't have
+## 7. Viewing UIR
+
+The `nflc parse` subcommand exposes two human-readable rendering modes
+for the UIR a source file produces:
+
+- **`--uir`** — compact form. One line per node; shape, operands,
+  attributes, and any `fused_post_ops` on a single line. Suitable
+  for inspection of small models or quick debugging.
+
+- **`--uir-verbose`** — annotated form. Adds a top-level summary
+  block (model count, total node count, `calls-extern-math: yes/no`),
+  a per-model summary block (node count, `calls-extern-math`), and
+  breaks each fused post-op out onto its own indented line prefixed
+  with `-> fused: <op>` for visibility. Suitable for understanding
+  models with active fusion or models with unfamiliar structure.
+
+Both modes are mutually exclusive — passing both flags in a single
+invocation is a CLI error.
+
+`calls-extern-math` reports whether the model contains any operation
+that requires linking against external math at codegen time. In
+NFL v0.1 this is true iff the model has a standalone `Softmax`
+op or any node carrying `PostOp::SoftmaxRow` in `fused_post_ops`
+(softmax requires `expf` from libm). The predicate is UIR-level —
+profile-independent — and is also exposed as a method on `Uir` and
+`UirModel` for programmatic use.
+
+Both rendering modes consume the UIR as built by `compiler::ir::build`,
+**before** any pass pipeline runs. To inspect the post-pipeline UIR,
+use `nflc compile --profile <p>` and read the emitted assembly, or
+extend `--uir-verbose` to compose with passes in a future milestone.
+
+The dedicated viewer tool, when it ships, will consume the same
+`Display`/`VerboseUir` output as a starting point.
+
+---
+
+## 8. What v0.1 doesn't have
 
 Listed here so contributors don't accidentally rely on absent features:
 

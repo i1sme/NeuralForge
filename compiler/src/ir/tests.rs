@@ -556,3 +556,92 @@ fn display_for_node_omits_fused_when_empty() {
         "empty fused_post_ops should NOT render 'fused' substring; got: {rendered}"
     );
 }
+
+#[test]
+fn calls_extern_math_true_for_standalone_softmax() {
+    let src = "model M [b=2]:\n    x: Tensor[b, 4]\n    x -> softmax\n";
+    let ast = crate::parse(src).expect("parse");
+    let uir = crate::ir::build(&ast).expect("build");
+    assert!(uir.calls_extern_math());
+    assert!(uir.models[0].calls_extern_math());
+}
+
+#[test]
+fn calls_extern_math_false_for_linear_only() {
+    let src = "model M [b=2]:\n    x: Tensor[b, 4]\n    x -> linear[2]\n";
+    let ast = crate::parse(src).expect("parse");
+    let uir = crate::ir::build(&ast).expect("build");
+    assert!(!uir.calls_extern_math());
+    assert!(!uir.models[0].calls_extern_math());
+}
+
+#[test]
+fn calls_extern_math_true_for_fused_softmax_row() {
+    // After default pipeline runs, linear→softmax fuses to
+    // linear with PostOp::SoftmaxRow. Predicate must follow the fusion.
+    let src = "model M [b=2]:\n    x: Tensor[b, 4]\n    x -> linear[3] -> softmax\n";
+    let ast = crate::parse(src).expect("parse");
+    let uir = crate::ir::build(&ast).expect("build");
+    let fused =
+        crate::passes::run_pipeline(&uir, &crate::passes::default_pipeline()).expect("pipeline");
+    // Sanity: standalone softmax is gone, replaced by fused PostOp.
+    let has_standalone_softmax = fused.models[0].nodes.iter().any(|n| match &n.kind {
+        crate::ir::types::NodeKind::Op { op, .. } => {
+            matches!(op, crate::ir::stdlib::StdOp::Softmax)
+        }
+        _ => false,
+    });
+    assert!(
+        !has_standalone_softmax,
+        "fusion should have removed standalone softmax"
+    );
+    assert!(fused.calls_extern_math());
+}
+
+#[test]
+fn verbose_uir_snapshot_matches_expected_format() {
+    use crate::ir::types::VerboseUir;
+
+    // Pre-pass UIR — no run_pipeline. nflc parse --uir-verbose is the
+    // parse subcommand, not compile, so the rendered UIR reflects
+    // un-fused operations.
+    let src = "model Demo [b=2, k=4]:\n    x: Tensor[b, k]\n    x -> linear[3] -> softmax\n";
+    let ast = crate::parse(src).expect("parse");
+    let uir = crate::ir::build(&ast).expect("build");
+
+    let rendered = format!("{}", VerboseUir(&uir));
+
+    // Pin key annotations rather than exact whitespace — Display impl
+    // for Node has its own padding that we mirror, but exact char
+    // counts are fragile. Assert the structural elements.
+    assert!(
+        rendered.contains("uir-verbose summary"),
+        "missing top-level header:\n{rendered}"
+    );
+    assert!(rendered.contains("models: 1"), "missing models count");
+    assert!(rendered.contains("total nodes: 3"), "missing total nodes");
+    assert!(
+        rendered.contains("calls-extern-math: yes"),
+        "missing top-level extern-math line"
+    );
+    assert!(rendered.contains("uir-model Demo"), "missing model header");
+    assert!(rendered.contains("inputs: [n0]"), "missing inputs");
+    assert!(rendered.contains("output: n2"), "missing output");
+    assert!(
+        rendered.contains("node count: 3"),
+        "missing per-model node count"
+    );
+
+    // Model has 3 nodes: input n0, linear n1, softmax n2.
+    assert!(rendered.contains("n0:"), "missing n0 line");
+    assert!(rendered.contains("n1:"), "missing n1 line");
+    assert!(rendered.contains("n2:"), "missing n2 line");
+    assert!(rendered.contains("linear"), "missing linear op");
+    assert!(rendered.contains("softmax"), "missing softmax op");
+
+    // No fusion — pre-pass UIR — so no `-> fused:` line should appear.
+    assert!(
+        !rendered.contains("-> fused:"),
+        "pre-pass UIR must not have fused post-ops"
+    );
+}
