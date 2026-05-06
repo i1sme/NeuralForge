@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! UIR → AArch64 asm walker.
 //!
 //! Per-op emitters land here as Tasks 3-5 progress.

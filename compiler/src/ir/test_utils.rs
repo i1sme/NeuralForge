@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Shared UIR-construction helpers for pass tests.
 //!
 //! Use these instead of hand-rolling `Node` literals. The functions construct

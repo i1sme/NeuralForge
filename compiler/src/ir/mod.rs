@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Universal IR — the typed computation graph the compiler produces from
 //! the parsed AST. Consumed by architecture profiles (M4+) and optimisation
 //! passes (M5+).

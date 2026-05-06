@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Hand-written recursive-descent parser for NFL.
 //!
 //! Each function consumes tokens from the [`Parser`] cursor and returns either

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Buffer assignment + leaf/callee-saved analyzers for the arm64 codegen.
 //!
 //! Pure analyzers over `UirModel`. No asm emission. Consumed by `codegen.rs`

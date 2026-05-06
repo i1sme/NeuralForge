@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Integration tests: parse the canonical fixtures and assert AST shape.
 //!
 //! Positive (5) and negative (7 — added in Task 19) live in the same file

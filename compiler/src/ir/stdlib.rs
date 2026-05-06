@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Standard library of NFL operations (Milestone 3a defines four:
 //! Linear, Relu, Dropout, Softmax). Functions `resolve`, `signature`,
 //! and `infer_output_shape` land in Tasks 2-3.

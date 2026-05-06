@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Public types for the arm64 codegen profile.
 
 use compiler::ast::Span;

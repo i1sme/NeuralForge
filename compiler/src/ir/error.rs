@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Errors raised while building UIR from AST.
 
 #[derive(Debug, Clone, PartialEq)]

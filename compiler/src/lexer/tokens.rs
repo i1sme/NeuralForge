@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Token types and lexical errors.
 //!
 //! See `language/grammar.ebnf` for the abstract grammar this models.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Shared 3-step rebuild helper for UIR passes (M7).
 //!
 //! Three passes (`EliminateDropout`, `FuseLinearRelu`,

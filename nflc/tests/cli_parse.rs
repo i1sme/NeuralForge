@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! CLI integration tests for `nflc parse` UIR rendering modes.
 
 use std::process::Command;

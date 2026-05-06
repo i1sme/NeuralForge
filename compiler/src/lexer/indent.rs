@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Indent stack — produces virtual INDENT/DEDENT tokens.
 //!
 //! Tracks the leading-space level of each non-empty (and non-comment-only)

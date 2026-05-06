@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! UIR-level optimisation passes.
 //!
 //! Passes are functional transformations on a `Uir`: they take an

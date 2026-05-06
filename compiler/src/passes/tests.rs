@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Pipeline-level tests for `compiler::passes`.
 
 use super::{default_pipeline, run_pipeline, PassError, UirPass};

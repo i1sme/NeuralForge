@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Typed AST for NFL v0.1.
 //!
 //! Mirrors the EBNF productions in `language/grammar.ebnf`. Every node carries

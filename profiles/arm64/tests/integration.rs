@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! M4a + M4b end-to-end integration tests.
 
 mod common;

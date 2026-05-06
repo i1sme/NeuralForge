@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Shared helpers for arm64 integration tests.
 
 use std::path::PathBuf;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Dropout codegen.
 //!
 //! At inference, dropout is identity. The buffer-assignment first-pass
