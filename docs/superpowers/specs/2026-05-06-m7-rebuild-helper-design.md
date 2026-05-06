@@ -376,8 +376,11 @@ fn eliminate_one_model(model: UirModel) -> Result<UirModel, PassError> {
 }
 ```
 
-`Pass::run` impl unchanged in shape (still iterates `&uir.models`,
-clones each model, calls `eliminate_one_model(model)?`).
+`Pass::run` impl unchanged in shape: still iterates `&uir.models`,
+clones each model (since `Pass::run` receives `&Uir`, the borrowed
+`model` from the iter must be cloned to hand ownership to the
+consuming `eliminate_one_model`), calls
+`eliminate_one_model(model.clone())?`.
 
 **FuseLinearRelu** (current ~100 lines → ~25 lines):
 
@@ -466,7 +469,7 @@ fn leaves_linear_dropout_softmax_chain_untouched() {
     use crate::ir::test_utils::{input_node, op_node, out_dim_attr, rate_attr};
     use crate::ir::types::NodeKind;
     use crate::ir::StdOp;
-    use crate::UirModel;
+    use crate::{Uir, UirModel};
 
     // Construct: Input → Linear → Dropout → Softmax.
     // Run ONLY FuseLinearSoftmax (NOT default_pipeline — that would
