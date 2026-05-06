@@ -37,6 +37,8 @@
 use crate::ast::Span;
 use crate::Uir;
 
+pub(crate) mod rewriter;
+
 pub mod eliminate_dropout;
 pub mod fuse_linear_relu;
 pub mod fuse_linear_softmax;
