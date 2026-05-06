@@ -30,9 +30,10 @@ impl UirPass for FuseLinearSoftmax {
 
 /// Precondition: `model.nodes` is in topological order — every operand
 /// NodeId is strictly less than the consumer's NodeId. `ir::build`
-/// guarantees this. Violations cause `id_map[…]` panics in step 3,
-/// not a `PassError` — defensive checks would be belt-and-suspenders
-/// for an invariant the type system can't (yet) express.
+/// guarantees this. Violations cause `id_map[…]` panics inside
+/// `compiler::passes::rewriter::rewrite_model`, not a `PassError` —
+/// defensive checks would be belt-and-suspenders for an invariant
+/// the type system can't (yet) express.
 fn fuse_one_model(model: UirModel) -> Result<UirModel, PassError> {
     let mut plan = super::rewriter::RewritePlan::new(&model);
 

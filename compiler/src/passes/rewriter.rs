@@ -30,7 +30,6 @@ use std::collections::HashMap;
 /// `consumer_count`), populate `victims` and `producer_post_ops`
 /// during your pass's victim-identification logic, then hand the
 /// plan to `rewrite_model(plan, model)`.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct RewritePlan {
     /// node_id → number of consumers. Counts both `NodeKind::Op`
@@ -55,7 +54,6 @@ pub(crate) struct RewritePlan {
 }
 
 impl RewritePlan {
-    #[allow(dead_code)]
     pub(crate) fn new(model: &UirModel) -> Self {
         let mut consumer_count: HashMap<NodeId, usize> = HashMap::new();
         for node in &model.nodes {
@@ -88,7 +86,6 @@ impl RewritePlan {
 ///     `plan.victims`.
 ///   - Every key in `plan.producer_post_ops` references a node with
 ///     `NodeKind::Op` kind.
-#[allow(dead_code)]
 pub(crate) fn rewrite_model(plan: RewritePlan, model: UirModel) -> UirModel {
     // consumer_count is used by callers during plan population
     // (e.g. fuse_linear_relu's single-consumer victim guard); the
