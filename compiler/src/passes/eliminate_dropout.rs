@@ -12,10 +12,9 @@
 //! Functional: returns a fresh Uir with renumbered NodeIds.
 
 use super::{PassError, UirPass};
-use crate::ir::types::{Node, NodeKind};
+use crate::ir::types::NodeKind;
 use crate::ir::StdOp;
-use crate::{NodeId, Uir, UirModel};
-use std::collections::{HashMap, HashSet};
+use crate::{Uir, UirModel};
 
 pub struct EliminateDropout;
 
@@ -27,7 +26,7 @@ impl UirPass for EliminateDropout {
     fn run(&self, uir: &Uir) -> Result<Uir, PassError> {
         let mut new_models = Vec::with_capacity(uir.models.len());
         for model in &uir.models {
-            new_models.push(eliminate_one_model(model)?);
+            new_models.push(eliminate_one_model(model.clone())?);
         }
         Ok(Uir { models: new_models })
     }
@@ -37,80 +36,37 @@ impl UirPass for EliminateDropout {
 /// NodeId is strictly less than the consumer's NodeId. `ir::build`
 /// guarantees this.
 ///
-/// Note: this 3-step skeleton (identify victims → rebuild with remap →
-/// remap inputs/output) echoes `FuseLinearRelu::fuse_one_model`, which
-/// has an extra leading consumer-count step (FuseLinearRelu's victim
-/// criterion 5 — single-consumer Linear — needs the precomputed map;
-/// EliminateDropout has no consumer-count constraint and can skip it).
-/// Three identical 3-step rebuild patterns now exist (this pass,
-/// `FuseLinearRelu`, and `FuseLinearSoftmax` — all M6-current).
-/// Extraction of the shared helper is deferred to M7+ — the trigger
-/// has fired, but the M6 close-out elected not to pack the refactor
-/// into the same milestone. Carry-forward in DEVLOG.
-fn eliminate_one_model(model: &UirModel) -> Result<UirModel, PassError> {
-    // Step 1: identify victims (every Dropout node).
-    let victims: HashSet<NodeId> = model
-        .nodes
-        .iter()
-        .enumerate()
-        .filter_map(|(id, node)| match &node.kind {
-            NodeKind::Op {
-                op: StdOp::Dropout, ..
-            } => Some(id),
-            _ => None,
-        })
-        .collect();
+/// Implementation: delegates the rebuild skeleton (identify victims →
+/// rebuild with remap → remap inputs/output) to
+/// `compiler::passes::rewriter`. Each Dropout becomes a victim that
+/// redirects to its sole operand; no producer mutation. See spec
+/// `docs/superpowers/specs/2026-05-06-m7-rebuild-helper-design.md`
+/// §4 / §5 for the helper's design.
+fn eliminate_one_model(model: UirModel) -> Result<UirModel, PassError> {
+    let mut plan = super::rewriter::RewritePlan::new(&model);
 
-    // Step 2: build new model — skip victims, remap operands.
-    let mut new_nodes: Vec<Node> = Vec::with_capacity(model.nodes.len());
-    let mut id_map: HashMap<NodeId, NodeId> = HashMap::new();
-
-    for (old_id, node) in model.nodes.iter().enumerate() {
-        if victims.contains(&old_id) {
-            // Dropout's operand becomes Dropout's "result" id-wise.
-            // NFL grammar (§stdlib::Signature for `dropout`) guarantees
-            // exactly one operand; ir::build always produces
-            // `operands: vec![input_id]`. The debug_assert! catches any
-            // future grammar / hand-built UIR that violates the invariant
-            // before the index access panics.
-            let operands = match &node.kind {
-                NodeKind::Op { operands, .. } => operands,
-                _ => unreachable!("victim must be Op (filter-step established this)"),
-            };
-            debug_assert_eq!(
-                operands.len(),
-                1,
-                "Dropout must have exactly one operand (NFL grammar invariant)"
-            );
-            let operand_old_id = operands[0];
-            let operand_new_id = id_map[&operand_old_id];
-            id_map.insert(old_id, operand_new_id);
+    for (id, node) in model.nodes.iter().enumerate() {
+        let NodeKind::Op {
+            op: StdOp::Dropout,
+            operands,
+            ..
+        } = &node.kind
+        else {
             continue;
-        }
-
-        let mut new_node = node.clone();
-        if let NodeKind::Op { operands, .. } = &mut new_node.kind {
-            for op in operands.iter_mut() {
-                *op = id_map[op];
-            }
-        }
-
-        let new_id = new_nodes.len();
-        new_nodes.push(new_node);
-        id_map.insert(old_id, new_id);
+        };
+        // NFL grammar (§stdlib::Signature for `dropout`) guarantees
+        // exactly one operand. Any future grammar / hand-built UIR
+        // that violates this invariant will panic at the operands[0]
+        // index access — same contract as the M5b/M6 inline code.
+        debug_assert_eq!(
+            operands.len(),
+            1,
+            "Dropout must have exactly one operand (NFL grammar invariant)"
+        );
+        plan.victims.insert(id, operands[0]);
     }
 
-    // Step 3: remap inputs + output.
-    let new_inputs: Vec<NodeId> = model.inputs.iter().map(|id| id_map[id]).collect();
-    let new_output = id_map[&model.output];
-
-    Ok(UirModel {
-        name: model.name.clone(),
-        nodes: new_nodes,
-        inputs: new_inputs,
-        output: new_output,
-        source_span: model.source_span,
-    })
+    Ok(super::rewriter::rewrite_model(plan, model))
 }
 
 #[cfg(test)]
