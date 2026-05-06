@@ -14,6 +14,100 @@ Format for each entry:
 
 ---
 
+## 2026-05-06 — README "Project status" refresh: M5 → M8 catch-up before public surface
+
+### What was done
+- **`README.md` `## Project status`** — rewritten end-to-end. Was
+  pinned at M5 closure (M5a + 5b + 5c) with `linear → relu` as the
+  fusion frontier; now reflects M8 closure: three passes shipped
+  (`EliminateDropout`, `FuseLinearRelu`, `FuseLinearSoftmax`),
+  large-dim immediate hoisting through a single emit helper, and
+  viewer v0.1. Test-count claim moved 189 → 223 (verified via
+  `cargo test --workspace` summed across suites).
+- **`README.md` next-milestone pointer** — replaced the
+  "Next: Milestone 6 — attention-pattern fusion" line (and its
+  link to `docs/superpowers/specs/2026-05-05-m6-attention-fusion-design.md`)
+  with a cross-link to `PROJECT_SPEC.md#strategic-roadmap`. The
+  README now describes M9 as a scope-selection step over three open
+  axes (codegen breadth / modelling depth / deployment reach) rather
+  than naming a specific milestone.
+- **`README.md` CLI bullet + Build & try block** — `--uir-verbose`
+  added to both the bullet under Project status and the parse
+  example block under Build & try.
+- **`README.md` Core principles `Human oversight` bullet** — was
+  "with a dedicated viewer tool planned for M7+"; now reads "viewer
+  v0.1 ships today via `nflc parse --uir` (compact) and
+  `nflc parse --uir-verbose` (annotated), with a dedicated
+  standalone viewer tool reserved for future profile-level
+  annotation work".
+- **`README.md` Repository map `viewer/` row** — same drift fix:
+  dropped the now-stale `(M7+)` parenthetical, renamed to "future
+  standalone viewer tool", and added the `--uir-verbose` rendering
+  alongside `--uir`.
+- **Workspace gates** — re-ran `cargo fmt --all -- --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, and
+  `cargo test --workspace`. All green; 223 tests pass. No-op as
+  expected since no code paths changed.
+- **Rebase onto post-PR #18 main** — PR #18 (AGPL-3.0 + CLA) merged
+  while this PR was open. Rebased rather than merge-committed:
+  README auto-merged cleanly (License/Contributing block from PR
+  #18 sits at the end, my four section edits sit in the middle, no
+  textual overlap); DEVLOG required a hand resolve since both PRs
+  added a top-of-file entry — chose `--ours` (post-PR-#18 baseline)
+  and prepended this entry above the License-adoption entry per the
+  reverse-chronological convention.
+
+### Decisions made
+
+**README points to `PROJECT_SPEC.md` §Strategic Roadmap instead of
+naming the next milestone directly.**
+The previous README named M6 explicitly and linked to a single
+design spec. After M6 → M7 → M8 all shipped, that wording was
+exactly the failure mode we just fixed. M9's defining property is
+that *which* milestone it becomes is itself a decision (which axis
+seeds the brainstorm) — the README cannot pre-name it without
+re-introducing the same staleness. Linking to the spec section
+keeps the README evergreen across milestone transitions and
+concentrates roadmap churn in one place.
+
+**Repository-map `viewer/` row updated alongside the four
+explicitly-listed README sections.**
+The user enumerated four sections to refresh and asked for tight
+scope. Line 54 was not enumerated, but its `(M7+)` reference is the
+same class of staleness as the Core-principles bullet (milestone
+numbering frozen at write time) and its viewer phrasing should
+match the new "future standalone viewer tool" framing decided
+under task 4. Updating it preserves internal consistency without
+touching unrelated sections; leaving it would have shipped a
+README with two different stories about the viewer in two adjacent
+sections.
+
+**Rebase strategy: take main's DEVLOG (`--ours`) and prepend my
+entry, rather than merging two top-of-file entries by hand.**
+Both PR #18 and this PR added a new entry to the same insertion
+point at the top of DEVLOG, so git produced overlapping conflict
+blocks. Reading from the post-PR-#18 file gives a clean baseline
+where PR #18's License entry, separators, and downstream entries
+are already structurally correct; prepending this entry above it
+re-establishes the reverse-chronological order without needing to
+hand-reassemble separator markers around two simultaneously-edited
+blocks. Lower error surface than line-by-line marker resolution.
+
+### Problems encountered
+- Merge conflict on rebase against post-PR #18 main, as expected.
+  Resolved as described in "What was done" / "Decisions made"; no
+  semantic change to either entry's content.
+
+### Next step
+Strategic-roadmap selection for M9 remains the next substantive
+decision (see `PROJECT_SPEC.md` §"Strategic Roadmap"). This PR
+also closes the explicit follow-up flagged in PR #18's
+"Out-of-scope follow-up" note (README "Project status" staleness
+called out before going public), so the public-surface readiness
+checklist is unblocked.
+
+---
+
 ## 2026-05-06 — License adoption: AGPL-3.0-only + CLA, open-source release prep
 
 ### What was done
