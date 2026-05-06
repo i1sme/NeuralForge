@@ -57,7 +57,7 @@ fn eliminate_one_model(model: UirModel) -> Result<UirModel, PassError> {
         // NFL grammar (§stdlib::Signature for `dropout`) guarantees
         // exactly one operand. Any future grammar / hand-built UIR
         // that violates this invariant will panic at the operands[0]
-        // index access — same contract as the M5b/M6 inline code.
+        // index access.
         debug_assert_eq!(
             operands.len(),
             1,
