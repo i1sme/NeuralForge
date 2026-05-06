@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! End-to-end integration tests for the UIR builder.
 //!
 //! One submodule per fixture; `mod negative` for cross-cutting rejection cases.

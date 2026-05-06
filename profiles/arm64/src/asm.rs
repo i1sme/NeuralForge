@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Low-level AArch64 assembly building blocks.
 
 use crate::buffer::RegSet;

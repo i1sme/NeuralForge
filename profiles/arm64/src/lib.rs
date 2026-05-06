@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! NeuralForge arm64 scalar codegen profile (M4a).
 //!
 //! Lowers a [`compiler::Uir`] to AArch64 Mach-O assembly text via [`lower`].

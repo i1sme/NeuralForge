@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! AST→UIR builder.
 
 use std::collections::HashMap;

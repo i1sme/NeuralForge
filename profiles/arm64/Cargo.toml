@@ -3,7 +3,7 @@ name = "profiles-arm64"
 version = "0.1.0"
 edition = "2021"
 description = "NeuralForge arm64 codegen profile"
-license = "MIT OR Apache-2.0"
+license.workspace = true
 
 [dependencies]
 compiler = { path = "../../compiler" }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `FuseLinearSoftmax` UIR pass.
 //!
 //! Fuses `linear → softmax` and `linear[bias=true] → softmax` patterns

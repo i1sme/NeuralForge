@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! UIR data types — index-based DAG of typed nodes.
 
 use crate::ast::Span;

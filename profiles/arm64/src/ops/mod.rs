@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Per-op codegen modules.
 
 pub mod dropout;

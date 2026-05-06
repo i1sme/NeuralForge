@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `dropout` elimination pass (M5b).
 //!
 //! At inference time, dropout is a no-op (it only randomises during

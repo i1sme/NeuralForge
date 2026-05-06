@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `linear → relu` fusion pass (spec §7).
 //!
 //! Finds nodes matching the pattern:

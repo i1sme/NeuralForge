@@ -3,7 +3,7 @@ name = "compiler"
 version = "0.1.0"
 edition = "2021"
 description = "NeuralForge compiler core — lexer, parser, UIR builder (lib only)"
-license = "MIT OR Apache-2.0"
+license.workspace = true
 
 [dependencies]
 

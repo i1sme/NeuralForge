@@ -14,6 +14,113 @@ Format for each entry:
 
 ---
 
+## 2026-05-06 — License adoption: AGPL-3.0-only + CLA, open-source release prep
+
+### What was done
+- **`LICENSE`** — canonical GNU Affero General Public License v3.0
+  text (661 lines) fetched from `gnu.org/licenses/agpl-3.0.txt`.
+- **`CONTRIBUTING.md`** (new) — four-clause Contributor License
+  Agreement covering: (1) AGPL-3.0 license grant on contributions,
+  (2) commercial-relicensing grant to the project owner, (3)
+  future-patches clause explicitly covering follow-up commits,
+  force-pushes, amendments, rebases, and review-fixups within the
+  same PR, branch, or revision history, (4) original-work
+  attestation. Plus brief development-workflow pointer to
+  `CLAUDE.md`.
+- **`README.md`** — new `## License` and `## Contributing`
+  sections explaining: dual-license model (AGPL-3.0 + commercial-
+  by-request), explicit GCC/LLVM precedent that AGPL does **not**
+  extend to compiler output, attribution-as-courtesy etiquette
+  request (link back to repo), copyright assertion `Copyright (C)
+  2026 Arsenii Voloshyn`. Commercial-licensing contact:
+  `me.its1984@gmail.com`.
+- **`Cargo.toml`** — replaced `license = "MIT OR Apache-2.0"`
+  placeholder in 3 crate manifests (`compiler`, `nflc`,
+  `profiles-arm64`) with `license.workspace = true`. Added a new
+  `[workspace.package]` block to root `Cargo.toml` with
+  `license = "AGPL-3.0-only"` as the single source of truth.
+- **SPDX one-liner sweep across all 39 `.rs` files** —
+  `// SPDX-License-Identifier: AGPL-3.0-only` prepended (with a
+  blank-line separator) to every Rust source. Idempotent —
+  files already containing an SPDX header are skipped.
+- Workspace gates verified clean post-change: `cargo fmt --all
+  -- --check`, `cargo clippy --workspace --all-targets -- -D
+  warnings`, `cargo test --workspace` (223/223 passing — no
+  regressions from M8 baseline).
+
+### Decisions made
+
+**License choice: `AGPL-3.0-only` (not `-or-later`).** The
+"-only" suffix pins the license to v3 specifically. Rationale:
+the dual-licensing strategy depends on the project owner
+controlling relicensing decisions; "-or-later" would let the
+FSF effectively modify the project's license terms by publishing
+a future GPL version, which dilutes that control. FSF
+traditionally recommends "-or-later" for community goodwill;
+for a commercial dual-license, "-only" is the safer pin.
+
+**CLA via `CONTRIBUTING.md`, not via DCO or external CLA-bot.**
+A single-paragraph CLA in a markdown doc is sufficient for an
+early-stage one-person OSS project. Upgrading to DCO (sign-off
+line on each commit) or a CLA-bot becomes worth the friction
+only when the project actually starts attracting external
+contributions. Clause 3 ("future patches") is the crucial piece:
+without it, a contributor could open a PR, agree to the CLA,
+then push fixup commits during review that are technically not
+bound by the agreement. With clause 3, every commit on the same
+branch/PR is bound by the same grant.
+
+**SPDX one-liner per file (not full GPL-boilerplate header).**
+`SPDX-License-Identifier` is the modern Rust/kernel convention —
+machine-parseable, single line of noise per file, sufficient as
+a per-file license declaration. The full 15-line GPL boilerplate
+header is required only when no LICENSE file is present, which
+is not the case here.
+
+**No §7 binding attribution clause; attribution is README
+etiquette only.** AGPL §4 already mandates copyright preservation;
+adding a §7 additional term ("Required attribution: visible
+link to upstream") would create an irremovable obligation that
+some downstream users would refuse, with no proportional benefit.
+The README's "please link back" courtesy is honoured by most
+downstream users in practice without legal coercion.
+
+**Compiler output is explicitly NOT covered by AGPL — documented
+in README.** Per GNU FAQ ("the output of a program is not, in
+general, covered by the copyright on the code of the program")
+and the GCC/LLVM precedent. Documenting this explicitly in the
+README sets honest expectations: the AGPL barrier applies to
+those who fork, embed, or service-host the compiler, not to
+those who use vanilla NeuralForge to compile their own
+proprietary networks. The dual-licensing model targets the
+former group; the latter group is a free user.
+
+**`[workspace.package]` inheritance over per-crate license
+duplication.** Root `Cargo.toml` is the single source of truth;
+each crate's `license.workspace = true` inherits. New crates
+added to the workspace inherit automatically. Slightly more
+upfront mechanism, lower long-term maintenance cost.
+
+### Problems encountered
+- None. SPDX sweep ran cleanly; all 39 files already lacked an
+  SPDX header (no idempotency conflicts). `cargo fmt --check`
+  accepted the SPDX comment format unchanged (single-line `//`
+  comment + blank-line separator + existing content).
+
+### Next step
+After merge of this licensing PR, M9 brainstorming begins in a
+fresh worktree. Original axis-selection question stands: codegen
+breadth (x86_64 profile) vs modelling depth (NFL v0.2 grammar →
+attention) vs deployment reach (bare-metal `expf`).
+
+Out-of-scope follow-up surfaced during this session: `README.md`
+"Project status" section is stale — references "M5 fully closed"
+and "Next: Milestone 6", but the actual state is M8 closed.
+Worth a small refresh PR before the repo goes public, but not
+part of this licensing PR — different concern, different scope.
+
+---
+
 ## 2026-05-06 — M9 framing: Strategic Roadmap added; carry-forward list split into axes vs trigger-driven OQs
 
 ### What was done

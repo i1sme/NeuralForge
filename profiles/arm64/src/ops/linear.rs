@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Linear (matmul + optional bias-add) codegen.
 
 use crate::asm::emit_imm32;

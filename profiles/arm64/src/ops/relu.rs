@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Relu (elementwise max with zero) codegen.
 
 use crate::asm::emit_imm32;

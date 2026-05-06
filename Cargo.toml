@@ -1,3 +1,6 @@
 [workspace]
 resolver = "2"
 members = ["compiler", "nflc", "profiles/arm64"]
+
+[workspace.package]
+license = "AGPL-3.0-only"
