@@ -609,3 +609,32 @@ fn emit_linear_with_softmax_row_post_op_preserves_bias_add() {
         "fused softmax tail missing bl _expf:\n{s}"
     );
 }
+
+#[test]
+fn dropout_as_output_emits_copy_loop() {
+    let uir = build_uir(
+        "model OnlyDropout [b=2, k=4]:\n    x: Tensor[b, k]\n    x -> dropout[rate=0.1]\n",
+    );
+    let asm = lower(&uir).expect("lower");
+    let s = &asm.source;
+    assert!(
+        s.contains("; dropout-as-output:"),
+        "missing dropout-as-output comment in:\n{s}"
+    );
+    assert!(
+        s.contains(".Ldropout_0_0:"),
+        "missing dropout loop label in:\n{s}"
+    );
+    assert!(
+        s.contains("ldr     s3, [x11"),
+        "missing s3 load from src ptr in:\n{s}"
+    );
+    assert!(
+        s.contains("str     s3, [x12"),
+        "missing s3 store to dst ptr in:\n{s}"
+    );
+    assert!(
+        !s.contains("fmax"),
+        "dropout copy must not clamp (no fmax expected in identity copy):\n{s}"
+    );
+}
