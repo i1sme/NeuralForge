@@ -14,6 +14,119 @@ Format for each entry:
 
 ---
 
+## 2026-05-06 — License pivot: AGPL-3.0-only → Apache-2.0
+
+### What was done
+- **`LICENSE`** — AGPL-3.0 text overwritten with canonical
+  Apache-2.0 text from `apache.org/licenses/LICENSE-2.0.txt`
+  (661 → 202 lines).
+- **`CONTRIBUTING.md`** — simplified: the four-clause CLA from
+  the AGPL adoption is dropped. Apache-2.0 §5 ("Submission of
+  Contributions") implicitly licenses contributions under the
+  same terms; no separate CLA is required at this stage. The
+  commercial-relicensing grant (clause 2 in the previous CLA)
+  is removed entirely — there is no dual-licensing model under
+  pure Apache-2.0. Development-workflow pointer to `CLAUDE.md`
+  retained.
+- **`README.md`** `## License` section rewritten — dual-license
+  description, "What AGPL covers, and what it does not"
+  paragraph (GCC/LLVM compiler-output precedent), and
+  commercial-use contact section all removed. Replaced with a
+  single-license description for Apache-2.0 that explains the §3
+  patent-grant rationale (the reason for choosing Apache-2.0
+  over MIT specifically). `## Contributing` section updated to
+  match (no CLA referenced).
+- **`Cargo.toml`** (workspace root) — `[workspace.package].license`
+  changed from `"AGPL-3.0-only"` to `"Apache-2.0"`. Per-crate
+  inheritance via `license.workspace = true` unchanged (still
+  three crates, still inheriting one source of truth).
+- **SPDX one-liner sweep** — `// SPDX-License-Identifier:
+  AGPL-3.0-only` replaced with `// SPDX-License-Identifier:
+  Apache-2.0` across all 39 `.rs` files in the workspace
+  (`sed -i ''` via `find -exec`). 39/39 verified post-sweep.
+- Workspace gates verified clean post-change: `cargo fmt --all
+  -- --check`, `cargo clippy --workspace --all-targets -- -D
+  warnings`, `cargo test --workspace` (223/223 passing — no
+  behaviour regressions).
+
+### Decisions made
+
+**Pivot rationale: AGPL+commercial was premature optimization.**
+For a 0.1-pre-alpha project with zero public users, AGPL+commercial
+dual-licensing pays a real, immediate cost (corporate-blacklist
+adoption friction — Google internally bans AGPL, many corporate
+`LICENSE_POLICY` files explicitly forbid it; contributor CLA
+friction; "premature monetization" pattern-matching by readers,
+who associate AGPL+commercial with mature MongoDB-class projects
+defending accumulated value, not pre-alpha projects with no users
+yet) to defend a commercial revenue stream that does not exist.
+The barrier activates legal-review **before** anyone has tried
+the technology, so it can pre-emptively close the very adoption
+channel that would generate eventual commercial demand.
+
+The standard path for early-stage infrastructure projects is the
+opposite ordering: permissive licensing first, build adoption,
+re-evaluate licensing later if real commercial interest emerges
+and there is an actual community for the rationale to address.
+Redis (MIT → BSL), MongoDB (AGPL → SSPL), and Elasticsearch
+(Apache → SSPL) all monetised already-accumulated open-source
+impact; none defended speculative future revenue.
+
+AGPL §13 (the SaaS clause, the licence's headline feature) almost
+never applies to a compiler — compilers are local tools, not
+network services — so the practical copyleft surface AGPL added
+was narrow to begin with. The price/value ratio at this stage
+was poor.
+
+**Apache-2.0 over MIT.** Apache §3 grants an explicit patent
+license from contributors. MIT is silent on patents. For an
+infrastructure compiler where codegen algorithms may carry patent
+claims, the explicit grant forecloses the scenario where a
+contributor (or their employer) later asserts patents over
+contributions they made. Standard choice for compiler/runtime
+projects (LLVM, Apache TVM, Bazel, etc.).
+
+**No CLA at this stage.** Apache-2.0 §5 ("Submission of
+Contributions") states that any contribution intentionally
+submitted for inclusion is licensed under the Apache-2.0 terms
+unless the contributor states otherwise. For a project not
+pursuing dual-licensing, this implicit grant is sufficient. A
+formal CLA can be added later if the project's needs change.
+
+### Problems encountered
+
+PR #18 (the AGPL adoption) had already been merged to `main`
+before this pivot conversation occurred. The pivot is therefore
+implemented as a **forward license-change PR** rather than a
+close-and-replace of an unmerged PR — this PR overwrites the
+AGPL artefacts on `main` with Apache-2.0 equivalents (LICENSE
+whole-file overwrite; SPDX headers sed-replaced across all 39
+.rs files; Cargo.toml `workspace.package.license` string change;
+README §License rewritten; CONTRIBUTING.md simplified).
+
+Branch `claude/agpl-license` and PR #18 remain on the remote as
+a historical record of the AGPL approach and the reasoning that
+led to it, plus this DEVLOG entry preserves the pivot rationale
+for future contributors who might wonder "why did we change
+license once already".
+
+Minor tooling friction during execution: macOS `xargs sed -i ''`
+and `find -exec sed -i '' '...' {} \;` chained with
+`&& grep -c ...` exited 1 silently because `grep -c` returns
+non-zero when there are zero matches (which is the *desired*
+post-sweep state: no AGPL headers remain). Verification was
+restructured to use `awk` counters instead of `grep -c` chained
+with `&&`.
+
+### Next step
+
+After merge of this license-pivot PR, M9 brainstorming begins in
+a fresh worktree. Original axis-selection question stands: codegen
+breadth (x86_64 profile) vs modelling depth (NFL v0.2 grammar →
+attention) vs deployment reach (bare-metal `expf`).
+
+---
+
 ## 2026-05-06 — README "Project status" refresh: M5 → M8 catch-up before public surface
 
 ### What was done
