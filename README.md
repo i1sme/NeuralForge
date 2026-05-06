@@ -165,38 +165,29 @@ vectorisation, an x86_64 profile, and a RISC-V profile are future work.
 
 ## License
 
-NeuralForge is dual-licensed:
+NeuralForge is licensed under the [Apache License, Version 2.0](LICENSE).
 
-- **Open-source use:** [GNU Affero General Public License v3.0](LICENSE)
-  (`AGPL-3.0-only`). You may use, modify, and distribute this software
-  freely under the terms of the AGPL. The key requirement: if you offer
-  a modified version as a network service, or distribute modifications,
-  you must also distribute the corresponding source under AGPL-3.0.
-- **Commercial use:** if the AGPL terms are incompatible with your use
-  case (closed-source product, embedded redistribution, modified network
-  service without source disclosure, etc.), a commercial license is
-  available. Contact [me.its1984@gmail.com](mailto:me.its1984@gmail.com)
-  to discuss terms.
+You may use, modify, and distribute this software freely under the
+terms of the Apache License. The license includes an explicit patent
+grant from contributors (Apache 2.0 §3) — meaningful for an
+infrastructure compiler where codegen algorithms may carry patent
+claims, where a permissive license like MIT would be silent on
+patents.
 
-**What AGPL covers, and what it does not.** AGPL applies to NeuralForge
-itself — the compiler, its profiles, and any modifications to them. It
-does **not** extend to assembly or binaries produced by compiling your
-own neural networks with NeuralForge — that output is yours, under
-whatever license you choose, just like the output of GCC or LLVM.
-
-**Attribution.** If you use NeuralForge in a public project, please link
-back to [https://github.com/i1sme/NeuralForge](https://github.com/i1sme/NeuralForge).
-This is a courtesy request, not a legal requirement beyond what the AGPL
-already mandates (preservation of copyright notices).
+If you use NeuralForge in a public project, please link back to
+[https://github.com/i1sme/NeuralForge](https://github.com/i1sme/NeuralForge).
+This is a courtesy request, not a legal requirement beyond what the
+Apache License already mandates (preservation of copyright notices
+and license text in redistributions).
 
 Copyright (C) 2026 Arsenii Voloshyn.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor license
-agreement (CLA) and development workflow. The CLA is required for
-your contribution to be accepted, and is what enables the dual-licensing
-model.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow.
+NeuralForge is licensed under Apache 2.0; per §5 of the license,
+contributions are implicitly licensed under the same terms — no
+separate Contributor License Agreement is required.
 
 ---
 
