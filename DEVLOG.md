@@ -14,6 +14,92 @@ Format for each entry:
 
 ---
 
+## 2026-05-07 — Milestone 9 closed: x86_64 Linux ELF profile + profile-api contract
+
+### What was done
+- **`profile-api/`** (new crate) — `Asm`, `FnSig`, `ParamSlot`, `ParamKind`,
+  `LowerError` types + minimal `Profile` trait (`lower` + `sym_prefix`).
+  Group 1 commit `a7d1b7a`. 5 smoke tests; profile-neutral `Display`
+  message.
+- **`profiles/arm64/`** migrated onto the trait. `types.rs` deleted; types
+  re-exported from `profile-api`. `Arm64Profile` struct + `impl Profile`.
+  Hardcoded `MACHO_SYM_PREFIX` + `bl _expf` literals replaced with format
+  substitutions through `sym_prefix: &'static str`. **Asm output
+  byte-identical to pre-migration baseline (sha256-verified per fixture
+  for all 10 fixtures).** Group 2 commit `a08fd24`. OQ-NEW closed.
+- **`profiles/x86_64/`** (new crate) — scalar SSE2 Linux ELF codegen,
+  full op-parity with arm64. AT&T syntax. `compute_frame_size` (+ 8 unit
+  tests with inline alignment derivation) for SysV alignment. xmm-spill
+  via `(%rsp)`, `8(%rsp)` (16-byte reserve owned by `assign_buffers`)
+  across `call expf@PLT` (no callee-saved FP under SysV).
+  Group 3 commit `47bef54`; +53 unit tests (281 total).
+- **`nflc compile --profile <name>`** dispatches via `Box<dyn Profile>`.
+  Three CLI smoke tests in new `nflc/tests/cli.rs`. Group 4 commit
+  `fab17c5`; +3 CLI tests (284 total).
+- **CI**: `unit` job (ubuntu-latest) gains x86_64 FFI tests via cfg-gating
+  (`#![cfg(all(target_os = "linux", target_arch = "x86_64"))]`);
+  `integration` job (macos-14) unchanged. 13 mirror FFI tests + 1
+  fused_softmax_xmm_spill_x86_64 (numerical proof of §7.4 spill
+  strategy). Group 5 commit `9ee5772`. ~300 tests on Linux CI; 284
+  locally on macOS arm64 (FFI suite cfg-skipped).
+- **Docs**: this commit. New `docs/profile_guide/x86_64.md`; `arm64.md`,
+  `PROJECT_SPEC.md` (profile table + Axis 1 annotation + OQ-NEW closure +
+  OQ-BENCH opening), `CLAUDE.md` (repo tree + status), `README.md`.
+
+### Decisions made
+
+**AT&T syntax for x86_64 emitters** — gas default on Linux. The plan
+resolved the spec's §7.3 vs §7.4 syntax inconsistency by adopting AT&T
+uniformly.
+
+**`sym_prefix: &'static str` plumbing** (option (b) from spec §6.1)
+applied uniformly to both arm64 (commit 2) and x86_64 (commit 3). One
+function-arg per call site, no `dyn Profile` indirection in hot codegen.
+
+**OQ-NEW closed**: `node_uses_softmax` removed in favour of UIR-side
+`calls_extern_math()`. Single source of truth across profiles.
+
+**OQ-BENCH opened**: trigger fires on M9 merge; benchmark harness work
+is informational follow-up, not a regression gate.
+
+**Stack-slot ownership for fused-softmax xmm-spill in `assign_buffers`**
+(spec §7.4, plan-time fix landed in pre-execution commit `4e89189`).
+Slot positions are pinned at `(%rsp)` (row_max, offset 0) and `8(%rsp)`
+(row_sum, offset 8); the 16-byte reserve is owned by `assign_buffers`,
+which initialises `stack_offset` at 16 when `model.calls_extern_math()`
+— shifting all `BufferLoc::StackOffset` values up by 16. This anchors
+the spill addresses across all models (including those with non-empty
+intermediate buffers) without per-emitter parameterisation, and
+prevents the buffer/slot overlap that an earlier draft of the plan
+would have caused.
+
+### Problems encountered
+- **`Display` message on `LowerError`** was profile-specific in arm64
+  (`"is not supported by the arm64 profile"`). The spec said "verbatim
+  migration" but verbatim copy would have put "arm64" in errors raised
+  by x86_64. Plan Task 1.3 makes the message profile-neutral
+  (`"this profile"`); a dedicated test asserts the Display string
+  contains neither "arm64" nor "x86_64".
+- **NFL fixture syntax**: the plan's emitter tests originally used
+  `linear[output=N]` form; the grammar requires the positional
+  `linear[N]` form (or `linear[N, bias=true]`). Caught at first
+  compile of subagent C's emit_linear tests; tests adjusted.
+- **clippy `dead_code` on `compute_is_leaf`** — the helper was
+  introduced in subagent A as a mirror of the arm64 analyzer, but
+  x86_64's prologue/epilogue does not actually consume it (the SysV
+  prologue always pushes `%rbp`, regardless of leaf-ness). Removed
+  the helper outright rather than masking with `#[allow(dead_code)]`;
+  the corresponding 2 unit tests removed accordingly.
+
+### Next step
+Push branch + open PR titled `feat(m9): x86_64 Linux ELF profile +
+profile-api contract`. Once merged, OQ-BENCH's trigger fires; the next
+milestone selection runs over the post-M9 Strategic Roadmap (Axis 2
+NFL v0.2, Axis 3 bare-metal `expf`, or Axis 1 follow-ups: SIMD,
+macOS x86_64).
+
+---
+
 ## 2026-05-07 — M9 plan/spec sync: stack-slot ownership moved to `assign_buffers` (pre-execution fix)
 
 ### What was done

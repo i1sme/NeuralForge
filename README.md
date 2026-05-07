@@ -47,7 +47,9 @@ model Classifier [batch=32, input=784, output=10]:
 | `CLAUDE.md` | Context file for Claude Code (AI development assistant) |
 | `compiler/` | `compiler` crate — lexer, parser, AST, Universal IR, optimisation passes |
 | `nflc/` | `nflc` crate — CLI binary (`nflc parse`, `nflc compile`) |
+| `profile-api/` | `profile-api` crate — shared `Profile` trait, `Asm`, `FnSig`, `ParamSlot`, `ParamKind`, `LowerError` |
 | `profiles/arm64/` | `profiles-arm64` crate — AArch64 / Apple Silicon code generator |
+| `profiles/x86_64/` | `profiles-x86_64` crate — Linux ELF scalar SSE2 code generator (M9) |
 | `language/` | NFL grammar (`grammar.ebnf`, frozen at v0.1) |
 | `tests/fixtures/` | Sample `.nfl` files used in integration tests |
 | `docs/` | Language reference (`grammar.md`, `uir.md`) and profile guide (`arm64.md`) |
@@ -73,37 +75,32 @@ Look it up in `DEVLOG.md`. Every significant decision is recorded there with its
 
 ## Project status
 
-**Milestone 8 fully closed.** The compiler stack is end-to-end working for
-inference-only NFL v0.1, with a complete arm64 profile, a multi-pass
-kernel-fusion pipeline that includes the attention-shape `linear → softmax`
-pattern, hardened large-dimension codegen, and a v0.1 UIR viewer.
+**Milestone 9 complete** — second concrete profile (`x86_64` Linux ELF, scalar)
+ships. A single NFL source now compiles to two distinct binaries via
+`nflc compile --profile arm64` and `nflc compile --profile x86_64`; the
+profile-isolation hypothesis is validated. Full op-parity with arm64 minus SIMD.
 
 What's working today:
 
 - Lexer, parser, typed AST, Universal IR (UIR)
-- AArch64 scalar code generation: `linear` (with or without bias), `relu`,
-  `dropout`, `softmax` (libm `expf`); large-dimension immediates routed
-  uniformly through a single emit helper so dims above the 12-bit cmp
-  range now compile cleanly
-- UIR-pass framework with three passes shipped — `EliminateDropout`
-  (removes inference-time-noop Dropout), `FuseLinearRelu` (bias-aware
-  fusion of `linear → relu`), and `FuseLinearSoftmax` (attention-pattern
-  fusion of `linear → softmax` into a row-wise emit branch)
+- **`profile-api/`** — shared `Profile` trait, `Asm`, `FnSig`, `ParamSlot`,
+  `ParamKind`, `LowerError` types; both profiles implement the trait
+- **AArch64 scalar code generation** (`profiles/arm64/`): `linear` (with or
+  without bias), `relu`, `dropout`, `softmax` (libm `expf`); large-dimension
+  immediates routed uniformly through `emit_imm32`
+- **x86_64 Linux ELF scalar code generation** (`profiles/x86_64/`): full
+  op-parity with arm64; AT&T syntax; `call expf@PLT`; SysV AMD64 ABI;
+  xmm-spill strategy for `row_max`/`row_sum` across `call expf@PLT` (no
+  callee-saved FP registers under SysV)
+- UIR-pass framework with three passes shipped — `EliminateDropout`,
+  `FuseLinearRelu`, and `FuseLinearSoftmax`
 - CLI: `nflc parse` (with `--uir` compact and `--uir-verbose` annotated
-  rendering) and `nflc compile` (with `--no-passes` and `--passes <list>`
-  filters)
+  rendering) and `nflc compile --profile <arm64|x86_64>`
 - Bit-exact fused-vs-unfused FFI integration tests across all
-  fusion-eligible fixtures
-- Viewer v0.1: `nflc parse --uir-verbose` renders annotated UIR with
-  top-level and per-model summaries, and fused post-ops on indented lines
-- 223 tests passing across the workspace; CI green; `cargo fmt`,
-  `cargo clippy -D warnings`, `cargo test --workspace` all clean
-
-Next: scope for **Milestone 9** is decided by selecting one of three open
-axes — codegen breadth, modelling depth, or deployment reach — described
-in [`PROJECT_SPEC.md` §"Strategic Roadmap"](PROJECT_SPEC.md#strategic-roadmap).
-The chosen axis seeds a fresh brainstorming round rather than picking from
-a flat list of follow-ups.
+  fusion-eligible fixtures; x86_64 FFI tests run on ubuntu-latest CI
+- Viewer v0.1: `nflc parse --uir-verbose` renders annotated UIR
+- 284 tests passing on macOS arm64 (~300 on Linux x86_64 CI); CI green;
+  `cargo fmt`, `cargo clippy -D warnings`, `cargo test --workspace` all clean
 
 NFL training syntax (loss, optimiser) is deferred to v0.2.
 
@@ -126,10 +123,14 @@ cargo run -p nflc -- parse tests/fixtures/classifier.nfl --uir
 cargo run -p nflc -- parse tests/fixtures/classifier.nfl --uir-verbose
 ```
 
-Compile to AArch64 assembly:
+Compile to assembly (specify target profile):
 
 ```sh
-cargo run -p nflc -- compile tests/fixtures/classifier.nfl > out.s
+# AArch64 / Apple Silicon (default profile)
+cargo run -p nflc -- compile tests/fixtures/classifier.nfl --profile arm64 > out_arm64.s
+
+# x86_64 Linux ELF (M9)
+cargo run -p nflc -- compile tests/fixtures/classifier.nfl --profile x86_64 > out_x86_64.s
 ```
 
 Inspect or filter optimisation passes:
@@ -148,8 +149,9 @@ Run the full test suite:
 cargo test --workspace
 ```
 
-The arm64 profile targets Apple Silicon and AArch64 POSIX hosts. NEON / SVE
-vectorisation, an x86_64 profile, and a RISC-V profile are future work.
+The arm64 profile targets Apple Silicon and AArch64 POSIX hosts. The x86_64
+profile targets Linux ELF. NEON / SVE / AVX vectorisation and a RISC-V profile
+are future work.
 
 ---
 

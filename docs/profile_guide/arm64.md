@@ -28,6 +28,12 @@ plus the supporting infrastructure for multi-stage models (intermediate stack
 buffers, non-leaf prologue, per-model label namespacing, packed `params` buffer
 with typed slot metadata).
 
+As of M9, arm64 coexists with the x86_64 Linux ELF profile. Both implement the
+shared `Profile` trait from `profile-api/`; the symbol-prefix abstraction
+(`sym_prefix() -> "_"` on Mach-O, `""` on ELF) plus per-profile asm emission is
+the contract. Cross-profile architectural differences (notably: callee-saved FP
+register sets) are documented in [`x86_64.md`](x86_64.md).
+
 ---
 
 ## 1. Calling convention (ABI)

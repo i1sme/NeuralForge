@@ -66,7 +66,7 @@ Initial target profiles:
 | Profile     | Architecture       | Key capability              |
 |-------------|--------------------|-----------------------------|
 | `arm64`     | Apple Silicon / AArch64 POSIX | Scalar AArch64 assembly: linear (± bias), relu, dropout (no-op pass-through), softmax (libm `expf`). All 5 M3 fixtures lower end-to-end (M4a + M4b). NEON / SVE / AMX in later slices. |
-| `x86_64`    | Intel / AMD        | AVX-512, VNNI instructions (future) |
+| `x86_64`    | Intel / AMD (Linux ELF) | Linux ELF scalar SSE2: linear (± bias), relu, dropout, softmax (libm expf via PLT). Full op-parity with arm64 minus SIMD/AVX. macOS x86_64 (Mach-O) and SIMD remain open. |
 | `riscv64`   | RISC-V             | RVV vector extension (future) |
 
 A profile is a self-contained module. Adding support for a new architecture means writing a new profile — the language and compiler core remain unchanged.
@@ -170,7 +170,7 @@ advance. Trigger-driven cleanup is intentionally excluded — it activates on
 its own trigger condition and lives under "Open Questions" below.
 
 ```
-x86_64 profile → MACHO_SYM_PREFIX rename
+x86_64 profile [M9 complete] → MACHO_SYM_PREFIX rename [closed — abstracted as Profile::sym_prefix() in M9]
 NFL v0.2 grammar → attention ops → profile-level viewer annotations
 bare-metal expf → drop libm dependency
 ```
@@ -178,7 +178,9 @@ bare-metal expf → drop libm dependency
 - **Axis 1 — codegen breadth.** Adding a second concrete profile (x86_64)
   validates the profile-isolation principle; the per-OS symbol-prefix rename
   falls out as a natural consequence of the work, not as a separately-scheduled
-  milestone.
+  milestone. M9 ships scalar Linux ELF; SIMD/AVX and macOS x86_64 remain as
+  possible follow-ups. `MACHO_SYM_PREFIX rename` closed — abstracted as
+  `Profile::sym_prefix()` in M9.
 - **Axis 2 — modelling depth.** NFL v0.2 grammar unblocks attention patterns
   (Q/K/V projections, scaled dot-product, axis-N softmax). Profile-level viewer
   annotations (per-node footprint, stack frame, callee-saved set) follow once a
@@ -201,11 +203,12 @@ bare-metal expf → drop libm dependency
 Items raised during a milestone that intentionally do not get scheduled — they
 activate when their trigger condition fires.
 
-- **OQ-NEW** (M8) — duplicated `node_uses_softmax` / `calls_extern_math` predicates between `profiles/arm64/src/buffer.rs` and `compiler/src/ir/types.rs`. *Trigger: next change to either predicate (e.g. `tanh`-via-libm or any other extern-math op).*
+- **OQ-NEW** — **Closed in M9 (commit `a08fd24`).** `profiles/arm64/src/buffer.rs::node_uses_softmax` was removed; both `compute_is_leaf` and `compute_callee_saved` now consume `UirModel::calls_extern_math()` (UIR-side predicate). All sites reduced to the UIR predicate; no profile-specific information was needed. Single source of truth across profiles.
 - **OQ-7** (M7) — per-pass `eliminate_one_model` / `fuse_one_model` return `Result<UirModel, PassError>` despite never producing `Err`. *Trigger: first real `Err`-case in pass-level logic.*
 - **OQ-8** (M7) — `compiler/src/passes/rewriter.rs` could lift to `compiler/src/ir/`. *Trigger: a non-pass UIR-rewrite consumer appears.*
 - **OQ-9** (M7) — `producer_post_ops: Vec<PostOp>` could generalise to `enum NodeMutation`. *Trigger: a fourth pass needs non-PostOp producer mutation.*
 - **M5c OQ-4** — `BuildError::span()` + `Diagnostic` trait for richer error reporting. *Trigger: error-reporting ergonomics become a real pain point in a downstream milestone.*
+- **OQ-BENCH** (opened by M9 spec, fires on M9 merge) — Build a benchmark harness that compiles a single NFL source through both `arm64` and `x86_64` profiles, runs both binaries with the same input/params, and reports timing side-by-side. Goal: quantify the cost of "scalar-only" vs the eventual SIMD profile, and lay groundwork for performance claims. *Trigger: M9 merged. Scope: stretch enough to handle multiple fixtures; output a markdown report. No regression-gate yet — informational only.*
 
 ## Decisions (formerly open, now resolved)
 
