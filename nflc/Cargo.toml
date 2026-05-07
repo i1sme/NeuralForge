@@ -6,8 +6,10 @@ description = "NeuralForge Language Compiler — CLI binary"
 license.workspace = true
 
 [dependencies]
-compiler = { path = "../compiler" }
-profiles-arm64 = { path = "../profiles/arm64" }
+compiler        = { path = "../compiler" }
+profile-api     = { path = "../profile-api" }
+profiles-arm64  = { path = "../profiles/arm64" }
+profiles-x86_64 = { path = "../profiles/x86_64" }
 
 [[bin]]
 name = "nflc"

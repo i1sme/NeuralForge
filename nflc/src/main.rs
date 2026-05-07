@@ -8,7 +8,7 @@
 //! - `nflc parse <file> --tokens` → pretty-print token stream to stdout
 //! - `nflc parse <file> --uir`    → build and pretty-print the UIR
 //! - `nflc parse <file> --uir-verbose` → build and pretty-print the UIR with annotated metadata
-//! - `nflc compile <file> --profile <name>` → lower UIR to assembly
+//! - `nflc compile <file> --profile <arm64|x86_64>` → lower UIR to assembly (arm64 Mach-O or x86_64 Linux ELF)
 //! - `nflc compile <file> --profile <name> -o <file.s>` → lower UIR to assembly, write to file
 //! - `nflc compile <file> --profile <name> [--no-passes]` → skip optimisation passes
 //! - `nflc compile <file> --profile <name> [--passes <list>]` → run only listed passes
@@ -70,7 +70,7 @@ fn print_usage() {
     println!("  nflc parse   <file.nfl> --tokens           Print the lexer's token stream");
     println!("  nflc parse   <file.nfl> --uir              Build and pretty-print the UIR");
     println!("  nflc parse   <file.nfl> --uir-verbose      Print UIR with annotated metadata");
-    println!("  nflc compile <file.nfl> --profile <name>   Lower UIR to assembly");
+    println!("  nflc compile <file.nfl> --profile <arm64|x86_64>   Lower UIR to assembly");
     println!("                          [-o <file.s>]      Output path (default: stdout)");
     println!("                          [--no-passes]      Skip optimisation passes (debugging)");
     println!(
@@ -428,10 +428,17 @@ fn run_compile(args: CompileArgs) -> ExitCode {
         }
     };
 
-    if profile != "arm64" {
-        eprintln!("error: unknown profile '{}' (supported: arm64)", profile);
-        return ExitCode::FAILURE;
-    }
+    let profile_impl: Box<dyn profile_api::Profile> = match profile.as_str() {
+        "arm64" => Box::new(profiles_arm64::Arm64Profile),
+        "x86_64" => Box::new(profiles_x86_64::X86_64Profile),
+        other => {
+            eprintln!(
+                "error: unknown profile '{}' (supported: arm64, x86_64)",
+                other
+            );
+            return ExitCode::FAILURE;
+        }
+    };
 
     // M5b: run UIR-passes pipeline with optional filter, or skip
     // entirely if --no-passes. See spec §9.3.
@@ -497,7 +504,7 @@ fn run_compile(args: CompileArgs) -> ExitCode {
         }
     };
 
-    match profiles_arm64::lower(&post_pass_uir) {
+    match profile_impl.lower(&post_pass_uir) {
         Ok(asm) => match out_path {
             Some(p) => match std::fs::write(&p, &asm.source) {
                 Ok(()) => ExitCode::SUCCESS,
