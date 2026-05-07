@@ -57,6 +57,24 @@ pub fn emit_linear(
         }
     }
 
+    // Save params ptr (%rsi) into %xmm6 BEFORE the matmul body clobbers
+    // %rsi as offset scratch. The next linear in the same function (e.g.
+    // linear[1] → linear[2] in a multi-layer model) reads %rsi at the
+    // top of its own emit_linear (`leaq weight_offset(%rsi), %r9`); if
+    // we don't preserve it, that read produces a wild pointer and
+    // SIGSEGVs on the first weight load.
+    //
+    // Skip the save when SoftmaxRow is fused — that's the LAST linear in
+    // the model (softmax is always terminal), so no follow-up emit_linear
+    // needs %rsi. Saving across the `call expf@PLT` is also pointless
+    // because xmm6 is caller-saved under SysV; the call would clobber it.
+    let preserve_params_ptr = !fused_post_ops
+        .iter()
+        .any(|p| matches!(p, PostOp::SoftmaxRow));
+    if preserve_params_ptr {
+        s.push_str("    movq    %rsi, %xmm6\n");
+    }
+
     // 2. Outer i-loop: %rax = i, compared against b.
     s.push_str("    xorq    %rax, %rax\n");
     s.push_str(&format!(".Lmm_i_{lid}:\n"));
@@ -154,6 +172,14 @@ pub fn emit_linear(
                 });
             }
         }
+    }
+
+    // 9. Restore params ptr (%rsi) from %xmm6 so the next emit_linear in
+    //    the same function (in multi-layer models) reads the correct
+    //    pointer at the top of its weight-base setup. No-op if we didn't
+    //    save above (SoftmaxRow case — this is the last linear).
+    if preserve_params_ptr {
+        s.push_str("    movq    %xmm6, %rsi\n");
     }
 
     Ok(s)
