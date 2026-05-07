@@ -1,24 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! NeuralForge arm64 scalar codegen profile (M4a).
+//! NeuralForge arm64 scalar codegen profile.
 //!
-//! Lowers a [`compiler::Uir`] to AArch64 Mach-O assembly text via [`lower`].
+//! Lowers a [`compiler::Uir`] to AArch64 Mach-O assembly text via
+//! [`Arm64Profile`]. The free [`lower`] shim is preserved for direct
+//! callers (arm64 integration tests) that pre-date the trait.
 
 mod asm;
 mod buffer;
 mod codegen;
 mod ops;
-mod types;
 
-pub use types::{Asm, FnSig, LowerError, ParamKind, ParamSlot};
+pub use profile_api::{Asm, FnSig, LowerError, ParamKind, ParamSlot};
 
 use compiler::Uir;
+use profile_api::Profile;
 
-/// Lower a [`Uir`] to AArch64 assembly.
-///
-/// Returns [`LowerError`] on any unsupported op or structural problem.
+/// arm64 profile implementation. Lowers UIR to AArch64 Mach-O assembly.
+pub struct Arm64Profile;
+
+impl Profile for Arm64Profile {
+    fn lower(&self, uir: &Uir) -> Result<Asm, LowerError> {
+        codegen::walk_uir(uir, self.sym_prefix())
+    }
+
+    fn sym_prefix(&self) -> &'static str {
+        "_"
+    }
+}
+
+/// Free-function shim retained for direct callers (arm64 integration
+/// tests). Equivalent to `Arm64Profile.lower(uir)`.
 pub fn lower(uir: &Uir) -> Result<Asm, LowerError> {
-    codegen::walk_uir(uir)
+    Arm64Profile.lower(uir)
 }
 
 #[cfg(test)]

@@ -4,17 +4,16 @@
 //!
 //! Per-op emitters land here as Tasks 3-5 progress.
 
-use crate::types::{ParamKind, ParamSlot};
-use crate::{Asm, FnSig, LowerError};
 use compiler::{NodeId, NodeKind, StdOp, Uir, UirModel};
+use profile_api::{Asm, FnSig, LowerError, ParamKind, ParamSlot};
 
 /// Walk the entire UIR, returning the combined asm source + per-model FnSigs.
-pub fn walk_uir(uir: &Uir) -> Result<Asm, LowerError> {
+pub fn walk_uir(uir: &Uir, sym_prefix: &'static str) -> Result<Asm, LowerError> {
     let mut source = String::new();
     let mut functions = Vec::with_capacity(uir.models.len());
 
     for (model_idx, model) in uir.models.iter().enumerate() {
-        let (model_asm, sig) = walk_model(model_idx, model)?;
+        let (model_asm, sig) = walk_model(model_idx, model, sym_prefix)?;
         source.push_str(&model_asm);
         source.push('\n');
         functions.push(sig);
@@ -23,7 +22,11 @@ pub fn walk_uir(uir: &Uir) -> Result<Asm, LowerError> {
     Ok(Asm { source, functions })
 }
 
-fn walk_model(model_idx: usize, model: &UirModel) -> Result<(String, FnSig), LowerError> {
+fn walk_model(
+    model_idx: usize,
+    model: &UirModel,
+    sym_prefix: &'static str,
+) -> Result<(String, FnSig), LowerError> {
     use crate::asm::{format_function_epilogue, format_function_prologue, LeafKind};
     use crate::buffer::{assign_buffers, compute_callee_saved, compute_is_leaf};
 
@@ -105,6 +108,7 @@ fn walk_model(model_idx: usize, model: &UirModel) -> Result<(String, FnSig), Low
         leaf,
         regs,
         assignment.stack_bytes,
+        sym_prefix,
     ));
 
     // Per-op emission (Tasks 5-8 refactor this dispatch into ops/*).
@@ -153,6 +157,7 @@ fn walk_model(model_idx: usize, model: &UirModel) -> Result<(String, FnSig), Low
                         bias_offset,
                         node.source_span,
                         fused_post_ops,
+                        sym_prefix,
                     )?);
                     linear_idx += 1;
                 }
@@ -198,6 +203,7 @@ fn walk_model(model_idx: usize, model: &UirModel) -> Result<(String, FnSig), Low
                         softmax_idx,
                         src_loc,
                         dst_loc,
+                        sym_prefix,
                     ));
                     softmax_idx += 1;
                 }
@@ -208,7 +214,7 @@ fn walk_model(model_idx: usize, model: &UirModel) -> Result<(String, FnSig), Low
                 // graceful (M4b-era variant, made live by this arm).
                 #[allow(unreachable_patterns)]
                 _ => {
-                    return Err(crate::types::LowerError::UnsupportedOp {
+                    return Err(LowerError::UnsupportedOp {
                         op: format!("{op}"),
                         span: node.source_span,
                     });

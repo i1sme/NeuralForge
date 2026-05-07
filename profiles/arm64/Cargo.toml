@@ -6,7 +6,8 @@ description = "NeuralForge arm64 codegen profile"
 license.workspace = true
 
 [dependencies]
-compiler = { path = "../../compiler" }
+compiler    = { path = "../../compiler" }
+profile-api = { path = "../../profile-api" }
 
 [dev-dependencies]
 libloading = "0.8"
