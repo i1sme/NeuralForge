@@ -51,9 +51,9 @@ pub fn emit_linear(
     }
     if let Some(boff) = bias_offset {
         if boff == 0 {
-            s.push_str("    movq    %rsi, %r12\n");
+            s.push_str("    movq    %rsi, %rdx\n");
         } else {
-            s.push_str(&format!("    leaq    {}(%rsi), %r12\n", boff * 4));
+            s.push_str(&format!("    leaq    {}(%rsi), %rdx\n", boff * 4));
         }
     }
 
@@ -72,38 +72,38 @@ pub fn emit_linear(
     s.push_str(&format!("    jge     .Lmm_j_end_{lid}\n"));
 
     // 4. Innermost k-loop: %xmm0 = sum.
-    s.push_str("    xorq    %r14, %r14\n");
+    s.push_str("    xorq    %rdi, %rdi\n");
     s.push_str("    xorps   %xmm0, %xmm0\n"); // sum init
     s.push_str(&format!(".Lmm_k_{lid}:\n"));
     s.push_str(&emit_imm32_to_r10(k as u32));
-    s.push_str("    cmpq    %r10, %r14\n");
+    s.push_str("    cmpq    %r10, %rdi\n");
     s.push_str(&format!("    jge     .Lmm_k_end_{lid}\n"));
 
     // src offset = i*k + kk; load src[i*k + kk] → xmm1
     s.push_str(&emit_imm32_to_r10(k as u32));
-    s.push_str("    movq    %rax, %r15\n");
-    s.push_str("    imulq   %r10, %r15\n"); // %r15 = i * k
-    s.push_str("    addq    %r14, %r15\n"); // %r15 = i*k + kk
-    s.push_str("    movss   (%r8, %r15, 4), %xmm1\n"); // xmm1 = src[i*k + kk]
+    s.push_str("    movq    %rax, %rsi\n");
+    s.push_str("    imulq   %r10, %rsi\n"); // %rsi = i * k
+    s.push_str("    addq    %rdi, %rsi\n"); // %rsi = i*k + kk
+    s.push_str("    movss   (%r8, %rsi, 4), %xmm1\n"); // xmm1 = src[i*k + kk]
 
     // weight offset = kk*n + j; load weights[kk*n + j] → xmm2
     s.push_str(&emit_imm32_to_r10(n as u32));
-    s.push_str("    movq    %r14, %r15\n");
-    s.push_str("    imulq   %r10, %r15\n"); // %r15 = kk * n
-    s.push_str("    addq    %rcx, %r15\n"); // %r15 = kk*n + j
-    s.push_str("    movss   (%r9, %r15, 4), %xmm2\n");
+    s.push_str("    movq    %rdi, %rsi\n");
+    s.push_str("    imulq   %r10, %rsi\n"); // %rsi = kk * n
+    s.push_str("    addq    %rcx, %rsi\n"); // %rsi = kk*n + j
+    s.push_str("    movss   (%r9, %rsi, 4), %xmm2\n");
 
     // sum += xmm1 * xmm2  (no FMA)
     s.push_str("    mulss   %xmm2, %xmm1\n");
     s.push_str("    addss   %xmm1, %xmm0\n");
 
-    s.push_str("    incq    %r14\n");
+    s.push_str("    incq    %rdi\n");
     s.push_str(&format!("    jmp     .Lmm_k_{lid}\n"));
     s.push_str(&format!(".Lmm_k_end_{lid}:\n"));
 
     // 5. Bias-add (if present): xmm0 += bias[j].
     if bias_offset.is_some() {
-        s.push_str("    movss   (%r12, %rcx, 4), %xmm5\n");
+        s.push_str("    movss   (%rdx, %rcx, 4), %xmm5\n");
         s.push_str("    addss   %xmm5, %xmm0\n");
     }
 
@@ -126,10 +126,10 @@ pub fn emit_linear(
 
     // 7. Store xmm0 → dst[i*n + j]
     s.push_str(&emit_imm32_to_r10(n as u32));
-    s.push_str("    movq    %rax, %r15\n");
-    s.push_str("    imulq   %r10, %r15\n");
-    s.push_str("    addq    %rcx, %r15\n");
-    s.push_str("    movss   %xmm0, (%r11, %r15, 4)\n");
+    s.push_str("    movq    %rax, %rsi\n");
+    s.push_str("    imulq   %r10, %rsi\n");
+    s.push_str("    addq    %rcx, %rsi\n");
+    s.push_str("    movss   %xmm0, (%r11, %rsi, 4)\n");
 
     s.push_str("    incq    %rcx\n");
     s.push_str(&format!("    jmp     .Lmm_j_{lid}\n"));

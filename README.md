@@ -52,7 +52,7 @@ model Classifier [batch=32, input=784, output=10]:
 | `profiles/x86_64/` | `profiles-x86_64` crate — Linux ELF scalar SSE2 code generator (M9) |
 | `language/` | NFL grammar (`grammar.ebnf`, frozen at v0.1) |
 | `tests/fixtures/` | Sample `.nfl` files used in integration tests |
-| `docs/` | Language reference (`grammar.md`, `uir.md`) and profile guide (`arm64.md`) |
+| `docs/` | Language reference (`grammar.md`, `uir.md`) and profile guide (`arm64.md`, `x86_64.md`) |
 | `viewer/` | Reserved for a future standalone viewer tool; rendering today is via `nflc parse --uir` (compact) and `nflc parse --uir-verbose` (annotated) |
 
 ---
