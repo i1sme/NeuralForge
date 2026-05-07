@@ -529,6 +529,20 @@ row:
 - `[rsp + max_slot_off]`: row-max (4 bytes, `f32`)
 - `[rsp + sum_slot_off]`: running-sum (4 bytes, `f32`)
 
+**Slot positions are pinned to the bottom of the post-`subq` frame:**
+`max_slot_off = 0`, `sum_slot_off = 8`. The 16-byte reserve (two 8-byte
+aligned f32 slots) is owned by `assign_buffers`: when
+`model.calls_extern_math()`, it sets the initial `stack_offset` to 16
+instead of 0, so all `BufferLoc::StackOffset(off)` values start at
+`off >= 16`. Intermediate buffers then resolve via the existing
+`materialise_ptr` form `(off)(%rsp)` without per-emitter parameterisation.
+Anchoring the slots to fixed low-frame offsets (rather than parameterising
+them by `assignment.stack_bytes`) keeps the emitter templates constant
+across models AND prevents slot/buffer overlap when intermediate buffers
+are non-empty — e.g. unfused `linear → softmax`, or any classifier with
+stack-resident hidden layers, where `8(%rsp)` and `16(%rsp)` would land
+inside the linear's intermediate buffer and corrupt the source mid-pass.
+
 **Phase 2 (find max):** scan the row, track current max in `xmm8`
 (or any free xmm), `movss [rsp + max_slot_off], xmm8` once at the end
 of the phase. The max is now stable in memory and not register-state.

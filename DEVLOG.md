@@ -14,6 +14,61 @@ Format for each entry:
 
 ---
 
+## 2026-05-07 — M9 plan/spec sync: stack-slot ownership moved to `assign_buffers` (pre-execution fix)
+
+### What was done
+- Pre-execution correction to spec §7.4
+  (`docs/superpowers/specs/2026-05-06-m9-x86_64-profile-and-profile-api-design.md`)
+  and plan Tasks 3.4 / 3.9 / 3.10 / 5.3 + register-allocation contract +
+  commit-message templates + DEVLOG closure template
+  (`docs/superpowers/plans/2026-05-07-m9-x86_64-profile-and-profile-api-plan.md`).
+- Slot positions for fused-softmax xmm-spill pinned at fixed `(%rsp)`
+  (row_max, offset 0) and `8(%rsp)` (row_sum, offset 8). 16-byte
+  reserve owned by `assign_buffers`: initialises `stack_offset` at 16
+  when `model.calls_extern_math()`, shifting all
+  `BufferLoc::StackOffset(off)` values up by 16. `walk_model` no longer
+  needs an `intermediate_bytes` adjustment — `BufferAssignment::stack_bytes`
+  already includes the reserve.
+
+### Decisions made
+
+**Bottom-of-frame fixed-offset slot layout, ownership in
+`assign_buffers`.** The original plan (commit `fa2a691`) parameterised
+slot addresses at `8(%rsp)` / `16(%rsp)` and bumped `intermediate_bytes`
+in `walk_model`. User review surfaced that those addresses overlap the
+intermediate buffer in any model with stack-resident hidden layers
+(e.g. unfused `linear → softmax`, classifier with multi-layer hidden
+state) — Phase 2 of standalone softmax would corrupt source mid-pass
+because the slot at `8(%rsp)` lands inside the linear's intermediate
+buffer (which lives at `0..S-1(%rsp)` for any `S > 8`). On arm64 this
+doesn't manifest because row_max / row_sum live in callee-saved
+`s8`/`s9`; on x86_64 there is no callee-saved FP register set, so
+the spill is forced and the slot addresses must be chosen with the
+intermediate-buffer layout in mind. Fix lands in a single place
+(`assign_buffers`) — no per-emitter parameterisation, slot addresses
+constant across all models, both spec and plan agree.
+
+### Problems encountered
+- **Caught pre-execution, not in implementation.** The corruption mode
+  (Phase 2 reads from src after Phase 1 spilled row_max into the same
+  bytes) would have produced FFI-test failures in Group 5 the first
+  time `softmax_with_bias.nfl --no-passes` was exercised. Local fix-up
+  in implementation would have required re-shaping `assign_buffers`
+  AND `walk_model` AND every emitter test, with the spec still
+  asserting the broken layout. 5-min spec/plan edit now beats
+  broken Group 3 + spec/plan rebase later.
+- **Plan-synthesis DEVLOG entry above (cd952b0) is now partially
+  stale.** It celebrates "Stack-slot budget bug surfaced during plan
+  synthesis" but describes the +16 bump in `walk_model` as the fix —
+  which itself was buggy. Left as-is for temporal accuracy; this
+  entry is the correct picture going forward.
+
+### Next step
+Subagent-driven execution from Group 1. Both spec and plan now agree
+on slot ownership; no further pre-execution corrections expected.
+
+---
+
 ## 2026-05-07 — M9 implementation plan synthesised from spec
 
 ### What was done

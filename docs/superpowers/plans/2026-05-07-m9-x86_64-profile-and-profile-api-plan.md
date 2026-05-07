@@ -69,7 +69,7 @@ The PR creates two new crates and modifies four existing ones (plus docs).
 - `Cargo.toml` — depends on `compiler`, `profile-api`; dev-deps `libloading`
 - `src/lib.rs` — `pub struct X86_64Profile; impl Profile for X86_64Profile` + free `lower` shim
 - `src/asm.rs` — `compute_frame_size`, `format_function_prologue`, `format_function_epilogue`, `emit_imm32_to_r10` (helper to materialise an arbitrary u32 into `%r10d` — trivial on x86_64, single `movl` instruction)
-- `src/buffer.rs` — `BufferLoc` (mirror of arm64), `assign_buffers`, `compute_callee_saved` (SysV: int callee-saved set only; no FP — see spec §7.2)
+- `src/buffer.rs` — `BufferLoc` (mirror of arm64), `assign_buffers` (also reserves the 16-byte fused-softmax xmm-spill region at the bottom of the frame when `model.calls_extern_math()`, per spec §7.4), `compute_callee_saved` (SysV: int callee-saved set only; no FP — see spec §7.2)
 - `src/codegen.rs` — `walk_uir(&Uir, &'static str)`, `walk_model`, `classify_op`, `resolve_loc`
 - `src/ops/{mod,linear,relu,softmax,dropout}.rs` — emitters mirroring arm64's structure
 - `src/tests.rs` — unit shape-asserts (one-to-one mirror of `profiles/arm64/src/tests.rs`)
@@ -875,8 +875,8 @@ Expected: two recent commits visible; 228 tests pass.
   - `%r13` (callee-saved) ← outer i counter
   - `%r14` (callee-saved) ← inner j counter
   - `%r15` (callee-saved) ← row_base = `i * N` (recomputed if needed; held across the call)
-  - `[%rsp + max_slot_off]` — row_max f32 stack slot (xmm-spilled; xmm regs are caller-saved)
-  - `[%rsp + sum_slot_off]` — row_sum f32 stack slot
+  - `(%rsp)` — row_max f32 stack slot (offset 0; reserved by `assign_buffers` when softmax fires; spec §7.4)
+  - `8(%rsp)` — row_sum f32 stack slot (offset 8; same reserve)
 
 This contract is pinned in unit tests in Task 3.10 and FFI tests in Group 5.
 
@@ -1191,16 +1191,27 @@ pub enum BufferLoc {
 pub struct BufferAssignment {
     /// Per-NodeId placement; index by NodeId.
     pub locs: Vec<BufferLoc>,
-    /// Total stack bytes required for intermediate buffers, rounded up
-    /// to 16-byte alignment. Excludes the additional softmax xmm-spill
-    /// slots (allocated separately in emit_softmax / fused tail).
+    /// Total stack bytes required for the function's frame (intermediate
+    /// buffers + xmm-spill reserve), rounded up to 16-byte alignment.
+    /// **Includes** the 16-byte fused-softmax reserve when
+    /// `model.calls_extern_math()` is true (spec §7.4): in that case
+    /// the reserve sits at offsets `0..15` and intermediate buffers
+    /// start at `off >= 16`, so emitters can address the row_max /
+    /// row_sum slots at fixed `(%rsp)` / `8(%rsp)` regardless of the
+    /// model's intermediate-buffer footprint.
     pub stack_bytes: usize,
 }
 
 /// Assign a `BufferLoc` per UIR node + compute aligned total stack frame size.
 pub fn assign_buffers(model: &UirModel) -> BufferAssignment {
     let mut locs = vec![BufferLoc::InputReg; model.nodes.len()];
-    let mut stack_offset: usize = 0;
+    // Reserve 16 bytes at the bottom of the frame for fused-softmax
+    // xmm-spill slots (row_max at 0(%rsp), row_sum at 8(%rsp)) when
+    // any node calls libm-expf. Slots live at fixed offsets 0/8 (NOT
+    // parameterised by stack_bytes), so all subsequent intermediate
+    // buffers shift up by 16 — preventing slot/buffer overlap when
+    // intermediate buffers are non-empty (spec §7.4).
+    let mut stack_offset: usize = if model.calls_extern_math() { 16 } else { 0 };
 
     for (id, node) in model.nodes.iter().enumerate() {
         locs[id] = match &node.kind {
@@ -1321,10 +1332,13 @@ fn prologue_push_count(regs: RegSet) -> usize {
 ///       [if non-leaf: pushq %rbx; pushq %r12; pushq %r13; pushq %r14; pushq %r15]
 ///       [if frame_size > 0: subq $frame_size, %rsp]
 ///
-/// `intermediate_bytes` is the total bytes of stack-resident intermediate
-/// buffers (from `BufferAssignment::stack_bytes`). The total `frame_size`
-/// passed to `subq` includes any alignment correction from
-/// [`compute_frame_size`].
+/// `intermediate_bytes` is the total bytes that need to live on the
+/// stack frame: stack-resident intermediate buffers plus the 16-byte
+/// fused-softmax xmm-spill reserve when applicable. Pass
+/// `BufferAssignment::stack_bytes` directly — `assign_buffers` already
+/// folds the spill reserve into that value when the model calls
+/// libm-expf (spec §7.4). The total `frame_size` passed to `subq`
+/// adds any alignment correction from [`compute_frame_size`].
 pub fn format_function_prologue(
     sig: &FnSig,
     regs: RegSet,
@@ -2214,10 +2228,13 @@ pub fn emit_linear(
 ///   %r15 = row_base = i * n
 ///
 /// Stack-resident state across `call expf@PLT`:
-///   8(%rsp)  = row_max f32 slot (`max_slot_off` = 8)
-///   16(%rsp) = row_sum f32 slot (`sum_slot_off` = 16)
-/// (within the function's `frame_size`; the prologue's `subq $frame_size,
-/// %rsp` reserved space includes these slots.)
+///   (%rsp)  = row_max f32 slot (offset 0)
+///   8(%rsp) = row_sum f32 slot (offset 8)
+/// The 16-byte spill region is reserved at the bottom of the frame by
+/// `assign_buffers` whenever `model.calls_extern_math()` (spec §7.4);
+/// `BufferAssignment::stack_bytes` already accounts for it, so the
+/// prologue's `subq $frame_size, %rsp` covers both slots and any
+/// intermediate buffers without per-emitter parameterisation.
 fn emit_fused_softmax_tail(b: u64, n: u64, lid: &str, sym_prefix: &str) -> String {
     let mut s = String::new();
     s.push_str(&format!(
@@ -2238,7 +2255,7 @@ fn emit_fused_softmax_tail(b: u64, n: u64, lid: &str, sym_prefix: &str) -> Strin
     s.push_str("    movq    %r13, %r15\n");
     s.push_str("    imulq   %r10, %r15\n");
 
-    // Phase 2: row_max → [8(%rsp)]. Init xmm8 to -inf.
+    // Phase 2: row_max → (%rsp). Init xmm8 to -inf.
     s.push_str("    movl    $0xFF800000, %r10d\n"); // -inf bits
     s.push_str("    movd    %r10d, %xmm8\n");
     s.push_str("    xorq    %r14, %r14\n");
@@ -2253,11 +2270,11 @@ fn emit_fused_softmax_tail(b: u64, n: u64, lid: &str, sym_prefix: &str) -> Strin
     s.push_str("    incq    %r14\n");
     s.push_str(&format!("    jmp     .Lfsmx_max_{lid}\n"));
     s.push_str(&format!(".Lfsmx_max_end_{lid}:\n"));
-    // Spill row_max to stack (xmm regs are caller-saved across call).
-    s.push_str("    movss   %xmm8, 8(%rsp)\n");
+    // Spill row_max to stack slot 0 (xmm regs are caller-saved across call).
+    s.push_str("    movss   %xmm8, (%rsp)\n");
 
-    // Phase 3: exp(x − max), sum → [16(%rsp)]. Init sum slot to 0.
-    s.push_str("    movl    $0, 16(%rsp)\n");
+    // Phase 3: exp(x − max), sum → 8(%rsp). Init sum slot to 0.
+    s.push_str("    movl    $0, 8(%rsp)\n");
     s.push_str("    xorq    %r14, %r14\n");
     s.push_str(&format!(".Lfsmx_exp_{lid}:\n"));
     s.push_str(&emit_imm32_to_r10(n as u32));
@@ -2266,15 +2283,15 @@ fn emit_fused_softmax_tail(b: u64, n: u64, lid: &str, sym_prefix: &str) -> Strin
     s.push_str("    movq    %r15, %rax\n");
     s.push_str("    addq    %r14, %rax\n"); // %rax = row_base + j
     s.push_str("    movss   (%rbx, %rax, 4), %xmm0\n");
-    s.push_str("    subss   8(%rsp), %xmm0\n");
+    s.push_str("    subss   (%rsp), %xmm0\n");
     s.push_str(&format!("    call    {}expf@PLT\n", sym_prefix));
     // %rax was clobbered; recompute.
     s.push_str("    movq    %r15, %rax\n");
     s.push_str("    addq    %r14, %rax\n");
     s.push_str("    movss   %xmm0, (%r12, %rax, 4)\n"); // write exp result back
-    s.push_str("    movss   16(%rsp), %xmm1\n");
+    s.push_str("    movss   8(%rsp), %xmm1\n");
     s.push_str("    addss   %xmm0, %xmm1\n");
-    s.push_str("    movss   %xmm1, 16(%rsp)\n");
+    s.push_str("    movss   %xmm1, 8(%rsp)\n");
     s.push_str("    incq    %r14\n");
     s.push_str(&format!("    jmp     .Lfsmx_exp_{lid}\n"));
     s.push_str(&format!(".Lfsmx_exp_end_{lid}:\n"));
@@ -2288,7 +2305,7 @@ fn emit_fused_softmax_tail(b: u64, n: u64, lid: &str, sym_prefix: &str) -> Strin
     s.push_str("    movq    %r15, %rax\n");
     s.push_str("    addq    %r14, %rax\n");
     s.push_str("    movss   (%r12, %rax, 4), %xmm0\n");
-    s.push_str("    divss   16(%rsp), %xmm0\n");
+    s.push_str("    divss   8(%rsp), %xmm0\n");
     s.push_str("    movss   %xmm0, (%r12, %rax, 4)\n");
     s.push_str("    incq    %r14\n");
     s.push_str(&format!("    jmp     .Lfsmx_norm_{lid}\n"));
@@ -2302,46 +2319,23 @@ fn emit_fused_softmax_tail(b: u64, n: u64, lid: &str, sym_prefix: &str) -> Strin
 }
 ```
 
-> **Stack-slot budget note:** the fused softmax tail uses `8(%rsp)` and `16(%rsp)` as f32 spill slots. These addresses are valid when `frame_size >= 16` (so the bytes are within the reserved frame). For models with empty intermediate-buffer footprint but softmax fused, `compute_frame_size(0, num_pushes=6) = 8` — only 8 bytes available, which is enough for `[8(%rsp)]` but not `[16(%rsp)]`. **Fix:** in `walk_model`, when `model.calls_extern_math()`, increase the reported `intermediate_bytes` by 16 (two 8-byte-aligned f32 slots) before passing to `format_function_prologue`. This is a per-model bump, not a per-emit budget. Add this adjustment in Task 3.6's `walk_model` body — but since 3.6 is already implemented, **add it now**: edit `profiles/x86_64/src/codegen.rs::walk_model` to add a `let intermediate_bytes = if model.calls_extern_math() { assignment.stack_bytes + 16 } else { assignment.stack_bytes };` and pass `intermediate_bytes` to `format_function_prologue` and `format_function_epilogue`.
+> **Stack-slot budget note (resolved by Task 3.4):** The fused softmax
+> tail uses fixed slot addresses `(%rsp)` (row_max, offset 0) and
+> `8(%rsp)` (row_sum, offset 8). The 16-byte reserve is owned by
+> `assign_buffers` (Task 3.4) — when `model.calls_extern_math()`,
+> `assign_buffers` initialises `stack_offset` at 16, so all
+> `BufferLoc::StackOffset(off)` values shift up by 16. This anchors
+> the spill addresses to fixed low-frame offsets across all models
+> (including those with non-empty intermediate buffers) without any
+> per-emitter parameterisation. `BufferAssignment::stack_bytes` already
+> includes the reserve, so `walk_model` does NOT need an
+> `intermediate_bytes` adjustment — the prologue/epilogue calls
+> already-emitted in Task 3.6 work as-is. See spec §7.4 for the
+> design rationale (and the corruption mode the bottom-of-frame layout
+> avoids: hardcoded `8(%rsp)` / `16(%rsp)` would land inside an
+> intermediate buffer when one exists, e.g. unfused linear→softmax).
 
-- [ ] **Step 4: Apply the stack-slot adjustment in codegen.rs**
-
-In `profiles/x86_64/src/codegen.rs::walk_model`, replace:
-
-```rust
-    body.push_str(&format_function_prologue(
-        &sig,
-        regs,
-        assignment.stack_bytes,
-        sym_prefix,
-    ));
-```
-
-with:
-
-```rust
-    // Reserve two extra 8-byte stack slots for the fused-softmax xmm-spill
-    // (row_max at 8(%rsp), row_sum at 16(%rsp)) whenever the model calls
-    // libm-expf. See profiles/x86_64/src/ops/linear.rs::emit_fused_softmax_tail.
-    let intermediate_bytes = if model.calls_extern_math() {
-        assignment.stack_bytes + 16
-    } else {
-        assignment.stack_bytes
-    };
-    body.push_str(&format_function_prologue(
-        &sig,
-        regs,
-        intermediate_bytes,
-        sym_prefix,
-    ));
-```
-
-And similarly for `format_function_epilogue`:
-```rust
-    body.push_str(&format_function_epilogue(regs, intermediate_bytes));
-```
-
-- [ ] **Step 5: Run linear tests**
+- [ ] **Step 4: Run linear tests**
 
 Run: `cargo test -p profiles-x86_64 --lib linear_`
 Expected: 6 passing.
@@ -2358,7 +2352,7 @@ Expected: 6 passing.
 - `%rbx` = src ptr (callee-saved)
 - `%r12` = dst ptr (callee-saved)
 - `%r13` = i, `%r14` = j, `%r15` = row_base
-- Stack slots: `[8(%rsp)]` row_max, `[16(%rsp)]` row_sum
+- Stack slots: `(%rsp)` row_max, `8(%rsp)` row_sum (per spec §7.4; reserved by `assign_buffers` when softmax fires)
 
 - [ ] **Step 1: Write 5 failing tests**
 
@@ -2382,17 +2376,21 @@ fn standalone_softmax_uses_callee_saved_int_pushes() {
 }
 
 #[test]
-fn standalone_softmax_spills_max_to_stack_at_offset_8() {
+fn standalone_softmax_spills_max_to_stack_at_offset_0() {
+    // assign_buffers reserves bytes 0..15 for the two xmm-spill slots
+    // when calls_extern_math; row_max sits at offset 0, row_sum at 8
+    // (spec §7.4). Standalone softmax model has no intermediate buffers,
+    // so the reserve is the only stack content other than alignment pad.
     let src = "model SP [b=2, k=4]:\n    x: Tensor[b, k]\n    x -> softmax\n";
     let s = lower_x86_no_passes(src).source;
-    assert!(s.contains("movss   %xmm8, 8(%rsp)"), "row_max spill missing:\n{s}");
+    assert!(s.contains("movss   %xmm8, (%rsp)"), "row_max spill missing at offset 0:\n{s}");
 }
 
 #[test]
 fn standalone_softmax_initialises_sum_slot_to_zero() {
     let src = "model SZ [b=2, k=4]:\n    x: Tensor[b, k]\n    x -> softmax\n";
     let s = lower_x86_no_passes(src).source;
-    assert!(s.contains("movl    $0, 16(%rsp)"), "sum slot init missing:\n{s}");
+    assert!(s.contains("movl    $0, 8(%rsp)"), "sum slot init missing at offset 8:\n{s}");
 }
 
 #[test]
@@ -2431,8 +2429,9 @@ use crate::buffer::BufferLoc;
 ///
 /// Calls `<sym_prefix>expf@PLT` for each element. State across the call
 /// lives in callee-saved int registers (%rbx, %r12, %r13, %r14, %r15)
-/// and on the stack (`[8(%rsp)]` row_max, `[16(%rsp)]` row_sum); see
-/// the register contract in profiles/x86_64/src/ops/linear.rs.
+/// and on the stack (`(%rsp)` row_max, `8(%rsp)` row_sum; reserved by
+/// `assign_buffers` per spec §7.4); see the register contract in
+/// profiles/x86_64/src/ops/linear.rs.
 pub fn emit_softmax(
     b: u64,
     k: u64,
@@ -2464,7 +2463,7 @@ pub fn emit_softmax(
     s.push_str("    movq    %r13, %r15\n");
     s.push_str("    imulq   %r10, %r15\n");
 
-    // Phase 1: row_max → [8(%rsp)]. Init xmm8 to -inf.
+    // Phase 1: row_max → (%rsp). Init xmm8 to -inf.
     s.push_str("    movl    $0xFF800000, %r10d\n");
     s.push_str("    movd    %r10d, %xmm8\n");
     s.push_str("    xorq    %r14, %r14\n");
@@ -2479,10 +2478,10 @@ pub fn emit_softmax(
     s.push_str("    incq    %r14\n");
     s.push_str(&format!("    jmp     .Lsm_max_{sid}\n"));
     s.push_str(&format!(".Lsm_max_end_{sid}:\n"));
-    s.push_str("    movss   %xmm8, 8(%rsp)\n");
+    s.push_str("    movss   %xmm8, (%rsp)\n");
 
-    // Phase 2: exp(x - max) → dst, sum → [16(%rsp)]. Init sum to 0.
-    s.push_str("    movl    $0, 16(%rsp)\n");
+    // Phase 2: exp(x - max) → dst, sum → 8(%rsp). Init sum to 0.
+    s.push_str("    movl    $0, 8(%rsp)\n");
     s.push_str("    xorq    %r14, %r14\n");
     s.push_str(&format!(".Lsm_exp_{sid}:\n"));
     s.push_str(&emit_imm32_to_r10(k as u32));
@@ -2491,15 +2490,15 @@ pub fn emit_softmax(
     s.push_str("    movq    %r15, %rax\n");
     s.push_str("    addq    %r14, %rax\n");
     s.push_str("    movss   (%rbx, %rax, 4), %xmm0\n");
-    s.push_str("    subss   8(%rsp), %xmm0\n");
+    s.push_str("    subss   (%rsp), %xmm0\n");
     s.push_str(&format!("    call    {}expf@PLT\n", sym_prefix));
     // %rax clobbered by call; recompute.
     s.push_str("    movq    %r15, %rax\n");
     s.push_str("    addq    %r14, %rax\n");
     s.push_str("    movss   %xmm0, (%r12, %rax, 4)\n");
-    s.push_str("    movss   16(%rsp), %xmm1\n");
+    s.push_str("    movss   8(%rsp), %xmm1\n");
     s.push_str("    addss   %xmm0, %xmm1\n");
-    s.push_str("    movss   %xmm1, 16(%rsp)\n");
+    s.push_str("    movss   %xmm1, 8(%rsp)\n");
     s.push_str("    incq    %r14\n");
     s.push_str(&format!("    jmp     .Lsm_exp_{sid}\n"));
     s.push_str(&format!(".Lsm_exp_end_{sid}:\n"));
@@ -2513,7 +2512,7 @@ pub fn emit_softmax(
     s.push_str("    movq    %r15, %rax\n");
     s.push_str("    addq    %r14, %rax\n");
     s.push_str("    movss   (%r12, %rax, 4), %xmm0\n");
-    s.push_str("    divss   16(%rsp), %xmm0\n");
+    s.push_str("    divss   8(%rsp), %xmm0\n");
     s.push_str("    movss   %xmm0, (%r12, %rax, 4)\n");
     s.push_str("    incq    %r14\n");
     s.push_str(&format!("    jmp     .Lsm_norm_{sid}\n"));
@@ -2605,9 +2604,11 @@ Lessons-learned roll-forward from M3-M8 baked in from birth:
 
 Stack alignment: SysV requires rsp ≡ 0 (mod 16) at every call.
 compute_frame_size accounts for the +8 correction when num_pushes is
-even (post-pushes parity = 8). Two reserved stack slots (8(%rsp),
-16(%rsp)) hold row_max and row_sum across `call expf@PLT` since SysV
-has no callee-saved FP registers.
+even (post-pushes parity = 8). Two reserved stack slots ((%rsp),
+8(%rsp)) hold row_max and row_sum across `call expf@PLT` since SysV
+has no callee-saved FP registers; the 16-byte reserve is owned by
+`assign_buffers` (anchors slot addresses to the bottom of the frame
+regardless of intermediate-buffer footprint, per spec §7.4).
 
 Symbol prefix abstracted via Profile::sym_prefix() (= "" on x86_64
 ELF; "_" on arm64 Mach-O). The `call expf@PLT` site uses the prefix
@@ -3134,12 +3135,12 @@ fn fused_softmax_xmm_spill_x86_64() {
         "fused softmax tail must call expf@PLT"
     );
     assert!(
-        asm.source.contains("8(%rsp)"),
-        "fused tail must spill row_max to 8(%rsp)"
+        asm.source.contains("movss   %xmm8, (%rsp)"),
+        "fused tail must spill row_max to (%rsp) [offset 0; spec §7.4]"
     );
     assert!(
-        asm.source.contains("16(%rsp)"),
-        "fused tail must spill row_sum to 16(%rsp)"
+        asm.source.contains("movss   %xmm1, 8(%rsp)"),
+        "fused tail must spill row_sum to 8(%rsp) [offset 8; spec §7.4]"
     );
 
     let so_path = common::compile_to_so(&asm.source, "fused_softmax_xmm_spill");
@@ -3260,8 +3261,9 @@ coverage to the green.
 comments, dropout-only (2 variants), large-dim (k and n), fused-vs-unfused
 parity (3 fixtures). One x86_64-specific test — fused_softmax_xmm_spill_x86_64
 — is the explicit numerical proof of the §7.4 spill strategy: spills
-row_max to 8(%rsp), row_sum to 16(%rsp), and survives the call expf@PLT
-clobber of caller-saved xmm regs.
+row_max to (%rsp), row_sum to 8(%rsp) (16-byte reserve at the bottom
+of the frame, owned by assign_buffers per spec §7.4), and survives the
+call expf@PLT clobber of caller-saved xmm regs.
 
 Helper compile_to_so links with -shared -fPIC -lm (libm needed
 explicitly on Linux). CI workflow comment updated; the job itself is
@@ -3315,7 +3317,7 @@ Read `docs/profile_guide/arm64.md` to confirm section structure. Then create `do
 2. ABI — SysV AMD64 summary. Args (rdi/rsi/rdx for our 3-arg FFI), callee-saved set (rbx, rbp, r12-r15), 16-byte alignment requirement at call boundary.
 3. Register conventions — int + float register tables. Call out the **divergence from arm64**: NO callee-saved FP regs (`%xmm0`-`%xmm15` all caller-saved). State that this drives the §7.4 xmm-spill strategy.
 4. Supported ops — full parity with arm64 minus SIMD. linear (± bias), relu, dropout, softmax + fused PostOps.
-5. Fused softmax xmm-spill — architectural rationale. Stack slots `8(%rsp)` row_max, `16(%rsp)` row_sum. Cost: +1 memory traffic per element in Phase 3 vs arm64's register-resident pattern. Reason for accepting cost: SysV interop.
+5. Fused softmax xmm-spill — architectural rationale. Stack slots `(%rsp)` row_max, `8(%rsp)` row_sum (16-byte reserve at the bottom of the frame, owned by `assign_buffers` whenever `model.calls_extern_math()`). Cost: +1 memory traffic per element in Phase 3 vs arm64's register-resident pattern. Reason for accepting cost: SysV interop.
 6. Libm call form — `call expf@PLT`. Why `@PLT`: external symbols in PIE/shared objects on ELF resolve through the PLT; `@PLT` makes the relocation modifier explicit.
 7. Stack alignment — `compute_frame_size` formula and the 16-byte invariant. Reference the spec §7.5 derivation.
 8. Out-of-scope — SIMD/AVX, macOS x86_64 (Mach-O), Windows, bare-metal expf. Each is a future profile / future axis.
@@ -3424,8 +3426,9 @@ Use the standard format. Suggested skeleton (tighten or expand as the actual cyc
   byte-identical to pre-migration baseline (sha256-verified per fixture).**
 - **`profiles/x86_64/`** (new crate) — scalar SSE2 Linux ELF codegen,
   full op-parity with arm64. AT&T syntax. `compute_frame_size` (+ 8 unit
-  tests) for SysV alignment. xmm-spill via `[8(%rsp)]`, `[16(%rsp)]`
-  across `call expf@PLT` (no callee-saved FP under SysV).
+  tests) for SysV alignment. xmm-spill via `(%rsp)`, `8(%rsp)`
+  (16-byte reserve owned by `assign_buffers`) across `call expf@PLT`
+  (no callee-saved FP under SysV).
 - **`nflc compile --profile <name>`** dispatches via `Box<dyn Profile>`.
   Three CLI smoke tests in new `nflc/tests/cli.rs`.
 - **CI**: `unit` job (ubuntu-latest) gains x86_64 FFI tests via cfg-gating;
@@ -3447,11 +3450,17 @@ Use the standard format. Suggested skeleton (tighten or expand as the actual cyc
   is informational follow-up, not a regression gate.
 
 ### Problems encountered
-- **Stack-slot budget**: fused softmax tail uses `[8(%rsp)]` + `[16(%rsp)]`
-  but `compute_frame_size(0, 6) = 8` only — only one slot's worth of
-  reserved space. Resolved by bumping `intermediate_bytes` by 16 in
-  `walk_model` whenever `model.calls_extern_math()`. Caught at unit-test
-  time, not in production.
+- **Stack-slot ownership**: fused softmax tail uses fixed `(%rsp)` +
+  `8(%rsp)` for row_max / row_sum spills. The 16-byte reserve is owned
+  by `assign_buffers`, which initialises `stack_offset` at 16 when
+  `model.calls_extern_math()` — anchoring the slot addresses to fixed
+  low-frame offsets and shifting all intermediate buffers up by 16.
+  Initial draft of the plan parameterised the slots at `8(%rsp)` /
+  `16(%rsp)` and bumped `intermediate_bytes` in `walk_model`; pre-execution
+  user review caught that this overlapped intermediate buffers for any
+  model with stack-resident hidden layers (e.g. unfused linear→softmax).
+  Fix landed before any code was written; spec §7.4 updated to pin the
+  layout.
 - **`cc -shared -fPIC` on Linux requires `-lm`** for `expf`. Added to
   `compile_to_so` helper. Caught at first CI run.
 
