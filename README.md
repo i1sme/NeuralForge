@@ -59,17 +59,12 @@ model Classifier [batch=32, input=784, output=10]:
 
 ## Where to start
 
-**To understand the project:**
-1. Read `PROJECT_SPEC.md` — it has the full architecture, design principles, and milestones
-2. Read `DEVLOG.md` — it tells you what has been done and what comes next
+**To understand the project:** read `PROJECT_SPEC.md` — it has the full
+architecture, design principles, and open questions.
 
-**To contribute or continue development:**
-1. Read `CLAUDE.md` — it explains the development workflow and non-negotiable rules
-2. Check `DEVLOG.md` for the latest "Next step" entry
-3. Follow the TDD workflow: red → green → refactor
-
-**To understand a design decision:**
-Look it up in `DEVLOG.md`. Every significant decision is recorded there with its reasoning.
+**To contribute:** read `CONTRIBUTING.md` for the development workflow,
+then `DEVLOG.md` to understand what has been done and why. Every significant
+design decision is recorded there with its reasoning.
 
 ---
 
@@ -98,9 +93,15 @@ What's working today:
   rendering) and `nflc compile --profile <arm64|x86_64>`
 - Bit-exact fused-vs-unfused FFI integration tests across all
   fusion-eligible fixtures; x86_64 FFI tests run on ubuntu-latest CI
-- Viewer v0.1: `nflc parse --uir-verbose` renders annotated UIR
+- Viewer v0.1: `nflc parse --uir-verbose` renders annotated UIR with
+  top-level and per-model summaries, and fused post-ops on indented lines
 - 284 tests passing on macOS arm64 (~300 on Linux x86_64 CI); CI green;
   `cargo fmt`, `cargo clippy -D warnings`, `cargo test --workspace` all clean
+
+Active development continues along three strategic axes — codegen breadth
+(x86_64 ships in M9; SIMD/AVX still open), modelling depth (NFL v0.2 /
+attention), and deployment reach (bare-metal `expf`) — tracked in
+[`PROJECT_SPEC.md` §"Strategic Roadmap"](PROJECT_SPEC.md#strategic-roadmap).
 
 NFL training syntax (loss, optimiser) is deferred to v0.2.
 

@@ -401,6 +401,45 @@ sequence.
 
 ---
 
+## 2026-05-06 — Public-release hygiene: drop stale Gmail contact from DEVLOG
+
+### What was done
+- Removed one sentence from the earlier 2026-05-06 "License adoption:
+  AGPL-3.0-only + CLA" entry that recorded `me.its1984@gmail.com` as the
+  commercial-licensing contact. The contact context evaporated when the same
+  day's later entry pivoted the project to pure Apache-2.0 (no dual-license,
+  no commercial-by-request channel), so the email was a stale leftover that
+  would only confuse a public reader.
+- Verified via `grep -rIn "me.its1984\|gmail"` across the worktree: no
+  remaining matches in tracked files.
+
+### Decisions made
+- Deleted the sentence outright rather than redacting (`[redacted]`). The
+  surrounding paragraph still describes the historical AGPL-era README/CLA
+  shape; removing one line keeps the historical record coherent without
+  leaving a placeholder that begs explanation. **Why:** the only purpose of
+  the email was to be a contact channel, and that channel no longer exists.
+- Did not touch the rest of the AGPL adoption entry — it remains an accurate
+  log of what shipped that day, even though the next same-day entry undid
+  most of it. The DEVLOG is a chronological record, not a current-state doc.
+- Did not redact the `me.its18@yandex.ru` author/committer email from git
+  history. That email is already published in every existing commit's
+  metadata, and rewriting history to scrub it would invalidate every
+  outstanding clone, branch, and PR reference. Accepting it as part of the
+  project's public identity going forward.
+
+### Problems encountered
+- None.
+
+### Next step
+- Public-release blockers closed (Apache-2.0 LICENSE merged, README present,
+  no Gmail in tracked files, no Gmail in git history). Repo can be flipped to
+  public when the user is ready. Strategic roadmap selection (per
+  `PROJECT_SPEC.md` §"Strategic Roadmap") is unrelated to this and remains
+  the next *engineering* step.
+
+---
+
 ## 2026-05-06 — License pivot: AGPL-3.0-only → Apache-2.0
 
 ### What was done
@@ -626,8 +665,7 @@ checklist is unblocked.
   by-request), explicit GCC/LLVM precedent that AGPL does **not**
   extend to compiler output, attribution-as-courtesy etiquette
   request (link back to repo), copyright assertion `Copyright (C)
-  2026 Arsenii Voloshyn`. Commercial-licensing contact:
-  `me.its1984@gmail.com`.
+  2026 Arsenii Voloshyn`.
 - **`Cargo.toml`** — replaced `license = "MIT OR Apache-2.0"`
   placeholder in 3 crate manifests (`compiler`, `nflc`,
   `profiles-arm64`) with `license.workspace = true`. Added a new
