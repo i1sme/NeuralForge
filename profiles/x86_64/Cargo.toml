@@ -1,0 +1,8 @@
+[package]
+name = "profiles-x86_64"
+version = "0.1.0"
+edition = "2021"
+description = "NeuralForge x86_64 codegen profile"
+license.workspace = true
+
+[dependencies]
