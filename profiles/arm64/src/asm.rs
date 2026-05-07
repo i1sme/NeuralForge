@@ -3,9 +3,7 @@
 //! Low-level AArch64 assembly building blocks.
 
 use crate::buffer::RegSet;
-use crate::FnSig;
-
-pub const MACHO_SYM_PREFIX: &str = "_";
+use profile_api::FnSig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeafKind {
@@ -25,11 +23,12 @@ pub fn format_function_prologue(
     leaf: LeafKind,
     regs: RegSet,
     intermediate_bytes: usize,
+    sym_prefix: &str,
 ) -> String {
     let mut s = String::new();
-    s.push_str(&format!(".globl {}{}\n", MACHO_SYM_PREFIX, sig.name));
+    s.push_str(&format!(".globl {}{}\n", sym_prefix, sig.name));
     s.push_str(".p2align 2\n");
-    s.push_str(&format!("{}{}:\n", MACHO_SYM_PREFIX, sig.name));
+    s.push_str(&format!("{}{}:\n", sym_prefix, sig.name));
 
     if regs.contains_x19_x23() {
         s.push_str("    stp     x19, x20, [sp, #-16]!\n");

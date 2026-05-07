@@ -39,9 +39,11 @@ jobs:
         run: cargo build --workspace
 
       - name: Test
-        # Integration test in profiles/arm64/tests/integration.rs gates itself
-        # via cfg!(target_arch = "aarch64") + cc presence, so it skips cleanly
-        # on x86_64 ubuntu while the unit tests still run.
+        # Workspace tests on ubuntu-latest (x86_64 Linux):
+        # - profiles/arm64 integration FFI cfg-skips (target_arch != aarch64)
+        # - profiles/x86_64 integration FFI runs (target_os = linux,
+        #   target_arch = x86_64). Requires cc + libm (-lm), both included
+        #   in ubuntu-latest by default.
         run: cargo test --workspace
 
   integration:

@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["compiler", "nflc", "profiles/arm64"]
+members = [
+    "compiler",
+    "nflc",
+    "profile-api",
+    "profiles/arm64",
+    "profiles/x86_64",
+]
 
 [workspace.package]
 license = "Apache-2.0"

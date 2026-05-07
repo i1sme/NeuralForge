@@ -31,7 +31,7 @@ NeuralForge/
 ├── CLAUDE.md               ← you are here
 ├── PROJECT_SPEC.md         ← full design specification
 │
-├── Cargo.toml              ← workspace manifest (members = ["compiler", "nflc", "profiles/arm64"])
+├── Cargo.toml              ← workspace manifest (members = ["compiler", "nflc", "profile-api", "profiles/arm64", "profiles/x86_64"])
 │
 ├── compiler/               ← `compiler` crate (lib only)
 │   ├── Cargo.toml
@@ -47,25 +47,28 @@ NeuralForge/
 │   ├── Cargo.toml
 │   └── src/main.rs         ← `nflc parse|compile ...`
 │
+├── profile-api/            ← shared Profile contract — types + trait, lifted from arm64 in M9
+│
 ├── profiles/
-│   └── arm64/              ← `profiles-arm64` crate (lib only) — first concrete codegen profile
-│       ├── Cargo.toml
-│       ├── src/
-│       │   ├── lib.rs      ← `pub fn lower(&Uir) -> Result<Asm, LowerError>`
-│       │   ├── types.rs    ← Asm, FnSig, ParamSlot, ParamKind, LowerError
-│       │   ├── asm.rs      ← prologue/epilogue + emit_sp_* + emit_imm32 helpers
-│       │   ├── buffer.rs   ← BufferLoc, assign_buffers, compute_is_leaf, compute_callee_saved
-│       │   ├── codegen.rs  ← walk_uir/walk_model dispatcher + classify_op
-│       │   ├── ops/
-│       │   │   ├── mod.rs        ← per-op submodule entry + re-exports
-│       │   │   ├── linear.rs     ← emit_linear (matmul ± bias) + materialise_ptr
-│       │   │   ├── relu.rs       ← emit_relu (elementwise copy-clamp)
-│       │   │   ├── softmax.rs    ← emit_softmax (3-pass + bl _expf)
-│       │   │   └── dropout.rs    ← marker (no emitter — aliasing only)
-│       │   └── tests.rs    ← unit tests on asm shape + analyzers
-│       └── tests/
-│           ├── integration.rs    ← end-to-end FFI tests for all 5 M3 fixtures + M4a
-│           └── common/mod.rs     ← cc + tempdir helpers
+│   ├── arm64/              ← `profiles-arm64` crate (lib only) — first concrete codegen profile
+│   │   ├── Cargo.toml
+│   │   ├── src/
+│   │   │   ├── lib.rs      ← `pub fn lower(&Uir) -> Result<Asm, LowerError>`
+│   │   │   ├── types.rs    ← Asm, FnSig, ParamSlot, ParamKind, LowerError
+│   │   │   ├── asm.rs      ← prologue/epilogue + emit_sp_* + emit_imm32 helpers
+│   │   │   ├── buffer.rs   ← BufferLoc, assign_buffers, compute_is_leaf, compute_callee_saved
+│   │   │   ├── codegen.rs  ← walk_uir/walk_model dispatcher + classify_op
+│   │   │   ├── ops/
+│   │   │   │   ├── mod.rs        ← per-op submodule entry + re-exports
+│   │   │   │   ├── linear.rs     ← emit_linear (matmul ± bias) + materialise_ptr
+│   │   │   │   ├── relu.rs       ← emit_relu (elementwise copy-clamp)
+│   │   │   │   ├── softmax.rs    ← emit_softmax (3-pass + bl _expf)
+│   │   │   │   └── dropout.rs    ← marker (no emitter — aliasing only)
+│   │   │   └── tests.rs    ← unit tests on asm shape + analyzers
+│   │   └── tests/
+│   │       ├── integration.rs    ← end-to-end FFI tests for all 5 M3 fixtures + M4a
+│   │       └── common/mod.rs     ← cc + tempdir helpers
+│   └── x86_64/             ← Linux ELF scalar SSE2 codegen profile, M9
 │
 ├── language/
 │   ├── grammar.ebnf        ← formal NFL grammar
@@ -76,7 +79,7 @@ NeuralForge/
 │
 └── docs/
     ├── language_reference/ ← NFL syntax reference (grammar.md, uir.md)
-    └── profile_guide/      ← per-profile docs (arm64.md)
+    └── profile_guide/      ← per-profile docs (arm64.md, x86_64.md)
 ```
 
 ---
@@ -149,16 +152,16 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ### When adding a new architecture profile:
 1. Create `profiles/<name>/` directory
-2. Implement the profile interface (see `profiles/arm64/` as the canonical reference: `pub fn lower(&Uir) -> Result<Asm, LowerError>` plus the `Asm`, `FnSig`, `ParamSlot`, `ParamKind`, `LowerError` types)
-3. Add the profile to the compiler's profile registry
+2. Implement the `Profile` trait from `profile-api/` (see `profiles/arm64/` and `profiles/x86_64/` as canonical references: `impl Profile` with `lower(&Uir) -> Result<Asm, LowerError>` and `sym_prefix() -> &'static str`)
+3. Add the profile to `nflc compile --profile` dispatch in `nflc/src/main.rs`
 4. Write integration tests using `tests/fixtures/`
-5. Document hardware-specific decisions in `docs/profile_guide/`
+5. Document hardware-specific decisions in `docs/profile_guide/<name>.md`
 
 ---
 
 ## Current Status
 
-**Milestone 8 complete. 223 tests passing.** All workspace gates clean
+**Milestone 9 complete. 284 tests passing on macOS arm64 (~300 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean
 (`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo fmt --all -- --check`, `cargo test --workspace`).
 
@@ -166,9 +169,9 @@ Strategic direction: see `PROJECT_SPEC.md` §"Strategic Roadmap" — three open
 axes (codegen breadth, modelling depth, deployment reach) presented as a
 dependency graph. The next milestone is decided by selecting one axis to
 advance via fresh brainstorming, not by picking from a flat list. Trigger-driven
-cleanup items (OQ-NEW, OQ-7, OQ-8, OQ-9, M5c OQ-4) live in `PROJECT_SPEC.md`
+cleanup items (OQ-BENCH, OQ-7, OQ-8, OQ-9, M5c OQ-4) live in `PROJECT_SPEC.md`
 §"Open Questions" / "Trigger-driven cleanup" and stay dormant until their
-trigger fires.
+trigger fires. OQ-NEW closed in M9 (commit `a08fd24`).
 
 ---
 

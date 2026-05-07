@@ -66,7 +66,7 @@ Initial target profiles:
 | Profile     | Architecture       | Key capability              |
 |-------------|--------------------|-----------------------------|
 | `arm64`     | Apple Silicon / AArch64 POSIX | Scalar AArch64 assembly: linear (± bias), relu, dropout (no-op pass-through), softmax (libm `expf`). All 5 M3 fixtures lower end-to-end (M4a + M4b). NEON / SVE / AMX in later slices. |
-| `x86_64`    | Intel / AMD        | AVX-512, VNNI instructions (future) |
+| `x86_64`    | Intel / AMD (Linux ELF) | Linux ELF scalar SSE2: linear (± bias), relu, dropout, softmax (libm expf via PLT). Full op-parity with arm64 minus SIMD/AVX. macOS x86_64 (Mach-O) and SIMD remain open. |
 | `riscv64`   | RISC-V             | RVV vector extension (future) |
 
 A profile is a self-contained module. Adding support for a new architecture means writing a new profile — the language and compiler core remain unchanged.
@@ -159,6 +159,7 @@ NeuralForge is designed so that LLMs can write, read, and reason about NFL code 
 | 6 | Attention-pattern fusion — kernel fusion v2 (complete) | `PostOp::SoftmaxRow` variant + `FuseLinearSoftmax` pass; `default_pipeline = [EliminateDropout, FuseLinearRelu, FuseLinearSoftmax]`; arm64 RowWise emit branch in `emit_linear` (matmul i-loop A writes the M×N output, then a separate i-loop B runs Phases 2-4: row-max → exp+sum → normalise, in-place over the linear output buffer using callee-saved s8/s9 surviving `bl _expf`); bit-exact equivalence proven via `fused_vs_unfused_softmax_match_numerically` on `classifier` (no-bias) + `softmax_with_bias` (bias-aware) fixtures; `compiler/src/ir/test_utils.rs` shared helpers extracted; OQ-5 `assert_eq!` harmonisation across all three fused-vs-unfused FFI tests |
 | 7 | Shared 3-step rebuild helper extraction (complete) | New `compiler/src/passes/rewriter.rs` (`pub(crate) struct RewritePlan` + `pub(crate) fn rewrite_model`); plan-as-data API (three HashMaps + one constructor that precomputes `consumer_count`); migration of three existing passes (`EliminateDropout`, `FuseLinearRelu`, `FuseLinearSoftmax`) onto the shared helper, each pass body shrinks ~60% (70-100 → 26-39 lines); closes M6 holistic-review Finding #1 (three-strikes-then-refactor trigger fired in M6, deferred to M7); §8 invariant 6 unit test added (closes M6 Finding #7); atomic-task-pack convention demonstrated via 4 sequential clean commits |
 | 8 | ARM64 codegen hardening + viewer v0.1 (complete) | Two arm64 codegen bugs closed: dropout-as-output now emits an explicit copy-loop via new `ops/dropout.rs::emit_dropout_copy` (BufferLoc::OutputReg branch in walk_model::Dropout); dim-immediate encoding routed uniformly through `asm::emit_imm32` across 17 sites (12 cmp + 5 mov), with hoist-outside-loop (Group A: relu, dropout-copy, matmul body) and re-materialise-at-loop-top (Group B: standalone softmax, fused RowWise tail) placement strategies; new fixtures `large_classifier_{k,n}.nfl` (k=8192 / out=5120) prove > 4095 dim now compiles. Viewer v0.1: `compiler::ir::types::{VerboseUir, VerboseModel, VerboseNode}` newtype wrappers + `Uir::calls_extern_math` / `UirModel::calls_extern_math` predicate; new `nflc parse --uir-verbose` flag (mutually exclusive with `--uir`) renders annotated UIR with top-level + per-model summary, fused post-ops on separate indented lines. `docs/language_reference/uir.md` gets new "Viewing UIR" section. Test count: 208 → 223. |
+| 9 | x86_64 Linux ELF profile + profile-api contract (complete) | x86_64 scalar SSE2 codegen with full op-parity with arm64 (linear ± bias, relu, fused relu, softmax_row, dropout alias). `Profile` trait in new `profile-api` crate abstracts the profile contract (`lower` + `sym_prefix`); both `profiles-arm64` and `profiles-x86_64` implement it. SysV AMD64 ABI compliance: prologue/epilogue saves callee-saved registers conditionally (`%rbp` always; `%rbx/%r12–%r15` when `calls_extern_math()`); matmul body uses only caller-saved registers (`%rdi/%rsi/%rdx` as k-counter/scratch/bias-base). `docs/profile_guide/x86_64.md` added. Test count: 223 → 284. |
 
 ---
 
@@ -170,7 +171,7 @@ advance. Trigger-driven cleanup is intentionally excluded — it activates on
 its own trigger condition and lives under "Open Questions" below.
 
 ```
-x86_64 profile → MACHO_SYM_PREFIX rename
+x86_64 profile [M9 complete] → MACHO_SYM_PREFIX rename [closed — abstracted as Profile::sym_prefix() in M9]
 NFL v0.2 grammar → attention ops → profile-level viewer annotations
 bare-metal expf → drop libm dependency
 ```
@@ -178,7 +179,9 @@ bare-metal expf → drop libm dependency
 - **Axis 1 — codegen breadth.** Adding a second concrete profile (x86_64)
   validates the profile-isolation principle; the per-OS symbol-prefix rename
   falls out as a natural consequence of the work, not as a separately-scheduled
-  milestone.
+  milestone. M9 ships scalar Linux ELF; SIMD/AVX and macOS x86_64 remain as
+  possible follow-ups. `MACHO_SYM_PREFIX rename` closed — abstracted as
+  `Profile::sym_prefix()` in M9.
 - **Axis 2 — modelling depth.** NFL v0.2 grammar unblocks attention patterns
   (Q/K/V projections, scaled dot-product, axis-N softmax). Profile-level viewer
   annotations (per-node footprint, stack frame, callee-saved set) follow once a
@@ -201,11 +204,12 @@ bare-metal expf → drop libm dependency
 Items raised during a milestone that intentionally do not get scheduled — they
 activate when their trigger condition fires.
 
-- **OQ-NEW** (M8) — duplicated `node_uses_softmax` / `calls_extern_math` predicates between `profiles/arm64/src/buffer.rs` and `compiler/src/ir/types.rs`. *Trigger: next change to either predicate (e.g. `tanh`-via-libm or any other extern-math op).*
+- **OQ-NEW** — **Closed in M9 (commit `a08fd24`).** `profiles/arm64/src/buffer.rs::node_uses_softmax` was removed; both `compute_is_leaf` and `compute_callee_saved` now consume `UirModel::calls_extern_math()` (UIR-side predicate). All sites reduced to the UIR predicate; no profile-specific information was needed. Single source of truth across profiles.
 - **OQ-7** (M7) — per-pass `eliminate_one_model` / `fuse_one_model` return `Result<UirModel, PassError>` despite never producing `Err`. *Trigger: first real `Err`-case in pass-level logic.*
 - **OQ-8** (M7) — `compiler/src/passes/rewriter.rs` could lift to `compiler/src/ir/`. *Trigger: a non-pass UIR-rewrite consumer appears.*
 - **OQ-9** (M7) — `producer_post_ops: Vec<PostOp>` could generalise to `enum NodeMutation`. *Trigger: a fourth pass needs non-PostOp producer mutation.*
 - **M5c OQ-4** — `BuildError::span()` + `Diagnostic` trait for richer error reporting. *Trigger: error-reporting ergonomics become a real pain point in a downstream milestone.*
+- **OQ-BENCH** (opened by M9 spec, fires on M9 merge) — Build a benchmark harness that compiles a single NFL source through both `arm64` and `x86_64` profiles, runs both binaries with the same input/params, and reports timing side-by-side. Goal: quantify the cost of "scalar-only" vs the eventual SIMD profile, and lay groundwork for performance claims. *Trigger: M9 merged. Scope: stretch enough to handle multiple fixtures; output a markdown report. No regression-gate yet — informational only.*
 
 ## Decisions (formerly open, now resolved)
 

@@ -4,9 +4,9 @@
 
 use crate::asm::emit_imm32;
 use crate::buffer::BufferLoc;
-use crate::types::LowerError;
 use compiler::ast::Span;
 use compiler::PostOp;
+use profile_api::LowerError;
 
 /// Emit AArch64 asm for a linear layer (matmul + optional bias-add).
 ///
@@ -28,6 +28,7 @@ pub fn emit_linear(
     bias_offset: Option<usize>,
     node_span: Span,
     fused_post_ops: &[PostOp],
+    sym_prefix: &str,
 ) -> Result<String, LowerError> {
     let lid = format!("{model_idx}_{linear_idx}");
     let mut s = String::new();
@@ -197,7 +198,7 @@ pub fn emit_linear(
                 s.push_str("    add     x6, x20, x21\n");
                 s.push_str("    ldr     s0, [x22, x6, lsl #2]\n");
                 s.push_str("    fsub    s0, s0, s8\n");
-                s.push_str("    bl      _expf\n");
+                s.push_str(&format!("    bl      {}expf\n", sym_prefix));
                 // x6 may have been clobbered by _expf (caller-saved); recompute.
                 s.push_str("    add     x6, x20, x21\n");
                 s.push_str("    str     s0, [x23, x6, lsl #2]\n");

@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! UIR → AArch64 asm walker.
-//!
-//! Per-op emitters land here as Tasks 3-5 progress.
+//! UIR → x86_64 asm walker. Mirror of `profiles/arm64/src/codegen.rs`
+//! modulo register naming and instruction set.
 
+use crate::buffer::{assign_buffers, compute_callee_saved, BufferLoc};
 use compiler::{NodeId, NodeKind, StdOp, Uir, UirModel};
 use profile_api::{Asm, FnSig, LowerError, ParamKind, ParamSlot};
 
-/// Walk the entire UIR, returning the combined asm source + per-model FnSigs.
+/// Walk the entire UIR, returning the combined asm source + per-model
+/// FnSigs. `sym_prefix` threads through to every emitter that produces
+/// a profile-prefixed symbol (function label, .globl directive, libm
+/// call). For x86_64, `sym_prefix` is `""`.
 pub fn walk_uir(uir: &Uir, sym_prefix: &'static str) -> Result<Asm, LowerError> {
     let mut source = String::new();
     let mut functions = Vec::with_capacity(uir.models.len());
@@ -19,6 +22,20 @@ pub fn walk_uir(uir: &Uir, sym_prefix: &'static str) -> Result<Asm, LowerError> 
         functions.push(sig);
     }
 
+    // ELF-only directive: opt out of an executable stack. Without this,
+    // gas/ld emit "missing .note.GNU-stack section implies executable
+    // stack" warnings, and modern hardened glibc/loader stacks treat the
+    // resulting `.so` as suspect — `dlopen` may succeed but the loaded
+    // code can SIGSEGV on first `call <libm>@PLT` when the executable-
+    // stack quirks interact with PLT lazy resolution. The directive is a
+    // 0-byte section that signals "this object does not require an
+    // executable stack"; it has no runtime cost. Emitted only when the
+    // UIR contributed at least one function — empty UIR remains empty so
+    // upstream sanity checks (`asm.source.is_empty()`) still hold.
+    if !functions.is_empty() {
+        source.push_str("\n.section .note.GNU-stack,\"\",@progbits\n");
+    }
+
     Ok(Asm { source, functions })
 }
 
@@ -27,8 +44,7 @@ fn walk_model(
     model: &UirModel,
     sym_prefix: &'static str,
 ) -> Result<(String, FnSig), LowerError> {
-    use crate::asm::{format_function_epilogue, format_function_prologue, LeafKind};
-    use crate::buffer::{assign_buffers, compute_callee_saved, compute_is_leaf};
+    use crate::asm::{format_function_epilogue, format_function_prologue};
 
     // 1. Validate ops upfront.
     for node in &model.nodes {
@@ -37,7 +53,7 @@ fn walk_model(
         }
     }
 
-    // 2. Compute layout, ABI sizes (kept from Task 1).
+    // 2. Compute layout, ABI sizes.
     let input_id = *model.inputs.first().ok_or(LowerError::ShapeNotConcrete {
         span: model.source_span,
     })?;
@@ -92,26 +108,21 @@ fn walk_model(
         params_layout,
     };
 
-    // 3. Buffer assignment + leaf analysis.
+    // 3. Buffer assignment + callee-saved set.
     let assignment = assign_buffers(model);
-    let leaf = if compute_is_leaf(model) {
-        LeafKind::Leaf
-    } else {
-        LeafKind::NonLeaf
-    };
     let regs = compute_callee_saved(model);
 
-    // 4. Emit prologue + body + epilogue.
+    // 4. Emit prologue + body + epilogue. assignment.stack_bytes already
+    // includes the 16-byte fused-softmax xmm-spill reserve when softmax
+    // fires (spec §7.4); no per-call adjustment needed here.
     let mut body = String::new();
     body.push_str(&format_function_prologue(
         &sig,
-        leaf,
         regs,
         assignment.stack_bytes,
         sym_prefix,
     ));
 
-    // Per-op emission (Tasks 5-8 refactor this dispatch into ops/*).
     let mut linear_idx = 0usize;
     let mut relu_idx = 0usize;
     let mut softmax_idx = 0usize;
@@ -140,7 +151,6 @@ fn walk_model(
                         .find(|s| s.kind == ParamKind::LinearBias && s.origin_node == node_idx)
                         .map(|s| s.offset);
 
-                    // M5a: read fused_post_ops from the node and pass through.
                     let NodeKind::Op { fused_post_ops, .. } = &node.kind else {
                         unreachable!("walk_model already matched NodeKind::Op")
                     };
@@ -174,10 +184,7 @@ fn walk_model(
                 StdOp::Dropout => {
                     let src_loc = resolve_loc(&assignment.locs, operands[0]);
                     let dst_loc = resolve_loc(&assignment.locs, node_idx);
-                    if matches!(dst_loc, crate::buffer::BufferLoc::OutputReg) {
-                        // Bug-fix path (M8): dropout-as-output requires explicit copy
-                        // because BufferLoc::Alias redirection doesn't apply when this
-                        // node IS the output. See `ops/dropout.rs` module doc.
+                    if matches!(dst_loc, BufferLoc::OutputReg) {
                         let total: u64 = node.ty.shape.0.iter().product();
                         body.push_str(&crate::ops::emit_dropout_copy(
                             total,
@@ -207,11 +214,6 @@ fn walk_model(
                     ));
                     softmax_idx += 1;
                 }
-                // M5c: #[non_exhaustive] on StdOp requires a wildcard
-                // arm. Future ops (e.g. Tanh, Gelu, Embedding) will
-                // route here until codegen learns them. Returning
-                // LowerError::UnsupportedOp keeps the failure mode
-                // graceful (M4b-era variant, made live by this arm).
                 #[allow(unreachable_patterns)]
                 _ => {
                     return Err(LowerError::UnsupportedOp {
@@ -223,17 +225,12 @@ fn walk_model(
         }
     }
 
-    body.push_str(&format_function_epilogue(
-        leaf,
-        regs,
-        assignment.stack_bytes,
-    ));
+    body.push_str(&format_function_epilogue(regs, assignment.stack_bytes));
     Ok((body, sig))
 }
 
 /// Resolve `Alias` chains to a concrete BufferLoc.
-fn resolve_loc(locs: &[crate::buffer::BufferLoc], id: NodeId) -> crate::buffer::BufferLoc {
-    use crate::buffer::BufferLoc;
+fn resolve_loc(locs: &[BufferLoc], id: NodeId) -> BufferLoc {
     let mut cur = id;
     loop {
         match locs[cur] {
@@ -246,24 +243,21 @@ fn resolve_loc(locs: &[crate::buffer::BufferLoc], id: NodeId) -> crate::buffer::
     }
 }
 
-/// Validate that an op is supported in M4b; return error otherwise.
-/// All M4b ops are supported; kept as extension point for M5+ ops.
+/// Validate that an op is supported.
 fn classify_op(
     op: StdOp,
     _attrs: &[compiler::OpAttr],
-    _span: compiler::ast::Span,
+    span: compiler::ast::Span,
 ) -> Result<(), LowerError> {
     match op {
         StdOp::Linear => Ok(()),
         StdOp::Relu => Ok(()),
         StdOp::Dropout => Ok(()),
         StdOp::Softmax => Ok(()),
-        // M5c: #[non_exhaustive] on StdOp requires a wildcard arm.
-        // Future ops are rejected here until codegen learns them.
         #[allow(unreachable_patterns)]
         _ => Err(LowerError::UnsupportedOp {
             op: format!("{op}"),
-            span: _span,
+            span,
         }),
     }
 }

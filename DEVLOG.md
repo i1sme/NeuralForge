@@ -14,6 +14,393 @@ Format for each entry:
 
 ---
 
+## 2026-05-07 — Milestone 9 closed: x86_64 Linux ELF profile + profile-api contract
+
+### What was done
+- **`profile-api/`** (new crate) — `Asm`, `FnSig`, `ParamSlot`, `ParamKind`,
+  `LowerError` types + minimal `Profile` trait (`lower` + `sym_prefix`).
+  Group 1 commit `a7d1b7a`. 5 smoke tests; profile-neutral `Display`
+  message.
+- **`profiles/arm64/`** migrated onto the trait. `types.rs` deleted; types
+  re-exported from `profile-api`. `Arm64Profile` struct + `impl Profile`.
+  Hardcoded `MACHO_SYM_PREFIX` + `bl _expf` literals replaced with format
+  substitutions through `sym_prefix: &'static str`. **Asm output
+  byte-identical to pre-migration baseline (sha256-verified per fixture
+  for all 10 fixtures).** Group 2 commit `a08fd24`. OQ-NEW closed.
+- **`profiles/x86_64/`** (new crate) — scalar SSE2 Linux ELF codegen,
+  full op-parity with arm64. AT&T syntax. `compute_frame_size` (+ 8 unit
+  tests with inline alignment derivation) for SysV alignment. xmm-spill
+  via `(%rsp)`, `8(%rsp)` (16-byte reserve owned by `assign_buffers`)
+  across `call expf@PLT` (no callee-saved FP under SysV).
+  Group 3 commit `47bef54`; +53 unit tests (281 total).
+- **`nflc compile --profile <name>`** dispatches via `Box<dyn Profile>`.
+  Three CLI smoke tests in new `nflc/tests/cli.rs`. Group 4 commit
+  `fab17c5`; +3 CLI tests (284 total).
+- **CI**: `unit` job (ubuntu-latest) gains x86_64 FFI tests via cfg-gating
+  (`#![cfg(all(target_os = "linux", target_arch = "x86_64"))]`);
+  `integration` job (macos-14) unchanged. 13 mirror FFI tests + 1
+  fused_softmax_xmm_spill_x86_64 (numerical proof of §7.4 spill
+  strategy). Group 5 commit `9ee5772`. ~300 tests on Linux CI; 284
+  locally on macOS arm64 (FFI suite cfg-skipped).
+- **Docs**: this commit. New `docs/profile_guide/x86_64.md`; `arm64.md`,
+  `PROJECT_SPEC.md` (profile table + Axis 1 annotation + OQ-NEW closure +
+  OQ-BENCH opening), `CLAUDE.md` (repo tree + status), `README.md`.
+
+### Decisions made
+
+**AT&T syntax for x86_64 emitters** — gas default on Linux. The plan
+resolved the spec's §7.3 vs §7.4 syntax inconsistency by adopting AT&T
+uniformly.
+
+**`sym_prefix: &'static str` plumbing** (option (b) from spec §6.1)
+applied uniformly to both arm64 (commit 2) and x86_64 (commit 3). One
+function-arg per call site, no `dyn Profile` indirection in hot codegen.
+
+**OQ-NEW closed**: `node_uses_softmax` removed in favour of UIR-side
+`calls_extern_math()`. Single source of truth across profiles.
+
+**OQ-BENCH opened**: trigger fires on M9 merge; benchmark harness work
+is informational follow-up, not a regression gate.
+
+**Stack-slot ownership for fused-softmax xmm-spill in `assign_buffers`**
+(spec §7.4, plan-time fix landed in pre-execution commit `4e89189`).
+Slot positions are pinned at `(%rsp)` (row_max, offset 0) and `8(%rsp)`
+(row_sum, offset 8); the 16-byte reserve is owned by `assign_buffers`,
+which initialises `stack_offset` at 16 when `model.calls_extern_math()`
+— shifting all `BufferLoc::StackOffset` values up by 16. This anchors
+the spill addresses across all models (including those with non-empty
+intermediate buffers) without per-emitter parameterisation, and
+prevents the buffer/slot overlap that an earlier draft of the plan
+would have caused.
+
+### Problems encountered
+- **`Display` message on `LowerError`** was profile-specific in arm64
+  (`"is not supported by the arm64 profile"`). The spec said "verbatim
+  migration" but verbatim copy would have put "arm64" in errors raised
+  by x86_64. Plan Task 1.3 makes the message profile-neutral
+  (`"this profile"`); a dedicated test asserts the Display string
+  contains neither "arm64" nor "x86_64".
+- **NFL fixture syntax**: the plan's emitter tests originally used
+  `linear[output=N]` form; the grammar requires the positional
+  `linear[N]` form (or `linear[N, bias=true]`). Caught at first
+  compile of subagent C's emit_linear tests; tests adjusted.
+- **clippy `dead_code` on `compute_is_leaf`** — the helper was
+  introduced in subagent A as a mirror of the arm64 analyzer, but
+  x86_64's prologue/epilogue does not actually consume it (the SysV
+  prologue always pushes `%rbp`, regardless of leaf-ness). Removed
+  the helper outright rather than masking with `#[allow(dead_code)]`;
+  the corresponding 2 unit tests removed accordingly.
+
+### Next step
+Push branch + open PR titled `feat(m9): x86_64 Linux ELF profile +
+profile-api contract`. Once merged, OQ-BENCH's trigger fires; the next
+milestone selection runs over the post-M9 Strategic Roadmap (Axis 2
+NFL v0.2, Axis 3 bare-metal `expf`, or Axis 1 follow-ups: SIMD,
+macOS x86_64).
+
+---
+
+## 2026-05-07 — M9 plan/spec sync: stack-slot ownership moved to `assign_buffers` (pre-execution fix)
+
+### What was done
+- Pre-execution correction to spec §7.4
+  (`docs/superpowers/specs/2026-05-06-m9-x86_64-profile-and-profile-api-design.md`)
+  and plan Tasks 3.4 / 3.9 / 3.10 / 5.3 + register-allocation contract +
+  commit-message templates + DEVLOG closure template
+  (`docs/superpowers/plans/2026-05-07-m9-x86_64-profile-and-profile-api-plan.md`).
+- Slot positions for fused-softmax xmm-spill pinned at fixed `(%rsp)`
+  (row_max, offset 0) and `8(%rsp)` (row_sum, offset 8). 16-byte
+  reserve owned by `assign_buffers`: initialises `stack_offset` at 16
+  when `model.calls_extern_math()`, shifting all
+  `BufferLoc::StackOffset(off)` values up by 16. `walk_model` no longer
+  needs an `intermediate_bytes` adjustment — `BufferAssignment::stack_bytes`
+  already includes the reserve.
+
+### Decisions made
+
+**Bottom-of-frame fixed-offset slot layout, ownership in
+`assign_buffers`.** The original plan (commit `fa2a691`) parameterised
+slot addresses at `8(%rsp)` / `16(%rsp)` and bumped `intermediate_bytes`
+in `walk_model`. User review surfaced that those addresses overlap the
+intermediate buffer in any model with stack-resident hidden layers
+(e.g. unfused `linear → softmax`, classifier with multi-layer hidden
+state) — Phase 2 of standalone softmax would corrupt source mid-pass
+because the slot at `8(%rsp)` lands inside the linear's intermediate
+buffer (which lives at `0..S-1(%rsp)` for any `S > 8`). On arm64 this
+doesn't manifest because row_max / row_sum live in callee-saved
+`s8`/`s9`; on x86_64 there is no callee-saved FP register set, so
+the spill is forced and the slot addresses must be chosen with the
+intermediate-buffer layout in mind. Fix lands in a single place
+(`assign_buffers`) — no per-emitter parameterisation, slot addresses
+constant across all models, both spec and plan agree.
+
+### Problems encountered
+- **Caught pre-execution, not in implementation.** The corruption mode
+  (Phase 2 reads from src after Phase 1 spilled row_max into the same
+  bytes) would have produced FFI-test failures in Group 5 the first
+  time `softmax_with_bias.nfl --no-passes` was exercised. Local fix-up
+  in implementation would have required re-shaping `assign_buffers`
+  AND `walk_model` AND every emitter test, with the spec still
+  asserting the broken layout. 5-min spec/plan edit now beats
+  broken Group 3 + spec/plan rebase later.
+- **Plan-synthesis DEVLOG entry above (cd952b0) is now partially
+  stale.** It celebrates "Stack-slot budget bug surfaced during plan
+  synthesis" but describes the +16 bump in `walk_model` as the fix —
+  which itself was buggy. Left as-is for temporal accuracy; this
+  entry is the correct picture going forward.
+
+### Next step
+Subagent-driven execution from Group 1. Both spec and plan now agree
+on slot ownership; no further pre-execution corrections expected.
+
+---
+
+## 2026-05-07 — M9 implementation plan synthesised from spec
+
+### What was done
+- Promoted spec to plan via `superpowers:writing-plans` in worktree
+  `claude/mystifying-morse-39dc8c`. Source spec:
+  `docs/superpowers/specs/2026-05-06-m9-x86_64-profile-and-profile-api-design.md`
+  (post user-review fix from `07661be`).
+- Wrote
+  `docs/superpowers/plans/2026-05-07-m9-x86_64-profile-and-profile-api-plan.md`
+  in commit `fa2a691`: 3584 lines, 41 tasks across 6 commit-groups,
+  123 checkbox steps. TDD red→green per task; commit-per-group cadence
+  (workspace gates run after every task; commit only at end of group)
+  preserves the spec's required 6-atomic-commit structure.
+
+### Decisions made
+
+**AT&T syntax for all x86_64 emitters.** Spec §7.3 recommended AT&T
+but §7.4's pseudocode used Intel-style memory operands; reviewer
+flagged the inconsistency and left the choice to the plan. AT&T picked
+because (i) gas default on Linux — no `.intel_syntax noprefix`
+directive needed, (ii) `cc` / `clang` on Linux defaults to AT&T,
+(iii) one less line of generated asm per file. All emitters use
+`%`-prefixed registers, `$`-prefixed immediates, `(base, index, scale)`
+memory operands, and AT&T operand order (source-on-left, dest-on-right).
+
+**`sym_prefix: &'static str` threading (option (b) from spec §6.1).**
+Applied uniformly to arm64 (commit 2) and x86_64 (commit 3). Lightest
+of the three options — single function-arg per call site, no
+`dyn Profile` indirection inside hot codegen paths. Same shape works
+for both profiles, mitigating spec §14's "trait-method threading
+touches more arm64 callsites than expected" risk.
+
+**Stack-slot budget bug surfaced during plan synthesis.** The fused
+softmax tail spills to `[8(%rsp)]` and `[16(%rsp)]`, but
+`compute_frame_size(raw=0, num_pushes=6) = 8` reserves only 8 bytes —
+half the needed budget. Plan Task 3.9 step 4 patches `walk_model` to
+bump `intermediate_bytes` by 16 whenever `model.calls_extern_math()`.
+The spec specifies the spill offsets in §7.4 and the frame helper in
+§7.5 but does not connect them. Caught at planning time, not
+implementation time — would have manifested as SIGSEGV in the first
+fused-softmax FFI test if shipped.
+
+**Plan structure: commit-group cadence, not commit-per-task.** The
+spec is structured around six atomic commits (§5–§10); the plan
+decomposes each into 5-12 bite-sized tasks (TDD red→green per task,
+2-5 minutes per step). To preserve the atomic-commit requirement, only
+the LAST task of each group commits; preceding tasks leave the
+workspace passing-but-uncommitted. This adds plan length but reconciles
+the writing-plans skill's bite-sized requirement with the spec's
+atomic-commit contract.
+
+### Problems encountered
+- **`Display` message on `LowerError` was profile-specific in arm64**
+  (`"is not supported by the arm64 profile"`). The spec said "verbatim
+  migration" but verbatim copy would put "arm64" in errors raised by
+  x86_64. Plan Task 1.3 makes the message profile-neutral
+  (`"this profile"`); Task 1.3 step 1 includes a dedicated test
+  asserting the Display string contains neither "arm64" nor "x86_64".
+- **Plan length** (3584 lines) is the largest plan in the project's
+  history. Justified by the breadth of M9 (two new crates, full op
+  mirror to arm64, six commit-groups) and the writing-plans skill's
+  rule that every code change has complete code in the plan, not just
+  a "see arm64.rs for reference". For mirror tasks (Group 3 unit
+  tests, Group 5 FFI tests) the plan delegates by translation table
+  rather than reproducing the full body.
+
+### Next step
+Execute the plan via `superpowers:subagent-driven-development`
+(recommended; one subagent per task with two-stage review between
+tasks) or `superpowers:executing-plans` (inline; batch execution with
+checkpoints). Each Group 1-6 commit corresponds to one of the 6 atomic
+PR commits; final state ships ~295 tests on Linux x86_64 CI, ~284 on
+macOS arm64 with x86_64 FFI cfg-skipped.
+
+---
+
+## 2026-05-07 — M9 spec fix: `compute_frame_size` alignment condition (user review)
+
+### What was done
+- **`docs/superpowers/specs/2026-05-06-m9-x86_64-profile-and-profile-api-design.md`**
+  - **§4.9 (alignment derivation)** — rewritten with explicit entry-state
+    `rsp ≡ 8 (mod 16)` after the caller's `call`. Formula flipped from
+    `if num_pushes is odd then 8 else 0` to `if num_pushes is even then
+    8 else 0`. Pointer added to §7.5 for the helper specification.
+  - **§7.5 (`compute_frame_size`)** — full derivation block prepended
+    (entry state → post-pushes parity → required `frame_size` parity);
+    condition flipped to `num_pushes % 2 == 0`; all 8 unit-test cases
+    recomputed and annotated with inline alignment-arithmetic
+    verification (`post-pushes ≡ X; sub Y → 0 ✓`).
+- One-commit fix: `07661be docs(m9): fix inverted compute_frame_size
+  alignment condition`. No code touched — spec-only.
+
+### Decisions made
+
+**The inverted parity was a real, prologue-typical bug, not a cosmetic
+typo.** SysV AMD64 puts `rsp ≡ 8 (mod 16)` at function entry (caller's
+`call` pushed the 8-byte return address). After N prologue pushes,
+`rsp ≡ 8 - 8*N (mod 16) ≡ 8*(1 - N) (mod 16)`. To land at
+`rsp ≡ 0 (mod 16)` before `call expf@PLT`, the +8 correction is needed
+when N is **even**, not when N is odd. The original formula would have
+SIGSEGV'd on the `(push rbp, raw=0)` case — the prologue shape every
+x86_64 function takes — exactly the failure mode §4.9 was meant to
+prevent.
+
+**Per-test-case inline alignment verification, not a cross-reference.**
+Each of the 8 unit-test cases now carries its own arithmetic check
+(`post-pushes ≡ X; sub Y → Z ✓`) next to its `(raw, N) → frame_size`
+line. Reasoning: a future reader debugging an alignment SIGSEGV should
+be able to re-derive the constants from the test alone without
+re-reading SysV §3.2.2.
+
+**AT&T vs Intel pseudocode in §7.4 deferred to the plan, not patched
+in the spec.** Reviewer also flagged that §7.4 fused-softmax xmm-spill
+snippets use Intel-style memory operands (`[rdx + i*N*4 + j*4]`) while
+§7.3 recommends AT&T (gas default). This is pseudocode in a brainstorm
+spec, not implementation. Picking a single syntax is the plan's job;
+mixing one syntax fix into the parity-condition correction would
+dilute the spec-fix commit and stretch the spec into territory it
+does not own.
+
+### Problems encountered
+- **The original spec's derivation block was internally inconsistent.**
+  §4.9 of `ff9ea08` did include reasoning, but the parity got inverted
+  somewhere between "rsp ≡ 8 (mod 16) at entry" and "+8 if N is odd".
+  Net cost: one docs commit; would have been one debug-cycle commit +
+  a SIGSEGV in CI if it had reached implementation.
+- **All 8 unit-test cases needed pin-correctness.** Flipping the
+  formula without recomputing every case would have left the spec
+  self-contradictory; the replacement table was hand-derived using
+  the entry-state model rather than mechanically inverting the
+  original.
+
+### Next step
+Spec is ready for `superpowers:writing-plans`. Next session opens the
+plan in this same worktree (`claude/mystifying-morse-39dc8c`),
+produces
+`docs/superpowers/plans/2026-05-07-m9-x86_64-profile-and-profile-api-plan.md`
+covering the six-commit sequence (§5–§10 of the spec).
+
+---
+
+## 2026-05-06 — M9 brainstorming: x86_64 Linux ELF profile + `profile-api` extraction
+
+### What was done
+- Started M9 brainstorming session in fresh worktree
+  `claude/mystifying-morse-39dc8c` using `superpowers:brainstorming`.
+- Selected one of the three strategic axes from `PROJECT_SPEC.md`
+  §"Strategic Roadmap" (codegen breadth / modelling depth / deployment
+  reach); see decisions below.
+- Produced
+  `docs/superpowers/specs/2026-05-06-m9-x86_64-profile-and-profile-api-design.md`
+  (1027 lines) in commit `ff9ea08`: §4 pre-decided architectural calls,
+  §5–§10 six-commit sequence with per-commit done-criteria, §7.7
+  lessons-learned roll-forward from M3-M8.
+
+### Decisions made
+
+**Axis 1 — codegen breadth — selected over Axes 2 (NFL v0.2 grammar)
+and 3 (bare-metal `expf`).** Profile isolation is the only nontrivial
+architectural claim of the project; correctness, fusion, and UIR
+semantics are all checkable inside one backend, but isolation is not.
+Validating it earlier is cheaper than later — building Axis 2's
+attention stack on top of an unvalidated isolation hypothesis would
+force a more expensive retrofit if isolation leaks. Axis 3 needs a
+working second profile to be meaningful in the first place.
+
+**Linux ELF, not macOS x86_64 Mach-O.** A Mach-O x86_64 second profile
+would validate ISA-isolation but leave OS-isolation untested; the
+existing `MACHO_SYM_PREFIX` rename would remain cosmetic. Linux ELF
+forces the abstraction to be real — divergent symbol prefix (no
+leading underscore), PLT relocations, ELF `.so` shared object as the
+FFI artefact, libm symbol forms differ.
+
+**Full operations parity with arm64, not a subset.** All four op
+emitters (linear ± bias, relu, dropout, softmax) plus both fused
+PostOp branches (`ReluFused`, `SoftmaxRow`). A subset port that
+omitted softmax would never exercise `call expf@PLT` — exactly the
+site where the symbol-prefix abstraction earns its keep — so partial
+parity would not validate the abstraction. Asymmetric "arm64 fuses,
+x86_64 doesn't" was rejected as exactly the deferred-obligation
+pattern this project tries to avoid.
+
+**Path B — shared `profile-api` crate with minimal trait — over Path
+A (full duplication) and Path C (shared types only).** A new crate at
+`profile-api/` exports `Asm`, `FnSig`, `ParamSlot`, `ParamKind`,
+`LowerError` and a 2-method trait
+(`lower(&self, &Uir) -> Result<Asm, LowerError>` +
+`sym_prefix(&self) -> &'static str`). Path A keeps isolation as
+informal "two crates with similar APIs" rather than a type-level
+contract. Path C reduces the symbol-prefix abstraction to a
+duplicated `pub const`. Path B's trait is minimal by hard rule:
+**trait grows by request, not by anticipation** — `relocation_hints`,
+`library_names`, `target_triple`, `lower` options, default methods
+all explicitly excluded from M9.
+
+**API-first sequencing (Approach 1) over standalone-then-extract.**
+Six atomic commits in order: (1) `profile-api` extract, (2) arm64
+migration onto trait, (3) x86_64 build, (4) CLI dispatch, (5) CI
+matrix `ubuntu-latest`, (6) docs + OQ updates. Each commit leaves the
+workspace clean (`cargo fmt`, `clippy -D warnings`, `build`, `test`
+all green). Approach 2 (build x86_64 standalone, extract trait later)
+was rejected because it creates type duplication exactly where Path B
+is meant to prevent it, and risks x86_64 starting on a
+slightly-different shape that complicates the eventual extract.
+
+**`Box<dyn Profile>` runtime dispatch in `nflc`.** `nflc --profile
+<name>` selects at runtime, so a trait object is the semantically
+correct shape — generics would require `P: Profile` known at the call
+site. Both profile crates statically linked into the `nflc` binary;
+the trait object dispatches the runtime choice.
+
+**Hard byte-identical invariant for arm64 in commit 2.** All 223
+existing tests must pass without modification. The two hardcoded
+`_expf` callsites become `format!("\tbl {}expf\n",
+self.sym_prefix())`; for arm64 where `sym_prefix() -> "_"` the format
+expansion yields `"\tbl _expf\n"` — byte-identical. If a test fails
+after commit 2 the migration is buggy; tests are not adjusted.
+
+**`call expf@PLT` (not bare `call expf`) on x86_64.** External symbols
+in PIE/shared objects on Linux ELF resolve through the
+procedure-linkage table; the `@PLT` modifier makes the relocation
+explicit. Bare `call expf` may work with specific linker
+configurations but is not guaranteed — this is correctness, not
+tuning.
+
+**Stack alignment isolated as `asm::compute_frame_size(raw_buffer_size:
+u32, num_pushes: usize) -> u32` and unit-tested.** Encapsulates the
+SysV AMD64 §3.2.2 16-byte-aligned-`rsp`-before-`call` requirement. The
+original formula was inverted in the brainstorm; user review caught it
+the next morning — see the 2026-05-07 spec-fix entry above.
+
+### Problems encountered
+- **None blocking the brainstorm itself.** The inverted parity
+  condition in `compute_frame_size` (§4.9, §7.5) was caught in user
+  review the following morning and fixed in commit `07661be`; see the
+  separate 2026-05-07 entry above.
+
+### Next step
+Promote the spec to a plan via `superpowers:writing-plans` in the
+same worktree. Plan target:
+`docs/superpowers/plans/2026-05-07-m9-x86_64-profile-and-profile-api-plan.md`.
+Then transition to `superpowers:executing-plans` for the six-commit
+sequence.
+
+---
+
 ## 2026-05-06 — Public-release hygiene: drop stale Gmail contact from DEVLOG
 
 ### What was done

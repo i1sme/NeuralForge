@@ -1,0 +1,9 @@
+[package]
+name = "profile-api"
+version = "0.1.0"
+edition = "2021"
+description = "NeuralForge profile contract — public types + trait shared by all backend profiles"
+license.workspace = true
+
+[dependencies]
+compiler = { path = "../compiler" }
