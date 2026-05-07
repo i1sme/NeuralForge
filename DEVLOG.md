@@ -14,6 +14,82 @@ Format for each entry:
 
 ---
 
+## 2026-05-07 — M9 implementation plan synthesised from spec
+
+### What was done
+- Promoted spec to plan via `superpowers:writing-plans` in worktree
+  `claude/mystifying-morse-39dc8c`. Source spec:
+  `docs/superpowers/specs/2026-05-06-m9-x86_64-profile-and-profile-api-design.md`
+  (post user-review fix from `07661be`).
+- Wrote
+  `docs/superpowers/plans/2026-05-07-m9-x86_64-profile-and-profile-api-plan.md`
+  in commit `fa2a691`: 3584 lines, 41 tasks across 6 commit-groups,
+  123 checkbox steps. TDD red→green per task; commit-per-group cadence
+  (workspace gates run after every task; commit only at end of group)
+  preserves the spec's required 6-atomic-commit structure.
+
+### Decisions made
+
+**AT&T syntax for all x86_64 emitters.** Spec §7.3 recommended AT&T
+but §7.4's pseudocode used Intel-style memory operands; reviewer
+flagged the inconsistency and left the choice to the plan. AT&T picked
+because (i) gas default on Linux — no `.intel_syntax noprefix`
+directive needed, (ii) `cc` / `clang` on Linux defaults to AT&T,
+(iii) one less line of generated asm per file. All emitters use
+`%`-prefixed registers, `$`-prefixed immediates, `(base, index, scale)`
+memory operands, and AT&T operand order (source-on-left, dest-on-right).
+
+**`sym_prefix: &'static str` threading (option (b) from spec §6.1).**
+Applied uniformly to arm64 (commit 2) and x86_64 (commit 3). Lightest
+of the three options — single function-arg per call site, no
+`dyn Profile` indirection inside hot codegen paths. Same shape works
+for both profiles, mitigating spec §14's "trait-method threading
+touches more arm64 callsites than expected" risk.
+
+**Stack-slot budget bug surfaced during plan synthesis.** The fused
+softmax tail spills to `[8(%rsp)]` and `[16(%rsp)]`, but
+`compute_frame_size(raw=0, num_pushes=6) = 8` reserves only 8 bytes —
+half the needed budget. Plan Task 3.9 step 4 patches `walk_model` to
+bump `intermediate_bytes` by 16 whenever `model.calls_extern_math()`.
+The spec specifies the spill offsets in §7.4 and the frame helper in
+§7.5 but does not connect them. Caught at planning time, not
+implementation time — would have manifested as SIGSEGV in the first
+fused-softmax FFI test if shipped.
+
+**Plan structure: commit-group cadence, not commit-per-task.** The
+spec is structured around six atomic commits (§5–§10); the plan
+decomposes each into 5-12 bite-sized tasks (TDD red→green per task,
+2-5 minutes per step). To preserve the atomic-commit requirement, only
+the LAST task of each group commits; preceding tasks leave the
+workspace passing-but-uncommitted. This adds plan length but reconciles
+the writing-plans skill's bite-sized requirement with the spec's
+atomic-commit contract.
+
+### Problems encountered
+- **`Display` message on `LowerError` was profile-specific in arm64**
+  (`"is not supported by the arm64 profile"`). The spec said "verbatim
+  migration" but verbatim copy would put "arm64" in errors raised by
+  x86_64. Plan Task 1.3 makes the message profile-neutral
+  (`"this profile"`); Task 1.3 step 1 includes a dedicated test
+  asserting the Display string contains neither "arm64" nor "x86_64".
+- **Plan length** (3584 lines) is the largest plan in the project's
+  history. Justified by the breadth of M9 (two new crates, full op
+  mirror to arm64, six commit-groups) and the writing-plans skill's
+  rule that every code change has complete code in the plan, not just
+  a "see arm64.rs for reference". For mirror tasks (Group 3 unit
+  tests, Group 5 FFI tests) the plan delegates by translation table
+  rather than reproducing the full body.
+
+### Next step
+Execute the plan via `superpowers:subagent-driven-development`
+(recommended; one subagent per task with two-stage review between
+tasks) or `superpowers:executing-plans` (inline; batch execution with
+checkpoints). Each Group 1-6 commit corresponds to one of the 6 atomic
+PR commits; final state ships ~295 tests on Linux x86_64 CI, ~284 on
+macOS arm64 with x86_64 FFI cfg-skipped.
+
+---
+
 ## 2026-05-07 — M9 spec fix: `compute_frame_size` alignment condition (user review)
 
 ### What was done
