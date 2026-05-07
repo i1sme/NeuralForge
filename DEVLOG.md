@@ -14,6 +14,176 @@ Format for each entry:
 
 ---
 
+## 2026-05-07 — M9 spec fix: `compute_frame_size` alignment condition (user review)
+
+### What was done
+- **`docs/superpowers/specs/2026-05-06-m9-x86_64-profile-and-profile-api-design.md`**
+  - **§4.9 (alignment derivation)** — rewritten with explicit entry-state
+    `rsp ≡ 8 (mod 16)` after the caller's `call`. Formula flipped from
+    `if num_pushes is odd then 8 else 0` to `if num_pushes is even then
+    8 else 0`. Pointer added to §7.5 for the helper specification.
+  - **§7.5 (`compute_frame_size`)** — full derivation block prepended
+    (entry state → post-pushes parity → required `frame_size` parity);
+    condition flipped to `num_pushes % 2 == 0`; all 8 unit-test cases
+    recomputed and annotated with inline alignment-arithmetic
+    verification (`post-pushes ≡ X; sub Y → 0 ✓`).
+- One-commit fix: `07661be docs(m9): fix inverted compute_frame_size
+  alignment condition`. No code touched — spec-only.
+
+### Decisions made
+
+**The inverted parity was a real, prologue-typical bug, not a cosmetic
+typo.** SysV AMD64 puts `rsp ≡ 8 (mod 16)` at function entry (caller's
+`call` pushed the 8-byte return address). After N prologue pushes,
+`rsp ≡ 8 - 8*N (mod 16) ≡ 8*(1 - N) (mod 16)`. To land at
+`rsp ≡ 0 (mod 16)` before `call expf@PLT`, the +8 correction is needed
+when N is **even**, not when N is odd. The original formula would have
+SIGSEGV'd on the `(push rbp, raw=0)` case — the prologue shape every
+x86_64 function takes — exactly the failure mode §4.9 was meant to
+prevent.
+
+**Per-test-case inline alignment verification, not a cross-reference.**
+Each of the 8 unit-test cases now carries its own arithmetic check
+(`post-pushes ≡ X; sub Y → Z ✓`) next to its `(raw, N) → frame_size`
+line. Reasoning: a future reader debugging an alignment SIGSEGV should
+be able to re-derive the constants from the test alone without
+re-reading SysV §3.2.2.
+
+**AT&T vs Intel pseudocode in §7.4 deferred to the plan, not patched
+in the spec.** Reviewer also flagged that §7.4 fused-softmax xmm-spill
+snippets use Intel-style memory operands (`[rdx + i*N*4 + j*4]`) while
+§7.3 recommends AT&T (gas default). This is pseudocode in a brainstorm
+spec, not implementation. Picking a single syntax is the plan's job;
+mixing one syntax fix into the parity-condition correction would
+dilute the spec-fix commit and stretch the spec into territory it
+does not own.
+
+### Problems encountered
+- **The original spec's derivation block was internally inconsistent.**
+  §4.9 of `ff9ea08` did include reasoning, but the parity got inverted
+  somewhere between "rsp ≡ 8 (mod 16) at entry" and "+8 if N is odd".
+  Net cost: one docs commit; would have been one debug-cycle commit +
+  a SIGSEGV in CI if it had reached implementation.
+- **All 8 unit-test cases needed pin-correctness.** Flipping the
+  formula without recomputing every case would have left the spec
+  self-contradictory; the replacement table was hand-derived using
+  the entry-state model rather than mechanically inverting the
+  original.
+
+### Next step
+Spec is ready for `superpowers:writing-plans`. Next session opens the
+plan in this same worktree (`claude/mystifying-morse-39dc8c`),
+produces
+`docs/superpowers/plans/2026-05-07-m9-x86_64-profile-and-profile-api-plan.md`
+covering the six-commit sequence (§5–§10 of the spec).
+
+---
+
+## 2026-05-06 — M9 brainstorming: x86_64 Linux ELF profile + `profile-api` extraction
+
+### What was done
+- Started M9 brainstorming session in fresh worktree
+  `claude/mystifying-morse-39dc8c` using `superpowers:brainstorming`.
+- Selected one of the three strategic axes from `PROJECT_SPEC.md`
+  §"Strategic Roadmap" (codegen breadth / modelling depth / deployment
+  reach); see decisions below.
+- Produced
+  `docs/superpowers/specs/2026-05-06-m9-x86_64-profile-and-profile-api-design.md`
+  (1027 lines) in commit `ff9ea08`: §4 pre-decided architectural calls,
+  §5–§10 six-commit sequence with per-commit done-criteria, §7.7
+  lessons-learned roll-forward from M3-M8.
+
+### Decisions made
+
+**Axis 1 — codegen breadth — selected over Axes 2 (NFL v0.2 grammar)
+and 3 (bare-metal `expf`).** Profile isolation is the only nontrivial
+architectural claim of the project; correctness, fusion, and UIR
+semantics are all checkable inside one backend, but isolation is not.
+Validating it earlier is cheaper than later — building Axis 2's
+attention stack on top of an unvalidated isolation hypothesis would
+force a more expensive retrofit if isolation leaks. Axis 3 needs a
+working second profile to be meaningful in the first place.
+
+**Linux ELF, not macOS x86_64 Mach-O.** A Mach-O x86_64 second profile
+would validate ISA-isolation but leave OS-isolation untested; the
+existing `MACHO_SYM_PREFIX` rename would remain cosmetic. Linux ELF
+forces the abstraction to be real — divergent symbol prefix (no
+leading underscore), PLT relocations, ELF `.so` shared object as the
+FFI artefact, libm symbol forms differ.
+
+**Full operations parity with arm64, not a subset.** All four op
+emitters (linear ± bias, relu, dropout, softmax) plus both fused
+PostOp branches (`ReluFused`, `SoftmaxRow`). A subset port that
+omitted softmax would never exercise `call expf@PLT` — exactly the
+site where the symbol-prefix abstraction earns its keep — so partial
+parity would not validate the abstraction. Asymmetric "arm64 fuses,
+x86_64 doesn't" was rejected as exactly the deferred-obligation
+pattern this project tries to avoid.
+
+**Path B — shared `profile-api` crate with minimal trait — over Path
+A (full duplication) and Path C (shared types only).** A new crate at
+`profile-api/` exports `Asm`, `FnSig`, `ParamSlot`, `ParamKind`,
+`LowerError` and a 2-method trait
+(`lower(&self, &Uir) -> Result<Asm, LowerError>` +
+`sym_prefix(&self) -> &'static str`). Path A keeps isolation as
+informal "two crates with similar APIs" rather than a type-level
+contract. Path C reduces the symbol-prefix abstraction to a
+duplicated `pub const`. Path B's trait is minimal by hard rule:
+**trait grows by request, not by anticipation** — `relocation_hints`,
+`library_names`, `target_triple`, `lower` options, default methods
+all explicitly excluded from M9.
+
+**API-first sequencing (Approach 1) over standalone-then-extract.**
+Six atomic commits in order: (1) `profile-api` extract, (2) arm64
+migration onto trait, (3) x86_64 build, (4) CLI dispatch, (5) CI
+matrix `ubuntu-latest`, (6) docs + OQ updates. Each commit leaves the
+workspace clean (`cargo fmt`, `clippy -D warnings`, `build`, `test`
+all green). Approach 2 (build x86_64 standalone, extract trait later)
+was rejected because it creates type duplication exactly where Path B
+is meant to prevent it, and risks x86_64 starting on a
+slightly-different shape that complicates the eventual extract.
+
+**`Box<dyn Profile>` runtime dispatch in `nflc`.** `nflc --profile
+<name>` selects at runtime, so a trait object is the semantically
+correct shape — generics would require `P: Profile` known at the call
+site. Both profile crates statically linked into the `nflc` binary;
+the trait object dispatches the runtime choice.
+
+**Hard byte-identical invariant for arm64 in commit 2.** All 223
+existing tests must pass without modification. The two hardcoded
+`_expf` callsites become `format!("\tbl {}expf\n",
+self.sym_prefix())`; for arm64 where `sym_prefix() -> "_"` the format
+expansion yields `"\tbl _expf\n"` — byte-identical. If a test fails
+after commit 2 the migration is buggy; tests are not adjusted.
+
+**`call expf@PLT` (not bare `call expf`) on x86_64.** External symbols
+in PIE/shared objects on Linux ELF resolve through the
+procedure-linkage table; the `@PLT` modifier makes the relocation
+explicit. Bare `call expf` may work with specific linker
+configurations but is not guaranteed — this is correctness, not
+tuning.
+
+**Stack alignment isolated as `asm::compute_frame_size(raw_buffer_size:
+u32, num_pushes: usize) -> u32` and unit-tested.** Encapsulates the
+SysV AMD64 §3.2.2 16-byte-aligned-`rsp`-before-`call` requirement. The
+original formula was inverted in the brainstorm; user review caught it
+the next morning — see the 2026-05-07 spec-fix entry above.
+
+### Problems encountered
+- **None blocking the brainstorm itself.** The inverted parity
+  condition in `compute_frame_size` (§4.9, §7.5) was caught in user
+  review the following morning and fixed in commit `07661be`; see the
+  separate 2026-05-07 entry above.
+
+### Next step
+Promote the spec to a plan via `superpowers:writing-plans` in the
+same worktree. Plan target:
+`docs/superpowers/plans/2026-05-07-m9-x86_64-profile-and-profile-api-plan.md`.
+Then transition to `superpowers:executing-plans` for the six-commit
+sequence.
+
+---
+
 ## 2026-05-06 — License pivot: AGPL-3.0-only → Apache-2.0
 
 ### What was done
