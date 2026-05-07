@@ -46,6 +46,13 @@ jobs:
         #   in ubuntu-latest by default.
         run: cargo test --workspace
 
+      - name: Diagnose x86_64 integration (serial, on failure)
+        # If the parallel test run above SIGSEGV'd, run the x86_64 FFI
+        # integration suite serially with stdout uncaptured to localise
+        # the offending test. Removed once the underlying bug is fixed.
+        if: failure()
+        run: cargo test -p profiles-x86_64 --test integration -- --test-threads=1 --nocapture
+
   integration:
     name: Integration (macos-14, arm64)
     runs-on: macos-14
