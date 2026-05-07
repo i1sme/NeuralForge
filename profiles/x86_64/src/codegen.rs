@@ -22,6 +22,20 @@ pub fn walk_uir(uir: &Uir, sym_prefix: &'static str) -> Result<Asm, LowerError> 
         functions.push(sig);
     }
 
+    // ELF-only directive: opt out of an executable stack. Without this,
+    // gas/ld emit "missing .note.GNU-stack section implies executable
+    // stack" warnings, and modern hardened glibc/loader stacks treat the
+    // resulting `.so` as suspect — `dlopen` may succeed but the loaded
+    // code can SIGSEGV on first `call <libm>@PLT` when the executable-
+    // stack quirks interact with PLT lazy resolution. The directive is a
+    // 0-byte section that signals "this object does not require an
+    // executable stack"; it has no runtime cost. Emitted only when the
+    // UIR contributed at least one function — empty UIR remains empty so
+    // upstream sanity checks (`asm.source.is_empty()`) still hold.
+    if !functions.is_empty() {
+        source.push_str("\n.section .note.GNU-stack,\"\",@progbits\n");
+    }
+
     Ok(Asm { source, functions })
 }
 
