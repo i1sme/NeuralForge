@@ -49,6 +49,25 @@ pub fn emit_linear(
     if needs_zero_xmm4 {
         s.push_str("    xorps   %xmm4, %xmm4\n");
     }
+    // Save the FFI output pointer (%rdx) into %xmm7 BEFORE the bias-base
+    // setup overwrites it. A subsequent op in the same function (e.g.
+    // standalone emit_softmax following an unfused linear-with-bias)
+    // calls materialise_ptr("%r12", OutputReg) which reads %rdx; if we
+    // don't restore it, %r12 would point at the bias buffer instead of
+    // the caller's output buffer, and the standalone-softmax writes
+    // would land in the wrong place (manifesting as zeroed output —
+    // exactly what `fused_vs_unfused_softmax_match_numerically` caught).
+    //
+    // Skip when SoftmaxRow is fused — that's the LAST op in the model,
+    // and no follow-up consumer needs %rdx. Saving across `call expf@PLT`
+    // is also pointless (xmm7 is caller-saved under SysV).
+    let has_softmax_row = fused_post_ops
+        .iter()
+        .any(|p| matches!(p, PostOp::SoftmaxRow));
+    let preserve_output_ptr = bias_offset.is_some() && !has_softmax_row;
+    if preserve_output_ptr {
+        s.push_str("    movq    %rdx, %xmm7\n");
+    }
     if let Some(boff) = bias_offset {
         if boff == 0 {
             s.push_str("    movq    %rsi, %rdx\n");
@@ -68,9 +87,7 @@ pub fn emit_linear(
     // the model (softmax is always terminal), so no follow-up emit_linear
     // needs %rsi. Saving across the `call expf@PLT` is also pointless
     // because xmm6 is caller-saved under SysV; the call would clobber it.
-    let preserve_params_ptr = !fused_post_ops
-        .iter()
-        .any(|p| matches!(p, PostOp::SoftmaxRow));
+    let preserve_params_ptr = !has_softmax_row;
     if preserve_params_ptr {
         s.push_str("    movq    %rsi, %xmm6\n");
     }
@@ -180,6 +197,14 @@ pub fn emit_linear(
     //    save above (SoftmaxRow case — this is the last linear).
     if preserve_params_ptr {
         s.push_str("    movq    %xmm6, %rsi\n");
+    }
+
+    // 10. Restore output ptr (%rdx) from %xmm7 so a subsequent op (e.g.
+    //     standalone emit_softmax following unfused linear-with-bias)
+    //     can re-materialise OutputReg via `movq %rdx, ...`. No-op if we
+    //     didn't save above (no bias OR SoftmaxRow fused).
+    if preserve_output_ptr {
+        s.push_str("    movq    %xmm7, %rdx\n");
     }
 
     Ok(s)
