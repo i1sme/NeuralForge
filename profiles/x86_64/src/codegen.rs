@@ -1,0 +1,249 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! UIR → x86_64 asm walker. Mirror of `profiles/arm64/src/codegen.rs`
+//! modulo register naming and instruction set.
+
+use crate::buffer::{assign_buffers, compute_callee_saved, BufferLoc};
+use compiler::{NodeId, NodeKind, StdOp, Uir, UirModel};
+use profile_api::{Asm, FnSig, LowerError, ParamKind, ParamSlot};
+
+/// Walk the entire UIR, returning the combined asm source + per-model
+/// FnSigs. `sym_prefix` threads through to every emitter that produces
+/// a profile-prefixed symbol (function label, .globl directive, libm
+/// call). For x86_64, `sym_prefix` is `""`.
+pub fn walk_uir(uir: &Uir, sym_prefix: &'static str) -> Result<Asm, LowerError> {
+    let mut source = String::new();
+    let mut functions = Vec::with_capacity(uir.models.len());
+
+    for (model_idx, model) in uir.models.iter().enumerate() {
+        let (model_asm, sig) = walk_model(model_idx, model, sym_prefix)?;
+        source.push_str(&model_asm);
+        source.push('\n');
+        functions.push(sig);
+    }
+
+    Ok(Asm { source, functions })
+}
+
+fn walk_model(
+    model_idx: usize,
+    model: &UirModel,
+    sym_prefix: &'static str,
+) -> Result<(String, FnSig), LowerError> {
+    use crate::asm::{format_function_epilogue, format_function_prologue};
+
+    // 1. Validate ops upfront.
+    for node in &model.nodes {
+        if let NodeKind::Op { op, attrs, .. } = &node.kind {
+            classify_op(*op, attrs, node.source_span)?;
+        }
+    }
+
+    // 2. Compute layout, ABI sizes.
+    let input_id = *model.inputs.first().ok_or(LowerError::ShapeNotConcrete {
+        span: model.source_span,
+    })?;
+    let input_floats: usize = model.nodes[input_id].ty.shape.0.iter().product::<u64>() as usize;
+    let output_floats: usize =
+        model.nodes[model.output].ty.shape.0.iter().product::<u64>() as usize;
+
+    let mut params_layout: Vec<ParamSlot> = Vec::new();
+    let mut params_floats: usize = 0;
+    for (node_idx, node) in model.nodes.iter().enumerate() {
+        if let NodeKind::Op {
+            op: StdOp::Linear,
+            operands,
+            attrs,
+            ..
+        } = &node.kind
+        {
+            let in_shape = &model.nodes[operands[0]].ty.shape;
+            let out_shape = &node.ty.shape;
+            if in_shape.0.len() != 2 || out_shape.0.len() != 2 {
+                return Err(LowerError::ShapeNotConcrete {
+                    span: node.source_span,
+                });
+            }
+            let k = in_shape.0[1] as usize;
+            let n = out_shape.0[1] as usize;
+            params_layout.push(ParamSlot {
+                kind: ParamKind::LinearWeight,
+                origin_node: node_idx,
+                offset: params_floats,
+                size: k * n,
+            });
+            params_floats += k * n;
+            if compiler::ir::linear_has_bias(attrs) {
+                params_layout.push(ParamSlot {
+                    kind: ParamKind::LinearBias,
+                    origin_node: node_idx,
+                    offset: params_floats,
+                    size: n,
+                });
+                params_floats += n;
+            }
+        }
+    }
+
+    let sig = FnSig {
+        name: format!("nfl_forward_{}", model.name),
+        model: model.name.clone(),
+        input_floats,
+        output_floats,
+        params_floats,
+        params_layout,
+    };
+
+    // 3. Buffer assignment + callee-saved set.
+    let assignment = assign_buffers(model);
+    let regs = compute_callee_saved(model);
+
+    // 4. Emit prologue + body + epilogue. assignment.stack_bytes already
+    // includes the 16-byte fused-softmax xmm-spill reserve when softmax
+    // fires (spec §7.4); no per-call adjustment needed here.
+    let mut body = String::new();
+    body.push_str(&format_function_prologue(
+        &sig,
+        regs,
+        assignment.stack_bytes,
+        sym_prefix,
+    ));
+
+    let mut linear_idx = 0usize;
+    let mut relu_idx = 0usize;
+    let mut softmax_idx = 0usize;
+    let mut dropout_idx = 0usize;
+    for (node_idx, node) in model.nodes.iter().enumerate() {
+        if let NodeKind::Op { op, operands, .. } = &node.kind {
+            match op {
+                StdOp::Linear => {
+                    let in_shape = &model.nodes[operands[0]].ty.shape;
+                    let out_shape = &node.ty.shape;
+                    let b = in_shape.0[0];
+                    let k = in_shape.0[1];
+                    let n = out_shape.0[1];
+
+                    let src_loc = resolve_loc(&assignment.locs, operands[0]);
+                    let dst_loc = resolve_loc(&assignment.locs, node_idx);
+                    let weight_offset = sig
+                        .params_layout
+                        .iter()
+                        .find(|s| s.kind == ParamKind::LinearWeight && s.origin_node == node_idx)
+                        .expect("LinearWeight slot must exist for this Linear")
+                        .offset;
+                    let bias_offset = sig
+                        .params_layout
+                        .iter()
+                        .find(|s| s.kind == ParamKind::LinearBias && s.origin_node == node_idx)
+                        .map(|s| s.offset);
+
+                    let NodeKind::Op { fused_post_ops, .. } = &node.kind else {
+                        unreachable!("walk_model already matched NodeKind::Op")
+                    };
+
+                    body.push_str(&crate::ops::emit_linear(
+                        b,
+                        k,
+                        n,
+                        model_idx,
+                        linear_idx,
+                        src_loc,
+                        dst_loc,
+                        weight_offset,
+                        bias_offset,
+                        node.source_span,
+                        fused_post_ops,
+                        sym_prefix,
+                    )?);
+                    linear_idx += 1;
+                }
+                StdOp::Relu => {
+                    let buf_shape = &node.ty.shape;
+                    let total: u64 = buf_shape.0.iter().product();
+                    let src_loc = resolve_loc(&assignment.locs, operands[0]);
+                    let dst_loc = resolve_loc(&assignment.locs, node_idx);
+                    body.push_str(&crate::ops::emit_relu(
+                        total, model_idx, relu_idx, src_loc, dst_loc,
+                    ));
+                    relu_idx += 1;
+                }
+                StdOp::Dropout => {
+                    let src_loc = resolve_loc(&assignment.locs, operands[0]);
+                    let dst_loc = resolve_loc(&assignment.locs, node_idx);
+                    if matches!(dst_loc, BufferLoc::OutputReg) {
+                        let total: u64 = node.ty.shape.0.iter().product();
+                        body.push_str(&crate::ops::emit_dropout_copy(
+                            total,
+                            model_idx,
+                            dropout_idx,
+                            src_loc,
+                            dst_loc,
+                        ));
+                        dropout_idx += 1;
+                    }
+                    // else BufferLoc::Alias: no asm — downstream reads operand directly.
+                }
+                StdOp::Softmax => {
+                    let in_shape = &model.nodes[operands[0]].ty.shape;
+                    let b = in_shape.0[0];
+                    let k = in_shape.0[1];
+                    let src_loc = resolve_loc(&assignment.locs, operands[0]);
+                    let dst_loc = resolve_loc(&assignment.locs, node_idx);
+                    body.push_str(&crate::ops::emit_softmax(
+                        b,
+                        k,
+                        model_idx,
+                        softmax_idx,
+                        src_loc,
+                        dst_loc,
+                        sym_prefix,
+                    ));
+                    softmax_idx += 1;
+                }
+                #[allow(unreachable_patterns)]
+                _ => {
+                    return Err(LowerError::UnsupportedOp {
+                        op: format!("{op}"),
+                        span: node.source_span,
+                    });
+                }
+            }
+        }
+    }
+
+    body.push_str(&format_function_epilogue(regs, assignment.stack_bytes));
+    Ok((body, sig))
+}
+
+/// Resolve `Alias` chains to a concrete BufferLoc.
+fn resolve_loc(locs: &[BufferLoc], id: NodeId) -> BufferLoc {
+    let mut cur = id;
+    loop {
+        match locs[cur] {
+            BufferLoc::Alias(next) => {
+                debug_assert!(next < cur, "alias must point backward (cycle defense)");
+                cur = next;
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Validate that an op is supported.
+fn classify_op(
+    op: StdOp,
+    _attrs: &[compiler::OpAttr],
+    span: compiler::ast::Span,
+) -> Result<(), LowerError> {
+    match op {
+        StdOp::Linear => Ok(()),
+        StdOp::Relu => Ok(()),
+        StdOp::Dropout => Ok(()),
+        StdOp::Softmax => Ok(()),
+        #[allow(unreachable_patterns)]
+        _ => Err(LowerError::UnsupportedOp {
+            op: format!("{op}"),
+            span,
+        }),
+    }
+}
