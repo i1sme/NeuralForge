@@ -226,16 +226,20 @@ guaranteed — this is correctness, not tuning.
 ### 4.9 Stack alignment invariant in x86_64 prologue
 
 `rsp` must be 16-byte aligned immediately before each `call`
-instruction (SysV AMD64 §3.2.2). On function entry after the implicit
-`call`-instruction `push rip`, `(rsp + 8) % 16 == 0`. Each
-`push reg` (8 bytes) toggles parity. The `frame_size` chosen by `sub
-rsp, <frame_size>` must therefore depend on whether the count of
-pushes in the prologue is odd or even:
+instruction (SysV AMD64 §3.2.2). On function entry, the caller's
+`call`-instruction has just pushed the 8-byte return address, so
+`rsp ≡ 8 (mod 16)`. Each prologue `push reg` (8 bytes) flips parity:
+after N pushes, `rsp ≡ 8 - 8*N (mod 16) ≡ 8*(1 - N) (mod 16)`. To land
+on `rsp ≡ 0 (mod 16)` after `sub rsp, frame_size`, the helper must
+add an 8-byte correction when N is **even** (post-pushes parity is 8),
+and zero correction when N is **odd** (post-pushes parity is 0):
 
 ```
 final_frame_size = round_up(raw_buffer_size, 16)
-                 + (if num_pushes is odd then 8 else 0)
+                 + (if num_pushes is even then 8 else 0)
 ```
+
+Full derivation, formula, and the unit-test inventory live in §7.5.
 
 Without this correction the first `call expf@PLT` SIGSEGVs because
 libm's `expf` uses SSE instructions that assume aligned-load
@@ -555,26 +559,45 @@ SysV interop).
 
 ### 7.5 Stack frame computation
 
-`asm::compute_frame_size(raw_buffer_size: u32, num_pushes: usize) ->
-u32`:
+Derivation. On function entry, after the caller's `call` instruction
+has pushed the 8-byte return address, `rsp ≡ 8 (mod 16)`. Each
+prologue `push reg` (8 bytes) flips parity. After N pushes:
+
+```
+rsp ≡ 8 - 8*N (mod 16) ≡ 8*(1 - N) (mod 16)
+```
+
+- N even → `rsp ≡ 8 (mod 16)` after pushes; need `frame_size ≡ 8
+  (mod 16)` so that `sub rsp, frame_size` lands on a 16-byte boundary.
+- N odd → `rsp ≡ 0 (mod 16)` after pushes; need `frame_size ≡ 0
+  (mod 16)`.
+
+Therefore the push-count correction adds 8 bytes when N is **even**,
+not when it is odd:
 
 ```rust
 pub fn compute_frame_size(raw_buffer_size: u32, num_pushes: usize) -> u32 {
     let aligned = (raw_buffer_size + 15) & !15;       // round up to 16
-    let push_correction = if num_pushes % 2 == 1 { 8 } else { 0 };
+    let push_correction = if num_pushes % 2 == 0 { 8 } else { 0 };
     aligned + push_correction
 }
 ```
 
-Unit-tested with at least these cases:
-- `(0, 0) → 0`
-- `(0, 1) → 8`
-- `(0, 2) → 0`
-- `(8, 0) → 16`
-- `(8, 1) → 24`
-- `(16, 1) → 24`
-- `(17, 0) → 32`
-- `(17, 1) → 40`
+Unit-tested with at least these cases (entry-state `rsp ≡ 8 (mod 16)`
+assumed; final `rsp` after `sub rsp, frame_size` must be `≡ 0 (mod 16)`):
+
+- `(raw=0,  N=0) → 8`   (post-pushes ≡ 8; sub 8 → 0 ✓)
+- `(raw=0,  N=1) → 0`   (post-pushes ≡ 0; sub 0 → 0 ✓)
+- `(raw=0,  N=2) → 8`   (post-pushes ≡ 8; sub 8 → 0 ✓)
+- `(raw=8,  N=0) → 24`  (aligned=16, +8; post-pushes ≡ 8; sub 24 ≡ -16 ≡ 0 ✓)
+- `(raw=8,  N=1) → 16`  (aligned=16, +0; post-pushes ≡ 0; sub 16 → 0 ✓)
+- `(raw=16, N=1) → 16`  (same alignment as above)
+- `(raw=17, N=0) → 40`  (aligned=32, +8; post-pushes ≡ 8; sub 40 ≡ -32 ≡ 0 ✓)
+- `(raw=17, N=1) → 32`  (aligned=32, +0; post-pushes ≡ 0; sub 32 → 0 ✓)
+
+Each test case carries the alignment-arithmetic verification inline so
+that the helper's contract is self-documenting and a future reader
+can re-derive the constants without re-reading SysV §3.2.2.
 
 ### 7.6 `sym_prefix()` consumption sites in x86_64
 
