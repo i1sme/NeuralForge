@@ -62,9 +62,9 @@ Ship a single PR with ~12 atomic commits (final count delegated to
 7. Land acceptance fixture `tests/fixtures/self_attention.nfl` with
    `[batch=2, heads=4, seq=16, head_dim=16]` shape and per-profile
    FFI integration tests against architecture-matched references.
-8. Add four negative parser/builder fixtures plus ~38 unit tests
-   across parser, UIR, codegen, and integration layers (~43 total
-   new tests; project total 284 → ~327).
+8. Add four negative parser/builder fixtures plus ~40 unit tests
+   across parser, UIR, codegen, and integration layers (~45 total
+   new tests; project total 284 → ~329).
 9. Update `language/grammar.ebnf`, `docs/language_reference/grammar.md`,
    `docs/profile_guide/{arm64,x86_64}.md`, `PROJECT_SPEC.md` (First
    Milestones table + Current Status + Strategic Roadmap revision),
@@ -258,12 +258,26 @@ contains scalar/identifier attrs as before. The new `env` parameter
 maps variable names to `NodeId`s (the same `env` already maintained
 by `build_model`).
 
-**Implementer note (load-bearing):** all current callsites of
-`resolve_args` (currently only `build_op` in
-`compiler/src/ir/build.rs`) MUST be updated atomically with the
-signature change. A missed callsite produces a compile error
-without context. The atomic-task-pack convention from M7 applies —
-the signature change and its callsite updates land in one commit.
+**Implementer note (load-bearing): the signature change cascades
+through three functions, not one.** The cascade:
+
+1. `resolve_args` itself gains the `env` parameter and the new
+   return-type tuple.
+2. `build_op` (the sole `resolve_args` callsite) **also gains an
+   `env: &HashMap<String, NodeId>` parameter** — it must be able
+   to pass `env` through to `resolve_args`. Its return type stays
+   `Result<NodeId, BuildError>`, but it now consumes both elements
+   of the new tuple (NodeIds prepended to `operands`, attrs into
+   `attrs`).
+3. `build_model` (the sole `build_op` callsite) updates its calls
+   to `build_op` to pass the local `env: HashMap<String, NodeId>`
+   it already maintains.
+
+All three changes — the `resolve_args` signature, the `build_op`
+signature, and the `build_model` callsite updates — land in **one
+atomic commit** (atomic-task-pack convention from M7). A missed
+link in the cascade produces a compile error without semantic
+context, so the cascade must travel together.
 
 ### 5.4 New Op Signatures
 
@@ -766,7 +780,7 @@ Detailed enumeration in Section 8.
 
 ## 8. Test Enumeration
 
-Estimated ~43 new tests; project total 284 → ~327. In line with M9
+Estimated ~45 new tests; project total 284 → ~329. In line with M9
 delta (+61) and M8 delta (+15).
 
 ### 8.1 Parser Tests (`compiler/src/parser/tests.rs`)
@@ -800,6 +814,10 @@ delta (+61) and M8 delta (+15).
 - `matmul_4d_emits_outer_loop_wrapper`
 - `matmul_2d_collapses_to_outer_count_one`
 - `matmul_transpose_b_inner_addressing_differs`
+- `matmul_transpose_b_false_default_matches_explicit_false`
+  (asserts `matmul[k]` and `matmul[k, transpose_b=false]` produce
+  identical asm — guards against drift between the omit-attr code
+  path and the explicit-false path)
 - `matmul_uses_fmadd_native_to_arm64` (consistency with
   `emit_linear`)
 - `matmul_does_not_call_extern_math`
@@ -817,6 +835,7 @@ Parallel set, mirroring 8.3:
 - `matmul_4d_emits_outer_loop_wrapper`
 - `matmul_2d_collapses_to_outer_count_one`
 - `matmul_transpose_b_inner_addressing_differs`
+- `matmul_transpose_b_false_default_matches_explicit_false`
 - `matmul_uses_mulss_addss_no_fma` (consistency with `emit_linear`)
 - `matmul_does_not_call_expf_plt`
 - `mul_scalar_uses_mulss`
@@ -951,8 +970,15 @@ and ordering finalised by `writing-plans`):
 8. arm64 codegen — Softmax dispatch generalisation:
    `walk_model::Softmax` arm updated for `b = product(shape[..-1])`.
 9. x86_64 codegen — `Matmul` + `MulScalar` + Softmax dispatch
-   (parallel to steps 6-8; possibly one task-pack given
-   isomorphism).
+   (parallel to steps 6-8). **Plan-writer guidance:** treat as up
+   to three independent sub-task-packs by default. M9 demonstrated
+   that x86_64 brings non-trivial divergence from arm64 (SysV ABI
+   xmm spill conventions, AT&T syntax, no callee-saved FP regs,
+   `%rsi`/`%rdx` clobber hazards across `call expf@PLT` and matmul
+   bodies — the latter required two M9 follow-up fixes in commits
+   `ecb69ac` and `c3ff521`). Optimistic packing of all three into
+   one commit is a regression risk; fold only when isomorphism
+   genuinely holds at implementation time.
 10. Integration FFI: `self_attention.nfl` fixture, per-profile
     reference implementations, FFI tests on both profiles.
 11. Negative fixtures + final cleanup: four rejection fixtures,
@@ -1097,6 +1123,25 @@ triggers are speculatively opened by this spec.
   records it. NFL is f32-only project-wide (per
   `BYTES_PER_ELEMENT = 4` in M4b); this is consistent with
   language-level expectations.
+- **Risk: stack-allocated intermediate buffers scale poorly to
+  realistic attention dimensions.** SelfAttention at
+  `[2, 4, 16, 16]` allocates two intermediate buffers (`scores`
+  and `attn`) of `2*4*16*16*4 = 8192` bytes each — ~16 KB total
+  stack, well within the 8 MB default stack on macOS arm64 and
+  Linux x86_64. But realistic attention shapes scale quadratically
+  in `seq` for `scores`/`attn`: at `seq=512, heads=8` a single
+  attention matrix is `1*8*512*512*4 = 8 MB` — already at or past
+  the default stack limit. M10 fixture is comfortably under, so
+  this is not an M10 blocker, but it constrains how far M10's
+  primitives can be exercised before the stack-only memory model
+  (established in M4b) becomes the bottleneck.
+  *Mitigation:* none in M10 — heap allocation for intermediate
+  buffers is an M11+ concern, and rises in priority when realistic
+  transformer-block fixtures are added (e.g. as part of the
+  Axis-2 follow-up that adds residual / LayerNorm / FFN). The
+  stack-only memory model from M4b remains the contract for all
+  v1 profiles; revisiting it is a v2 memory-model decision, not
+  an M10 task.
 
 ---
 
