@@ -1,0 +1,7 @@
+# Matmul requires rank ≥ 2; passing 1D operands must be rejected at
+# the UIR builder layer with ShapeError::RankTooLow.
+
+model M [n=4]:
+    x: Tensor[n]
+
+    y: Tensor[n] = x -> matmul[x]

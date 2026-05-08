@@ -1,0 +1,8 @@
+# Declared shape Tensor[batch, 8] but `relu` preserves shape, so actual
+# output is Tensor[batch, 4]. Rejected with
+# BuildErrorKind::DeclaredShapeMismatch.
+
+model M [batch=2]:
+    x: Tensor[batch, 4]
+
+    y: Tensor[batch, 8] = x -> relu

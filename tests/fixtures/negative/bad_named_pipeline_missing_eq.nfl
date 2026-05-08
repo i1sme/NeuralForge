@@ -1,0 +1,7 @@
+# `=` missing between the type expression and the source identifier.
+# Parser-level rejection.
+
+model M [batch=2]:
+    x: Tensor[batch, 4]
+
+    y: Tensor[batch, 4] x -> relu
