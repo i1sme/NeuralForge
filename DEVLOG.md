@@ -14,6 +14,135 @@ Format for each entry:
 
 ---
 
+## 2026-05-09 — Milestone 10 closed: NFL v0.2 self-attention + 4D codegen
+
+### What was done
+- **NFL grammar v0.2** — new `named_pipeline_stmt = identifier , ":" , type_expr ,
+  "=" , identifier , pipeline_chain` production with one-token lookahead
+  disambiguation from `variable_decl` (after the closing `]` of the type_expr,
+  peek for `=`). Group 1 commit `382a5c5` (+ fixup `c912cb7` for the
+  grammar.ebnf docblock). New AST node + parser tests.
+- **UIR args machinery** — `ArgType::Tensor` variant for stdlib parameter
+  types; atomic 3-function `resolve_args` cascade through `build_op` and
+  `build_model` (per spec §5.3 the cascade was kept in one commit because
+  splits produce non-compiling intermediates). Group 2 commit `1cf568d`.
+- **`StdOp::Matmul`** — rank ≥ 2 inputs, optional `transpose_b` named arg,
+  four new `ShapeError` variants (`MatmulRankTooLow`, `MatmulInnerMismatch`,
+  `MatmulLeadingMismatch`, `MatmulNonSquareTransposeB`), `transpose_b`
+  helper. Group 3 commit `c29999c`.
+- **`StdOp::MulScalar`** — per-element scalar multiply, shape-preserving;
+  the `f64 → f32` truncation contract concentrated in the dispatcher.
+  Group 4 commit `d56d427`.
+- **`named_pipeline_stmt` builder + `BuildErrorKind::DeclaredShapeMismatch`
+  + Softmax rank tightening** — the named-pipeline UIR builder, the
+  declared-vs-inferred shape check at named-pipeline boundary, and Softmax
+  generalised from rank-2-only to rank ≥ 2 (last-axis softmax). Group 5
+  commit `984064d`.
+- **arm64 codegen** — `emit_matmul` (outer-loop wrapper over `leading_count`
+  + FMA inner triple-loop + base-pointer invariance + `stp/ldp x1/x2`
+  spill around the body, fixup `00b6f82`). Group 6 commit `4cdf297`.
+  `emit_mulscalar` (movz/movk + fmov scalar pre-load + flat in-place loop).
+  Group 7 commit `e35460a`. Softmax dispatch generalised to
+  `b = product(shape[..-1]), k = shape[-1]`. Group 8 commit `d2f3c31`.
+- **x86_64 codegen** — `emit_matmul` (AT&T `mulss + addss` — intentional
+  no-FMA divergence from arm64 — outer-loop wrapper + `xmm6/xmm7/xmm8`
+  spill of `%rsi/%rdx/%rdi` around the body, fixup `aac8650`). Group 9a
+  commit `15de939`. `emit_mulscalar` (movl/movd scalar pre-load + flat
+  `mulss` loop). Group 9b commit `e2ce0c0`. Softmax dispatch generalised.
+  Group 9c commit `41dc182`.
+- **End-to-end FFI integration** — `tests/fixtures/self_attention.nfl` +
+  per-profile reference Rust harness + per-profile bit-exact FFI tests on
+  both arm64 (host) and x86_64 (Linux CI). This commit also folded in a
+  late codegen fix to `emit_softmax` on both profiles: `bl _expf` (arm64)
+  and `call expf@PLT` (x86_64) clobber the FFI input/params/output
+  registers per AAPCS64 / SysV; `emit_softmax` now spills `x0/x1/x2` (arm64,
+  via two `stp/ldp` pairs) and `%rdi/%rsi/%rdx` (x86_64, via `pushq`/`popq`
+  with a padding push for stack alignment, shifting the row_max/row_sum
+  slots from `(%rsp)` / `8(%rsp)` to `32(%rsp)` / `40(%rsp)`). Group 10
+  commit `feb65de`.
+- **Negative fixtures** — four `.nfl` files pinning rejection layers
+  (rank-too-low matmul, inner-dim mismatch, declared-vs-inferred shape
+  mismatch, etc.) plus the explicit fixture-runner. Group 11 commit
+  `1503a18`.
+- **Documentation** — grammar.md (new §5.4 "Named pipelines" + §6.2 update
+  + §8 amendment), arm64.md (new "M10 ops" section), x86_64.md (new "M10
+  ops" §10), PROJECT_SPEC.md (M10 row in the milestones table + Current
+  Status bumped to M10 + Strategic Roadmap Axis 2 annotation), CLAUDE.md
+  (repo tree gains 4 new ops files + status reflects M10), this entry.
+  Group 12 commit (this one).
+
+### Decisions made
+
+**Per-profile bit-exact** is M10's acceptance criterion (§7.2). Cross-profile
+bit-exact at the byte level is unreachable for any model containing matmul
+or softmax: arm64 uses single-rounding FMA where x86_64 uses two-rounding
+`mulss + addss` (deliberate ISA divergence to keep SSE2-only as the floor),
+and `f32::exp` differs by 1-2 ULP between glibc and Apple libsystem.
+Cross-profile tolerance reports are deferred to OQ-BENCH+ (a future
+benchmark/correctness-tolerance harness).
+
+**Atomic 3-function cascade** preserved in Group 2 per spec §5.3:
+`resolve_args` / `build_op` / `build_model` move in one commit. Splitting
+produces non-compiling intermediates — `build_op` calls `resolve_args`,
+and `build_model` calls `build_op`. Compiler-clean intermediate states
+matter for `git bisect` and for the CI-on-each-commit invariant.
+
+**x86_64 split into 9a/9b/9c rather than folded.** The spec §10 step 9
+caveat allowed a fold; we kept three separate commits because the three
+ops are independent in correctness terms and a smaller-blast-radius commit
+graph survives `git revert` better — if any one of `emit_matmul`,
+`emit_mulscalar`, or the softmax dispatch needs to be reverted, the
+others are unaffected.
+
+**FFI register preservation as the M9 lesson re-applied.** Three commits
+in M10 (Groups 6/9a fixup commits + Group 10 fold-in) close the same
+hazard surfaced in M9 (commits `ecb69ac`, `c3ff521` for `emit_linear`'s
+`%rsi/%rdx` preservation): any emitter that clobbers an FFI input
+register inside its body MUST save/restore it around the body, because
+downstream emitters re-materialise from the original FFI register state.
+M10 added the same guarantee for `emit_matmul` (both profiles) and
+`emit_softmax` (both profiles — the latter only surfaced under M10's
+attention pattern because pre-M10 fixtures didn't read the FFI input ptr
+*after* a softmax).
+
+**OQ-BENCH stays in Trigger-driven cleanup.** The pre-commit OQ-BENCH
+harness was framed as out of scope for M10 (the M10 plan explicitly
+deferred it). Confirmed via `grep OQ-BENCH PROJECT_SPEC.md` at docs-
+closeout time; OQ-BENCH remains under "Trigger-driven cleanup" with no
+change.
+
+### Problems encountered
+- **Two FFI-register hazards surfaced during M10 integration**, both
+  the same shape as M9's `emit_linear` hazard: (i) `emit_matmul`
+  clobbering `x1/x2` (arm64) / `%rdi/%rsi/%rdx` (x86_64) — closed via
+  fixups `00b6f82` (arm64, `stp/ldp x1, x2`) and `aac8650` (x86_64,
+  added `%rdi` to the existing `%rsi/%rdx` xmm-spill); (ii)
+  `emit_softmax` clobbering the same registers across `bl _expf` /
+  `call expf@PLT` — closed in Group 10's commit `feb65de` along with the
+  end-to-end integration. Pre-M10 fixtures never exercised the second
+  hazard because softmax was always the terminal op; the attention
+  pattern (`scores → softmax → matmul[v]`) is the first model to read
+  the FFI input ptr *after* a softmax.
+- **`row_max`/`row_sum` slot offsets shifted on x86_64.** The Group 10
+  softmax fix added 4 `pushq` instructions (3 FFI regs + 1 padding for
+  16-byte alignment) at `emit_softmax` entry. The row_max/row_sum slots
+  owned by `assign_buffers` are still pinned at the bottom of the frame
+  (architectural invariant), but `emit_softmax`'s addressing of them
+  shifted from `(%rsp)` / `8(%rsp)` to `32(%rsp)` / `40(%rsp)` — `+32`
+  for the four extra 8-byte pushes. Documented in `x86_64.md` §10.
+
+### Next step
+Push branch + open PR titled `feat(m10): NFL v0.2 self-attention + 4D
+codegen`. Pre-PR housekeeping: autosquash the three `fixup!` commits
+(`c912cb7` → Group 1, `00b6f82` → Group 6, `aac8650` → Group 9a) so the
+final commit graph is the 12 implementation commits + 1 docs-closeout
+commit (this one). Once merged, the next milestone selection runs over
+the post-M10 Strategic Roadmap (Axis 2 follow-ups: multi-input grammar
+/ transformer block / viewer annotations; Axis 3 bare-metal `expf`;
+or Axis 1 follow-ups: SIMD / macOS x86_64).
+
+---
+
 ## 2026-05-07 — Milestone 9 closed: x86_64 Linux ELF profile + profile-api contract
 
 ### What was done

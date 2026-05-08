@@ -1,22 +1,22 @@
 # `arm64` Profile — AArch64 Scalar Codegen
 
-> **Status:** M8 complete (NFL v0.1). Lowers `linear` (with or without
+> **Status:** M10 complete (NFL v0.2). Lowers `linear` (with or without
 > `bias=true`), `relu`, `dropout` (no-op pass-through at inference, or
 > explicit copy-loop when dropout IS model output — see §M8),
-> `softmax` (numerically stable 3-pass via libm `expf`), and now
-> `linear → softmax` fused via `PostOp::SoftmaxRow` to native AArch64
-> Mach-O assembly. The compiler runs the default UIR-pass pipeline
-> (`EliminateDropout` + `FuseLinearRelu` + `FuseLinearSoftmax`) before
-> lowering, so dropout-containing models reach the profile already with
-> dropout removed, `linear → relu` (with or without bias) fuse to a
-> single Linear with `fused_post_ops: [Relu]`, and `linear → softmax`
-> (with or without bias) fuse to a single Linear with
-> `fused_post_ops: [SoftmaxRow]`. All 5 M3 positive fixtures + the M4a
-> fixture run end-to-end via FFI; bit-exact equivalence between fused
-> and unfused asm proven on classifier.nfl and mixed_args.nfl
-> integration tests. M8 adds dim-immediate uniformity via
-> `asm::emit_imm32` (production-scale dims now compile correctly) and
-> the dropout-as-output copy-loop fix.
+> `softmax` (numerically stable 3-pass via libm `expf`, generalised to
+> rank ≥ 2 in M10), `linear → softmax` fused via `PostOp::SoftmaxRow`,
+> and the two M10 attention-pattern ops `matmul` (multi-dim, optional
+> `transpose_b`) and `mul_scalar` (scalar pre-load + flat loop) to
+> native AArch64 Mach-O assembly. The compiler runs the default
+> UIR-pass pipeline (`EliminateDropout` + `FuseLinearRelu` +
+> `FuseLinearSoftmax`) before lowering. All 5 M3 positive fixtures +
+> M4a + the M10 self-attention fixture run end-to-end via FFI;
+> bit-exact equivalence (per-profile) proven on classifier,
+> mixed_args, and self_attention integration tests. M8 added
+> dim-immediate uniformity via `asm::emit_imm32` and the
+> dropout-as-output copy-loop fix; M10 added the multi-dim matmul
+> outer-loop wrapper and the post-Group-10 softmax FFI-register
+> preservation (`stp/ldp x0/x1/x2`).
 > **Authoritative source:** `profiles/arm64/src/` and the M4a/M4b/M5a/M5b/M6/M7/M8
 > specs under `docs/superpowers/specs/`.
 
@@ -679,3 +679,144 @@ movk) instead of literal-imm encoding. Two placement strategies:
 `emit_imm32` asserts `value <= u32::MAX as usize`, providing a
 clear failure mode for hypothetical dimensions beyond 4 billion
 elements (~1000× any realistic NN dim).
+
+---
+
+## M10 ops
+
+M10 adds two new ops (`StdOp::Matmul`, `StdOp::MulScalar`) and generalises
+softmax dispatch from rank-2 to rank ≥ 2. The new ops live in their own
+`ops/` modules; the existing `emit_linear` is **unchanged** (§6.1
+architectural invariant — adding multi-dim matmul does NOT alter the
+hot path for `linear`-as-2D).
+
+### `emit_matmul` — multi-dim matmul over rank ≥ 2 inputs
+
+Source: `profiles/arm64/src/ops/matmul.rs`. Emitted for every `StdOp::Matmul`
+node — typically two per attention block (Q · Kᵀ for scores, attn · V for
+the attended values).
+
+**Outer-loop wrapper.** `Matmul` accepts inputs of any rank ≥ 2; the
+trailing two dims `[..., M, K]` × `[..., K, N]` form the inner kernel,
+and the leading dims (count = `leading_count = product(shape[..rank-2])`)
+are iterated with an outer loop. For 2D inputs `leading_count == 1` and
+the outer loop runs once (no measurable overhead vs an unwrapped 2D
+matmul).
+
+```asm
+    ; per-outer-iteration setup: a_slice = M*K, b_slice = K*N,
+    ; dst_slice = M*N (in floats); slice base ptrs = base + idx*slice*4.
+    mov     x17, #0                ; outer_idx
+.Lmm4d_outer_<m>_<l>:
+    cmp     x17, #leading_count
+    b.ge    .Lmm4d_outer_end_<m>_<l>
+    ; ... A_slice ptr -> x1, B_slice ptr -> x2, DST_slice ptr -> x4 ...
+    ; ... triple-nested i/j/k FMA matmul over the slice ...
+    add     x17, x17, #1
+    b       .Lmm4d_outer_<m>_<l>
+.Lmm4d_outer_end_<m>_<l>:
+```
+
+**FMA inner triple-loop.** Inside each outer iteration, the kernel is
+the standard scalar AArch64 matmul (cf. §4.1):
+
+```asm
+    fmadd   s0, s1, s2, s0      ; sum += a[i,k] * b[k,j], single rounding
+```
+
+For `transpose_b=true`, the b-pointer load uses `[k, j]` indexing as
+`weights[j*K + k]` (i.e. swap the roles of `K` and `N` in the b-stride
+calculation). This is the canonical attention-scores pattern
+(`q · kᵀ`).
+
+**Base-pointer invariance invariant.** The materialised base pointers
+`x11` (A), `x13` (B), `x12` (DST) are emitted **once** before the outer
+loop and MUST NOT be mutated inside it. Per-outer-iteration slice
+pointers go into `x1`, `x2`, `x4`. The choice of `x1`/`x2` (the FFI
+params/output registers!) is deliberate scratch reuse. To preserve the
+FFI calling convention for downstream emitters (e.g. a subsequent
+`emit_linear` or `emit_matmul` that re-materialises from the original
+`x1`/`x2`), `emit_matmul` spills `x1`/`x2` to the stack via
+`stp/ldp` around the outer loop:
+
+```asm
+    stp     x1, x2, [sp, #-16]!     ; spill at function-body entry
+    ; ... outer loop body ...
+    ldp     x1, x2, [sp], #16       ; restore at function-body exit
+```
+
+This idiom is the M10 application of the M9 lesson: any emitter that
+clobbers FFI input registers must save/restore them around its body.
+The fix landed via fixup `00b6f82`.
+
+### `emit_mulscalar` — flat per-element scalar multiply
+
+Source: `profiles/arm64/src/ops/mulscalar.rs`. Emitted for every
+`StdOp::MulScalar` node — one per attention block (the `1/√d` scaling
+of the `Q · Kᵀ` scores before softmax).
+
+**Pre-loaded scalar via `movz/movk + fmov`.** The scalar (an f32 bit
+pattern computed by the dispatcher from the AttrValue) is materialised
+into `s4` *once* before the loop:
+
+```asm
+    movz    w9, #<lo16>             ; lo 16 bits of f32 bit pattern
+    movk    w9, #<hi16>, lsl #16    ; hi 16 bits (skipped if zero)
+    fmov    s4, w9                  ; scalar -> s4
+```
+
+**In-place flat loop.** With `BufferLoc::Alias` plumbing (the same
+machinery that makes `Dropout` a no-op) `src_loc == dst_loc`, so the
+loop reads and writes the same buffer:
+
+```asm
+    ldr     s0, [x11, x3, lsl #2]
+    fmul    s0, s0, s4
+    str     s0, [x12, x3, lsl #2]   ; x12 == x11 under Alias
+```
+
+**`AttrValue::Float → f32` truncation contract.** `AttrValue::Float`
+holds an `f64`. The dispatcher (`codegen.rs`) is responsible for
+truncating to f32 (`val as f32`), then transmuting to `u32` bits via
+`f32::to_bits` and passing the `u32` to `emit_mulscalar`. The emitter
+itself never sees the `f64` — this keeps the per-op file pure asm
+formatting and concentrates lossy-conversion semantics in one place
+(spec §6.5).
+
+### Softmax dispatch — generalised to rank ≥ 2
+
+`emit_softmax` itself is structurally unchanged at the body level (the
+3-pass max → exp → normalise is per-row, regardless of rank), but the
+dispatcher in `codegen.rs::walk_model` now computes:
+
+- `b = product(shape[..rank-1])` — total number of rows across all leading dims.
+- `k = shape[rank-1]` — row width (last dim).
+
+For 2D inputs this collapses to the M3/M4b shape (`b = batch`,
+`k = features`). For the 4D attention case the leading dims (batch,
+heads, seq) flatten into a single outer counter — softmax is applied
+to the **last axis only**, which is the standard transformer
+convention.
+
+**Post-Group-10 codegen fix.** During M10 end-to-end FFI integration
+(commit `feb65de`, Group 10) we discovered that `emit_softmax` itself
+was clobbering `x0`/`x1`/`x2` (the FFI input/params/output registers)
+because `bl _expf` is caller-saved per AAPCS64 — caller-saved spans
+include `x0..x18`. Any downstream emitter that re-materialises from
+`InputReg`/`OutputReg` after softmax (e.g. attention's second
+`emit_matmul` reading from the same input `x` as the first) was
+silently miscompiling. Fix: `emit_softmax` now spills `x0/x1/x2` via
+two `stp` pairs at function-body entry and matches with two `ldp`
+pairs at exit — same pattern as `emit_matmul`. This is the M9 lesson
+(commit `ecb69ac`, `c3ff521`) re-applied to the only standalone op
+that emits `bl`.
+
+### What is unchanged
+
+- `emit_linear` body is byte-identical to M9. `linear`-as-2D models
+  (every M3-M9 fixture) lower exactly as before.
+- `emit_relu`, `emit_dropout_copy`, the prologue/epilogue analyzers,
+  the buffer-allocation strategy, and the `compute_callee_saved` /
+  `compute_is_leaf` predicates — all unchanged. M10 added two new ops
+  and one dispatcher generalisation; the surrounding scaffolding is
+  the same.
