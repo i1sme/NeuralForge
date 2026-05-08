@@ -785,3 +785,212 @@ fn emit_linear_with_softmax_row_post_op_preserves_bias_add() {
         "fused softmax tail missing call expf@PLT:\n{s}"
     );
 }
+
+// ---- Group 9a: emit_matmul (x86_64) -----------------------------------------
+
+#[test]
+fn matmul_4d_emits_outer_loop_wrapper() {
+    let src = "\
+model M [batch=2, heads=4, seq=4, head_dim=4]:
+    x: Tensor[batch, heads, seq, head_dim]
+
+    out: Tensor[batch, heads, seq, seq] = x -> matmul[x, transpose_b=true]
+";
+    let ast = compiler::parse(src).expect("parse");
+    let uir = compiler::ir::build(&ast).expect("build");
+    let asm = crate::lower(&uir).expect("lower");
+    // Outer loop wrapper present.
+    assert!(
+        asm.source.contains(".Lmm4d_outer_0_0:"),
+        "asm:\n{}",
+        asm.source
+    );
+    assert!(
+        asm.source.contains(".Lmm4d_outer_end_0_0:"),
+        "asm:\n{}",
+        asm.source
+    );
+    // Inner triple-loop labels present.
+    assert!(asm.source.contains(".Lmm4d_i_0_0:"), "asm:\n{}", asm.source);
+    assert!(asm.source.contains(".Lmm4d_j_0_0:"), "asm:\n{}", asm.source);
+    assert!(asm.source.contains(".Lmm4d_k_0_0:"), "asm:\n{}", asm.source);
+}
+
+#[test]
+fn matmul_2d_collapses_to_outer_count_one() {
+    let src = "\
+model M [batch=2]:
+    a: Tensor[batch, 4]
+    b: Tensor[4, 8]
+
+    out: Tensor[batch, 8] = a -> matmul[b]
+";
+    let ast = compiler::parse(src).expect("parse");
+    let uir = compiler::ir::build(&ast).expect("build");
+    let asm = crate::lower(&uir).expect("lower");
+    // The outer loop is still emitted, but its bound is 1; assert
+    // structurally on the comment header (more readable).
+    assert!(
+        asm.source.contains("leading_count=1"),
+        "asm:\n{}",
+        asm.source
+    );
+}
+
+#[test]
+fn matmul_transpose_b_inner_addressing_differs() {
+    let src_no_t = "\
+model M [batch=2]:
+    a: Tensor[batch, 4]
+    b: Tensor[4, 8]
+
+    out: Tensor[batch, 8] = a -> matmul[b]
+";
+    // For a transpose_b version we need shapes that match: [batch, 4]
+    // with b transposed [N, K] = [8, 4].
+    let src_t = "\
+model M [batch=2]:
+    a: Tensor[batch, 4]
+    b: Tensor[8, 4]
+
+    out: Tensor[batch, 8] = a -> matmul[b, transpose_b=true]
+";
+    let asm_no_t = crate::lower(&compiler::ir::build(&compiler::parse(src_no_t).unwrap()).unwrap())
+        .expect("lower no-t")
+        .source;
+    let asm_t = crate::lower(&compiler::ir::build(&compiler::parse(src_t).unwrap()).unwrap())
+        .expect("lower t")
+        .source;
+    // Both must use mulss (no FMA on x86_64).
+    assert!(asm_no_t.contains("mulss"), "no-t asm:\n{}", asm_no_t);
+    assert!(asm_t.contains("mulss"), "t asm:\n{}", asm_t);
+    // Transpose flips inner b_offset computation:
+    //   no-transpose: `movq    %r10, %r11` then `imulq   $N, %r11` (k_inner * N + j)
+    //   transpose:    `movq    %rcx, %r11` then `imulq   $K, %r11` (j * K + k_inner)
+    assert!(
+        asm_no_t.contains("movq    %r10, %r11"),
+        "no-t asm should compute b_offset from %r10 (k_inner):\n{}",
+        asm_no_t
+    );
+    assert!(
+        asm_t.contains("movq    %rcx, %r11"),
+        "t asm should compute b_offset from %rcx (j):\n{}",
+        asm_t
+    );
+    assert_ne!(asm_no_t, asm_t, "transpose_b should change emitted asm");
+}
+
+#[test]
+fn matmul_transpose_b_false_default_matches_explicit_false() {
+    // Spec §8.3 — guard against drift between the omit-attr code path
+    // and the explicit-false path.
+    let src_default = "\
+model M [batch=2]:
+    a: Tensor[batch, 4]
+    b: Tensor[4, 8]
+
+    out: Tensor[batch, 8] = a -> matmul[b]
+";
+    let src_explicit = "\
+model M [batch=2]:
+    a: Tensor[batch, 4]
+    b: Tensor[4, 8]
+
+    out: Tensor[batch, 8] = a -> matmul[b, transpose_b=false]
+";
+    let asm_d = crate::lower(&compiler::ir::build(&compiler::parse(src_default).unwrap()).unwrap())
+        .expect("lower default")
+        .source;
+    let asm_e =
+        crate::lower(&compiler::ir::build(&compiler::parse(src_explicit).unwrap()).unwrap())
+            .expect("lower explicit")
+            .source;
+    assert_eq!(asm_d, asm_e, "default omit must match explicit false");
+}
+
+#[test]
+fn matmul_uses_mulss_addss_no_fma() {
+    let src = "\
+model M [batch=2, heads=4, seq=4, head_dim=4]:
+    x: Tensor[batch, heads, seq, head_dim]
+
+    out: Tensor[batch, heads, seq, seq] = x -> matmul[x, transpose_b=true]
+";
+    let asm = crate::lower(&compiler::ir::build(&compiler::parse(src).unwrap()).unwrap())
+        .expect("lower")
+        .source;
+    assert!(asm.contains("mulss"), "asm:\n{}", asm);
+    assert!(asm.contains("addss"), "asm:\n{}", asm);
+    assert!(
+        !asm.contains("vfmadd"),
+        "matmul must not use FMA on x86_64; asm:\n{}",
+        asm
+    );
+}
+
+#[test]
+fn matmul_does_not_call_expf_plt() {
+    let src = "\
+model M [batch=2, heads=4, seq=4, head_dim=4]:
+    x: Tensor[batch, heads, seq, head_dim]
+
+    out: Tensor[batch, heads, seq, seq] = x -> matmul[x, transpose_b=true]
+";
+    let asm = crate::lower(&compiler::ir::build(&compiler::parse(src).unwrap()).unwrap())
+        .expect("lower")
+        .source;
+    assert!(!asm.contains("expf@PLT"), "asm:\n{}", asm);
+}
+
+#[test]
+fn matmul_preserves_ffi_register_invariants_rdi_rsi_rdx() {
+    // Critical regression test: emit_matmul x86_64 must not leak its scratch
+    // use of %rdi/%rsi/%rdx as A_slice/B_slice/DST_slice pointers into the
+    // FFI register state visible to downstream emitters (per SysV AMD64 ABI,
+    // %rdi=input, %rsi=params, %rdx=output).
+    //
+    // The fix is to spill all three to %xmm6/%xmm7/%xmm8 at function entry
+    // and restore at exit. This test asserts all three pairs are present.
+    let src = "\
+model M [batch=2, heads=4, seq=4, head_dim=4]:
+    x: Tensor[batch, heads, seq, head_dim]
+
+    out: Tensor[batch, heads, seq, seq] = x -> matmul[x, transpose_b=true]
+";
+    let asm = crate::lower(&compiler::ir::build(&compiler::parse(src).unwrap()).unwrap())
+        .expect("lower")
+        .source;
+
+    // Entry spills.
+    assert!(
+        asm.contains("movq    %rdi, %xmm8"),
+        "missing %rdi spill; asm:\n{}",
+        asm
+    );
+    assert!(
+        asm.contains("movq    %rsi, %xmm6"),
+        "missing %rsi spill; asm:\n{}",
+        asm
+    );
+    assert!(
+        asm.contains("movq    %rdx, %xmm7"),
+        "missing %rdx spill; asm:\n{}",
+        asm
+    );
+    // Exit restores.
+    assert!(
+        asm.contains("movq    %xmm8, %rdi"),
+        "missing %rdi restore; asm:\n{}",
+        asm
+    );
+    assert!(
+        asm.contains("movq    %xmm6, %rsi"),
+        "missing %rsi restore; asm:\n{}",
+        asm
+    );
+    assert!(
+        asm.contains("movq    %xmm7, %rdx"),
+        "missing %rdx restore; asm:\n{}",
+        asm
+    );
+}
