@@ -117,6 +117,7 @@ fn walk_model(
     let mut softmax_idx = 0usize;
     let mut dropout_idx = 0usize;
     let mut matmul_idx = 0usize;
+    let mut mulscalar_idx = 0usize;
     for (node_idx, node) in model.nodes.iter().enumerate() {
         if let NodeKind::Op { op, operands, .. } = &node.kind {
             match op {
@@ -251,6 +252,36 @@ fn walk_model(
                     )?);
                     matmul_idx += 1;
                 }
+                StdOp::MulScalar => {
+                    let total: u64 = node.ty.shape.0.iter().product();
+                    let attrs = match &node.kind {
+                        NodeKind::Op { attrs, .. } => attrs,
+                        _ => unreachable!(),
+                    };
+                    // f64 stored in attrs; truncate to f32 bits at the
+                    // codegen boundary per spec §6.5.
+                    let scalar_f64 = attrs
+                        .iter()
+                        .find(|a| a.name == "value")
+                        .and_then(|a| match a.value {
+                            compiler::AttrValue::Float(v) => Some(v),
+                            _ => None,
+                        })
+                        .expect("MulScalar.value attr must be Float (signature enforces)");
+                    let scalar_bits = (scalar_f64 as f32).to_bits();
+
+                    let src_loc = resolve_loc(&assignment.locs, operands[0]);
+                    let dst_loc = resolve_loc(&assignment.locs, node_idx);
+                    body.push_str(&crate::ops::emit_mulscalar(
+                        total,
+                        scalar_bits,
+                        model_idx,
+                        mulscalar_idx,
+                        src_loc,
+                        dst_loc,
+                    ));
+                    mulscalar_idx += 1;
+                }
                 // M5c: #[non_exhaustive] on StdOp requires a wildcard
                 // arm. Future ops (e.g. Tanh, Gelu, Embedding) will
                 // route here until codegen learns them. Returning
@@ -303,9 +334,9 @@ fn classify_op(
         StdOp::Dropout => Ok(()),
         StdOp::Softmax => Ok(()),
         StdOp::Matmul => Ok(()),
+        StdOp::MulScalar => Ok(()),
         // M5c: #[non_exhaustive] on StdOp requires a wildcard arm.
-        // Future ops (and StdOp::MulScalar until M10 group 7) are
-        // rejected here until codegen learns them.
+        // Future ops are rejected here until codegen learns them.
         #[allow(unreachable_patterns)]
         _ => Err(LowerError::UnsupportedOp {
             op: format!("{op}"),

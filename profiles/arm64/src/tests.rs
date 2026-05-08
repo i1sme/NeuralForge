@@ -950,3 +950,41 @@ model M [batch=2, heads=4, seq=4, head_dim=4]:
         asm
     );
 }
+
+#[test]
+fn mul_scalar_preloads_scalar_via_movz_movk() {
+    // 0.25 in f32 bits is 0x3E800000 (hi16=0x3E80, lo16=0x0000).
+    let src = "\
+model M [batch=2]:
+    x: Tensor[batch, 4]
+
+    y: Tensor[batch, 4] = x -> mul_scalar[0.25]
+";
+    let asm = crate::lower(&compiler::ir::build(&compiler::parse(src).unwrap()).unwrap())
+        .expect("lower")
+        .source;
+    // movz preserves lo16; movk shifts hi16 in.
+    assert!(asm.contains("movz    w9, #0x0000"), "asm:\n{}", asm);
+    assert!(
+        asm.contains("movk    w9, #0x3e80, lsl #16"),
+        "asm:\n{}",
+        asm
+    );
+    assert!(asm.contains("fmov    s4, w9"), "asm:\n{}", asm);
+}
+
+#[test]
+fn mul_scalar_emits_fmul_in_inner_loop() {
+    let src = "\
+model M [batch=2]:
+    x: Tensor[batch, 4]
+
+    y: Tensor[batch, 4] = x -> mul_scalar[0.5]
+";
+    let asm = crate::lower(&compiler::ir::build(&compiler::parse(src).unwrap()).unwrap())
+        .expect("lower")
+        .source;
+    assert!(asm.contains("fmul    s0, s0, s4"), "asm:\n{}", asm);
+    assert!(asm.contains(".Lms_0_0:"), "asm:\n{}", asm);
+    assert!(asm.contains(".Lms_end_0_0:"), "asm:\n{}", asm);
+}

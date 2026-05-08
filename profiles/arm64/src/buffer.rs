@@ -41,7 +41,9 @@ pub fn assign_buffers(model: &UirModel) -> BufferAssignment {
                     BufferLoc::OutputReg
                 } else {
                     match op {
-                        StdOp::Relu | StdOp::Dropout => BufferLoc::Alias(operands[0]),
+                        StdOp::Relu | StdOp::Dropout | StdOp::MulScalar => {
+                            BufferLoc::Alias(operands[0])
+                        }
                         StdOp::Linear | StdOp::Softmax | StdOp::Matmul => {
                             let elements: u64 = node.ty.shape.0.iter().copied().product();
                             let size_bytes = (elements as usize)
