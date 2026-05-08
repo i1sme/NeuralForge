@@ -994,3 +994,33 @@ model M [batch=2, heads=4, seq=4, head_dim=4]:
         asm
     );
 }
+
+#[test]
+fn mul_scalar_uses_mulss() {
+    let src = "\
+model M [batch=2]:
+    x: Tensor[batch, 4]
+
+    y: Tensor[batch, 4] = x -> mul_scalar[0.5]
+";
+    let asm = crate::lower(&compiler::ir::build(&compiler::parse(src).unwrap()).unwrap())
+        .expect("lower")
+        .source;
+    assert!(asm.contains("mulss   %xmm4, %xmm0"), "asm:\n{}", asm);
+}
+
+#[test]
+fn mul_scalar_preloads_scalar() {
+    // 0.25 in f32 bits = 0x3E800000.
+    let src = "\
+model M [batch=2]:
+    x: Tensor[batch, 4]
+
+    y: Tensor[batch, 4] = x -> mul_scalar[0.25]
+";
+    let asm = crate::lower(&compiler::ir::build(&compiler::parse(src).unwrap()).unwrap())
+        .expect("lower")
+        .source;
+    assert!(asm.contains("movl    $0x3e800000, %r10d"), "asm:\n{}", asm);
+    assert!(asm.contains("movd    %r10d, %xmm4"), "asm:\n{}", asm);
+}
