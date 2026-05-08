@@ -878,3 +878,35 @@ fn transpose_b_true_recognised() {
     assert!(!matmul_transpose_b(&attrs_false));
     assert!(!matmul_transpose_b(&attrs_empty)); // default=false when omitted
 }
+
+#[test]
+fn mul_scalar_resolves() {
+    use crate::ir::stdlib::{resolve, StdOp};
+    assert_eq!(resolve("mul_scalar"), Some(StdOp::MulScalar));
+    assert_eq!(format!("{}", StdOp::MulScalar), "mul_scalar");
+}
+
+#[test]
+fn mul_scalar_preserves_shape() {
+    use crate::ir::stdlib::{infer_output_shape, StdOp};
+    use crate::ir::types::{AttrValue, OpAttr, Shape};
+    let input = Shape(vec![2, 4, 16, 16]);
+    let attrs = vec![OpAttr {
+        name: "value".to_string(),
+        value: AttrValue::Float(0.25),
+    }];
+    let out =
+        infer_output_shape(StdOp::MulScalar, std::slice::from_ref(&input), &attrs).expect("infer");
+    assert_eq!(out.0, input.0);
+}
+
+#[test]
+fn mul_scalar_signature_requires_float_positional() {
+    use crate::ir::stdlib::{signature, ArgType, StdOp};
+    let sig = signature(StdOp::MulScalar);
+    assert_eq!(sig.positional.len(), 1);
+    assert_eq!(sig.positional[0].name, "value");
+    assert!(matches!(sig.positional[0].ty, ArgType::Float));
+    assert!(sig.positional[0].required);
+    assert_eq!(sig.named.len(), 0);
+}

@@ -17,6 +17,10 @@ pub enum StdOp {
     /// (named arg), the second operand's last two dims are interpreted
     /// transposed. New in M10.
     Matmul,
+    /// Per-element multiply by a scalar literal. Shape is preserved.
+    /// Scalar lives in `attrs` as an `AttrValue::Float(f64)`; codegen
+    /// truncates to f32 at lowering time. New in M10.
+    MulScalar,
 }
 
 pub struct Signature {
@@ -139,6 +143,7 @@ pub fn resolve(name: &str) -> Option<StdOp> {
         "dropout" => Some(StdOp::Dropout),
         "softmax" => Some(StdOp::Softmax),
         "matmul" => Some(StdOp::Matmul),
+        "mul_scalar" => Some(StdOp::MulScalar),
         _ => None,
     }
 }
@@ -186,6 +191,14 @@ pub fn signature(op: StdOp) -> Signature {
                 required: false,
             }],
         },
+        StdOp::MulScalar => Signature {
+            positional: &[ArgSlot {
+                name: "value",
+                ty: Float,
+                required: true,
+            }],
+            named: &[],
+        },
     }
 }
 
@@ -201,7 +214,7 @@ pub fn infer_output_shape(
             let out_dim = get_int_attr(attrs, "out_dim")?;
             Ok(Shape(vec![input.0[0], out_dim]))
         }
-        StdOp::Relu | StdOp::Softmax | StdOp::Dropout => {
+        StdOp::Relu | StdOp::Softmax | StdOp::Dropout | StdOp::MulScalar => {
             let input = single_input(inputs)?;
             Ok(input.clone())
         }
@@ -358,7 +371,7 @@ pub fn validate_attrs(op: StdOp, attrs: &[OpAttr]) -> Result<(), AttrError> {
             }
             Ok(())
         }
-        StdOp::Linear | StdOp::Relu | StdOp::Softmax | StdOp::Matmul => Ok(()),
+        StdOp::Linear | StdOp::Relu | StdOp::Softmax | StdOp::Matmul | StdOp::MulScalar => Ok(()),
     }
 }
 
@@ -381,6 +394,7 @@ impl std::fmt::Display for StdOp {
             StdOp::Dropout => "dropout",
             StdOp::Softmax => "softmax",
             StdOp::Matmul => "matmul",
+            StdOp::MulScalar => "mul_scalar",
         };
         write!(f, "{}", name)
     }
