@@ -296,26 +296,32 @@ fn standalone_softmax_uses_callee_saved_int_pushes() {
 }
 
 #[test]
-fn standalone_softmax_spills_max_to_stack_at_offset_0() {
+fn standalone_softmax_spills_max_to_stack_at_offset_32() {
     // assign_buffers reserves bytes 0..15 for the two xmm-spill slots
     // when calls_extern_math; row_max sits at offset 0, row_sum at 8
     // (spec §7.4). Standalone softmax model has no intermediate buffers,
     // so the reserve is the only stack content other than alignment pad.
+    //
+    // M10: emit_softmax pushes %rdi/%rsi/%rdx + padding (32 bytes) at
+    // entry to preserve FFI input regs across `call expf@PLT` for any
+    // downstream emitter (matmul-after-softmax in self_attention). The
+    // 32-byte push shifts the row_max slot from (%rsp) to 32(%rsp).
     let src = "model SP [b=2, k=4]:\n    x: Tensor[b, k]\n    x -> softmax\n";
     let s = lower_x86_no_passes(src).source;
     assert!(
-        s.contains("movss   %xmm8, (%rsp)"),
-        "row_max spill missing at offset 0:\n{s}"
+        s.contains("movss   %xmm8, 32(%rsp)"),
+        "row_max spill missing at offset 32 (post-FFI-push):\n{s}"
     );
 }
 
 #[test]
 fn standalone_softmax_initialises_sum_slot_to_zero() {
+    // M10: post-FFI-push offset shifted from 8(%rsp) → 40(%rsp).
     let src = "model SZ [b=2, k=4]:\n    x: Tensor[b, k]\n    x -> softmax\n";
     let s = lower_x86_no_passes(src).source;
     assert!(
-        s.contains("movl    $0, 8(%rsp)"),
-        "sum slot init missing at offset 8:\n{s}"
+        s.contains("movl    $0, 40(%rsp)"),
+        "sum slot init missing at offset 40 (post-FFI-push):\n{s}"
     );
 }
 
