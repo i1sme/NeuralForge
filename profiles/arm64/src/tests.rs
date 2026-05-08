@@ -138,6 +138,28 @@ fn softmax_emits_three_passes() {
 }
 
 #[test]
+fn softmax_4d_dispatch_computes_b_as_product_of_leading_dims() {
+    // 4D shape [2, 4, 8, 16]: b = 2*4*8 = 64, k = 16.
+    // The emitter's outer loop bound is set via emit_imm32 → x10
+    // immediately above the .Lsm_i_<id> label.
+    let src = "\
+model M [batch=2, heads=4, seq=8, dim=16]:
+    x: Tensor[batch, heads, seq, dim]
+
+    y: Tensor[batch, heads, seq, dim] = x -> softmax
+";
+    let asm = crate::lower(&compiler::ir::build(&compiler::parse(src).unwrap()).unwrap())
+        .expect("lower")
+        .source;
+    // 64 in lo16 is 0x0040; emit_imm32 writes a movz with that lo16.
+    assert!(
+        asm.contains("movz    x10, #0x0040"),
+        "expected b=64 materialised before .Lsm_i_…; asm:\n{}",
+        asm
+    );
+}
+
+#[test]
 fn softmax_function_saves_d8_d9_and_x19_x23() {
     let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[3] -> softmax\n");
     let asm = lower(&uir).expect("lower");

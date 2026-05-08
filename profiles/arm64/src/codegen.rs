@@ -193,9 +193,15 @@ fn walk_model(
                     // else BufferLoc::Alias: no asm — downstream reads operand directly.
                 }
                 StdOp::Softmax => {
+                    // Last-axis softmax. b = product(shape[..rank-1]) (total
+                    // rows), k = shape[rank-1] (row width). For 2D
+                    // [batch, dim] this collapses to b=batch, k=dim
+                    // (identical to pre-M10 behaviour). For 4D
+                    // [B, H, M, K] this gives b = B*H*M, k = K.
                     let in_shape = &model.nodes[operands[0]].ty.shape;
-                    let b = in_shape.0[0];
-                    let k = in_shape.0[1];
+                    let last = in_shape.0.len() - 1;
+                    let k = in_shape.0[last];
+                    let b: u64 = in_shape.0[..last].iter().product();
                     let src_loc = resolve_loc(&assignment.locs, operands[0]);
                     let dst_loc = resolve_loc(&assignment.locs, node_idx);
                     body.push_str(&crate::ops::emit_softmax(
