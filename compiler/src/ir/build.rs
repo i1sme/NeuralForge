@@ -343,13 +343,30 @@ pub(crate) fn build_model(ast_model: &ModelDef) -> Result<UirModel, BuildError> 
                 last_pipeline_output = Some(current);
             }
             ModelStmt::NamedPipeline(np) => {
-                // Group 5 replaces this with real semantics. Until then, this
-                // arm exists so the `match` is exhaustive and the workspace
-                // builds; no test path currently routes through it.
-                return Err(BuildError::shape(
-                    "named_pipeline_stmt is not yet implemented (M10 group 5)".to_string(),
-                    np.span,
-                ));
+                // Build the pipeline in the same shape as ModelStmt::Pipeline,
+                // then verify declared shape against actual, then bind in env.
+                let mut current = *env
+                    .get(&np.source)
+                    .ok_or_else(|| BuildError::unknown_variable(&np.source, np.span))?;
+                for op_ast in &np.steps {
+                    let input_shape = nodes[current].ty.shape.clone();
+                    current = build_op(op_ast, current, &input_shape, &params, &env, &mut nodes)?;
+                }
+
+                // Verify declared shape against actual.
+                let declared = resolve_type(&np.declared_ty, &params)?;
+                let actual = nodes[current].ty.shape.clone();
+                if declared != actual {
+                    return Err(BuildError::declared_shape_mismatch(
+                        declared, actual, np.span,
+                    ));
+                }
+
+                // Bind name in env, update last_pipeline_output (output rule
+                // generalises from "last pipeline_stmt" to "last pipeline_stmt
+                // OR named_pipeline_stmt", spec §4.2).
+                env.insert(np.binding_name.clone(), current);
+                last_pipeline_output = Some(current);
             }
         }
     }

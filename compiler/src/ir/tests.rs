@@ -910,3 +910,92 @@ fn mul_scalar_signature_requires_float_positional() {
     assert!(sig.positional[0].required);
     assert_eq!(sig.named.len(), 0);
 }
+
+#[test]
+fn named_pipeline_shape_match_succeeds() {
+    // Declared shape matches the pipeline's actual output shape.
+    let src = "\
+model M [batch=2]:
+    x: Tensor[batch, 4]
+
+    y: Tensor[batch, 4] = x -> relu
+";
+    let ast = crate::parse(src).expect("parse");
+    let uir = crate::ir::build(&ast).expect("build");
+    let model = &uir.models[0];
+    // Output is `y` (the last/only named pipeline).
+    let out_id = model.output;
+    assert_eq!(model.nodes[out_id].ty.shape.0, vec![2, 4]);
+}
+
+#[test]
+fn named_pipeline_shape_mismatch_errors() {
+    // Declared `Tensor[batch, 8]` but `relu` preserves shape, so actual
+    // is `Tensor[batch, 4]`. Build must fail with DeclaredShapeMismatch.
+    let src = "\
+model M [batch=2]:
+    x: Tensor[batch, 4]
+
+    y: Tensor[batch, 8] = x -> relu
+";
+    let ast = crate::parse(src).expect("parse");
+    let err = crate::ir::build(&ast).unwrap_err();
+    assert!(
+        matches!(
+            err.kind,
+            crate::ir::error::BuildErrorKind::DeclaredShapeMismatch { .. }
+        ),
+        "unexpected error kind: {:?}",
+        err.kind
+    );
+}
+
+#[test]
+fn tensor_arg_resolves_from_env() {
+    // The `x` positional arg in matmul[x] resolves against env to the
+    // input variable's NodeId. The resulting Op node should have two
+    // operands: input_id (the LHS, which is x itself in this self-mul
+    // example) plus the env-resolved x. They're identical here — the
+    // Op node carries operands=[x_id, x_id].
+    //
+    // With x: Tensor[batch, 4] and matmul[x, transpose_b=true]:
+    //   LHS = x = [batch, 4] (M=batch, K=4)
+    //   RHS = x = [batch, 4], transpose_b=true → contract on last dim
+    //          (rhs_K = 4) so N = batch (rhs second-to-last)
+    //   output = [M, N] = [batch, batch]
+    let src = "\
+model M [batch=2]:
+    x: Tensor[batch, 4]
+
+    y: Tensor[batch, batch] = x -> matmul[x, transpose_b=true]
+";
+    let ast = crate::parse(src).expect("parse");
+    let uir = crate::ir::build(&ast).expect("build");
+    let model = &uir.models[0];
+    let out_id = model.output;
+    let crate::ir::types::NodeKind::Op { operands, .. } = &model.nodes[out_id].kind else {
+        panic!("expected Op node, got Input");
+    };
+    assert_eq!(operands.len(), 2);
+    // Both operands point at the same NodeId — x itself, since q=k=v=x.
+    assert_eq!(operands[0], operands[1]);
+}
+
+#[test]
+fn softmax_rank_too_low_caught_at_uir() {
+    use crate::ir::stdlib::{infer_output_shape, ShapeError, StdOp};
+    use crate::ir::types::Shape;
+    let input_1d = Shape(vec![16]);
+    let err = infer_output_shape(StdOp::Softmax, &[input_1d], &[]).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ShapeError::RankTooLow {
+                required: 2,
+                actual: 1
+            }
+        ),
+        "unexpected error: {:?}",
+        err
+    );
+}

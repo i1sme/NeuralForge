@@ -56,6 +56,10 @@ pub enum BuildErrorKind {
         name: String,
         first_span: crate::ast::Span,
     },
+    DeclaredShapeMismatch {
+        declared: crate::ir::types::Shape,
+        actual: crate::ir::types::Shape,
+    },
 }
 
 impl std::fmt::Display for BuildErrorKind {
@@ -223,6 +227,23 @@ impl BuildError {
             line: current_span.line,
             col: current_span.col,
             kind: BuildErrorKind::DuplicateModelName { name, first_span },
+        }
+    }
+
+    pub fn declared_shape_mismatch(
+        declared: crate::ir::types::Shape,
+        actual: crate::ir::types::Shape,
+        span: crate::ast::Span,
+    ) -> Self {
+        let message = format!(
+            "declared shape {} does not match actual shape {}",
+            declared, actual
+        );
+        Self {
+            message,
+            line: span.line,
+            col: span.col,
+            kind: BuildErrorKind::DeclaredShapeMismatch { declared, actual },
         }
     }
 }

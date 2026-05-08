@@ -214,8 +214,25 @@ pub fn infer_output_shape(
             let out_dim = get_int_attr(attrs, "out_dim")?;
             Ok(Shape(vec![input.0[0], out_dim]))
         }
-        StdOp::Relu | StdOp::Softmax | StdOp::Dropout | StdOp::MulScalar => {
+        StdOp::Relu | StdOp::Dropout | StdOp::MulScalar => {
             let input = single_input(inputs)?;
+            Ok(input.clone())
+        }
+        StdOp::Softmax => {
+            let input = single_input(inputs)?;
+            // M10: tightened to rank ≥ 2 (was: any rank). Fail-fast at
+            // UIR rather than fail-late at codegen — both arm64 and
+            // x86_64 walk_model dispatch already assume rank ≥ 2 to
+            // compute (b, k) for the emitter (b = product of leading
+            // dims, k = last dim). 1D softmax is mathematically valid
+            // but excluded by project convention; all NFL practical
+            // use cases are 2D / 4D batch-first.
+            if input.rank() < 2 {
+                return Err(ShapeError::RankTooLow {
+                    required: 2,
+                    actual: input.rank(),
+                });
+            }
             Ok(input.clone())
         }
         StdOp::Matmul => infer_matmul_shape(inputs, attrs),
