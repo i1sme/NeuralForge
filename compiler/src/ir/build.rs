@@ -278,6 +278,15 @@ pub(crate) fn build_model(ast_model: &ModelDef) -> Result<UirModel, BuildError> 
                 }
                 last_pipeline_output = Some(current);
             }
+            ModelStmt::NamedPipeline(np) => {
+                // Group 5 replaces this with real semantics. Until then, this
+                // arm exists so the `match` is exhaustive and the workspace
+                // builds; no test path currently routes through it.
+                return Err(BuildError::shape(
+                    "named_pipeline_stmt is not yet implemented (M10 group 5)".to_string(),
+                    np.span,
+                ));
+            }
         }
     }
 
