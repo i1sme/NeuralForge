@@ -333,6 +333,29 @@ fn standalone_softmax_recomputes_offset_after_call() {
     );
 }
 
+#[test]
+fn softmax_4d_dispatch_computes_b_as_product_of_leading_dims() {
+    // 4D shape [2, 4, 8, 16]: b = 2*4*8 = 64, k = 16. The x86_64
+    // emitter materialises b via emit_imm32_to_r10 → `movl $64, %r10d`
+    // immediately above the .Lsm_i_<id> label. emit_imm32_to_r10 prints
+    // the immediate in decimal (see profiles/x86_64/src/asm.rs:28), so
+    // 64 appears as `$64`, not `$0x40`.
+    let src = "\
+model M [batch=2, heads=4, seq=8, dim=16]:
+    x: Tensor[batch, heads, seq, dim]
+
+    y: Tensor[batch, heads, seq, dim] = x -> softmax
+";
+    let asm = crate::lower(&compiler::ir::build(&compiler::parse(src).unwrap()).unwrap())
+        .expect("lower")
+        .source;
+    assert!(
+        asm.contains("movl    $64, %r10d"),
+        "expected b=64 immediate; asm:\n{}",
+        asm
+    );
+}
+
 // ── Task 3.11: mirrors of arm64 unit-test coverage ───────────────────────────
 
 #[test]
