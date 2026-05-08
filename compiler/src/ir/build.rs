@@ -32,14 +32,15 @@ pub(crate) fn resolve_type(
 use crate::ast::{ArgValue, OpArg, Span};
 
 use super::stdlib::{self, ArgSlot, ArgType, StdOp};
-use super::types::{AttrValue, OpAttr};
+use super::types::{AttrValue, NodeId, OpAttr};
 
 pub(crate) fn resolve_args(
     op: StdOp,
     args: &[OpArg],
     params: &HashMap<&str, u64>,
+    env: &HashMap<String, NodeId>,
     op_span: Span,
-) -> Result<Vec<OpAttr>, BuildError> {
+) -> Result<(Vec<NodeId>, Vec<OpAttr>), BuildError> {
     let sig = stdlib::signature(op);
 
     // Pre-resolve Symbol args against model params: if a positional or named arg
@@ -78,14 +79,35 @@ pub(crate) fn resolve_args(
     }
 
     let mut attrs: Vec<OpAttr> = Vec::with_capacity(positionals.len() + nameds.len());
+    let mut tensor_operands: Vec<NodeId> = Vec::new();
 
-    // Bind positionals to slots.
+    // Bind positionals to slots. Tensor-typed slots resolve against env
+    // and contribute a NodeId to `tensor_operands`; everything else
+    // becomes an `OpAttr` as before.
     for (slot, value) in sig.positional.iter().zip(positionals.iter()) {
         check_arg_type(slot, value, op_span)?;
-        attrs.push(OpAttr {
-            name: slot.name.to_string(),
-            value: arg_value_to_attr(value),
-        });
+        if matches!(slot.ty, ArgType::Tensor) {
+            let ArgValue::Symbol(name) = value else {
+                // check_arg_type already enforced Symbol-ness.
+                // Defensive — never observably reachable.
+                return Err(BuildError::arg_type_mismatch(
+                    slot.name,
+                    "tensor name (identifier)",
+                    describe_arg_type(value),
+                    op_span,
+                ));
+            };
+            let id = env
+                .get(name)
+                .copied()
+                .ok_or_else(|| BuildError::unknown_variable(name, op_span))?;
+            tensor_operands.push(id);
+        } else {
+            attrs.push(OpAttr {
+                name: slot.name.to_string(),
+                value: arg_value_to_attr(value),
+            });
+        }
     }
 
     // Bind nameds — match each by slot name.
@@ -96,10 +118,29 @@ pub(crate) fn resolve_args(
             .find(|s| s.name == *name)
             .ok_or_else(|| BuildError::unexpected_named_arg(name, op_span))?;
         check_arg_type(slot, value, op_span)?;
-        attrs.push(OpAttr {
-            name: slot.name.to_string(),
-            value: arg_value_to_attr(value),
-        });
+        if matches!(slot.ty, ArgType::Tensor) {
+            // No M10 op declares a Tensor-typed *named* slot, but the
+            // type system permits it for symmetry. Resolution mirrors
+            // the positional path.
+            let ArgValue::Symbol(arg_name) = value else {
+                return Err(BuildError::arg_type_mismatch(
+                    slot.name,
+                    "tensor name (identifier)",
+                    describe_arg_type(value),
+                    op_span,
+                ));
+            };
+            let id = env
+                .get(arg_name)
+                .copied()
+                .ok_or_else(|| BuildError::unknown_variable(arg_name, op_span))?;
+            tensor_operands.push(id);
+        } else {
+            attrs.push(OpAttr {
+                name: slot.name.to_string(),
+                value: arg_value_to_attr(value),
+            });
+        }
     }
 
     // Verify all required named args are present.
@@ -109,7 +150,7 @@ pub(crate) fn resolve_args(
         }
     }
 
-    Ok(attrs)
+    Ok((tensor_operands, attrs))
 }
 
 fn check_arg_type(slot: &ArgSlot, value: &ArgValue, op_span: Span) -> Result<(), BuildError> {
@@ -120,6 +161,7 @@ fn check_arg_type(slot: &ArgSlot, value: &ArgValue, op_span: Span) -> Result<(),
         (ArgType::Integer, ArgValue::Integer(_))
             | (ArgType::Float, ArgValue::Float(_))
             | (ArgType::Symbol, ArgValue::Symbol(_))
+            | (ArgType::Tensor, ArgValue::Symbol(_)),
     );
     if ok {
         Ok(())
@@ -164,10 +206,11 @@ fn describe_slot_type(ty: ArgType) -> &'static str {
         ArgType::Integer => "integer",
         ArgType::Float => "float",
         ArgType::Symbol => "identifier",
+        ArgType::Tensor => "tensor name (identifier)",
     }
 }
 
-use super::types::{Node, NodeId, NodeKind, Type};
+use super::types::{Node, NodeKind, Type};
 use crate::ast::Operation;
 
 pub(crate) fn build_op(
@@ -175,11 +218,12 @@ pub(crate) fn build_op(
     input_id: NodeId,
     input_shape: &Shape,
     params: &HashMap<&str, u64>,
+    env: &HashMap<String, NodeId>,
     out_nodes: &mut Vec<Node>,
 ) -> Result<NodeId, BuildError> {
     let std_op = stdlib::resolve(&op_ast.name)
         .ok_or_else(|| BuildError::unknown_op(&op_ast.name, op_ast.span))?;
-    let attrs = resolve_args(std_op, &op_ast.args, params, op_ast.span)?;
+    let (tensor_operands, attrs) = resolve_args(std_op, &op_ast.args, params, env, op_ast.span)?;
     stdlib::validate_attrs(std_op, &attrs).map_err(|e| {
         let attr_name = match &e {
             stdlib::AttrError::OutOfRange { name, .. } => *name,
@@ -192,13 +236,33 @@ pub(crate) fn build_op(
             op_ast.span,
         )
     })?;
-    let out_shape = stdlib::infer_output_shape(std_op, std::slice::from_ref(input_shape), &attrs)
+
+    // Compose operands: input_id first, then any tensor-resolved operands
+    // (in slot declaration order, matching tensor_operands' Vec order).
+    let mut operands = Vec::with_capacity(1 + tensor_operands.len());
+    operands.push(input_id);
+    operands.extend(tensor_operands);
+
+    // Multi-input shape inference: gather all operand shapes and pass to
+    // infer_output_shape. Single-input ops continue to work because their
+    // arms call single_input(inputs) which validates inputs.len() == 1.
+    let input_shapes: Vec<Shape> = operands
+        .iter()
+        .map(|nid| out_nodes[*nid].ty.shape.clone())
+        .collect();
+    let out_shape = stdlib::infer_output_shape(std_op, &input_shapes, &attrs)
         .map_err(|e| BuildError::shape(format!("{e}"), op_ast.span))?;
+
+    // M10: input_shape param is now redundant (callers can derive from
+    // input_id). Kept for caller-API stability — drop in a later
+    // trigger-driven cleanup if a refactor pass reveals it as cruft.
+    let _ = input_shape;
+
     let id = out_nodes.len();
     out_nodes.push(Node {
         kind: NodeKind::Op {
             op: std_op,
-            operands: vec![input_id],
+            operands,
             attrs,
             fused_post_ops: Vec::new(),
         },
@@ -274,7 +338,7 @@ pub(crate) fn build_model(ast_model: &ModelDef) -> Result<UirModel, BuildError> 
                     .ok_or_else(|| BuildError::unknown_variable(&p.source, p.span))?;
                 for op_ast in &p.steps {
                     let input_shape = nodes[current].ty.shape.clone();
-                    current = build_op(op_ast, current, &input_shape, &params, &mut nodes)?;
+                    current = build_op(op_ast, current, &input_shape, &params, &env, &mut nodes)?;
                 }
                 last_pipeline_output = Some(current);
             }

@@ -31,6 +31,12 @@ pub enum ArgType {
     Integer,
     Float,
     Symbol,
+    /// A tensor-by-name argument. The arg appears in NFL source as an
+    /// identifier (e.g. `matmul[x]` where `x` is a previously-declared
+    /// variable name). The builder resolves it against the variable
+    /// environment to a `NodeId`. Resolved IDs go into the op node's
+    /// `operands` field, NOT `attrs`. New in M10.
+    Tensor,
 }
 
 #[derive(Debug, Clone, PartialEq)]
