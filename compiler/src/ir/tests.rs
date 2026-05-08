@@ -706,3 +706,175 @@ fn verbose_uir_snapshot_matches_expected_format() {
         "pre-pass UIR must not have fused post-ops"
     );
 }
+
+#[test]
+fn matmul_resolves_via_stdlib() {
+    use crate::ir::stdlib::{resolve, StdOp};
+    assert_eq!(resolve("matmul"), Some(StdOp::Matmul));
+    assert_eq!(format!("{}", StdOp::Matmul), "matmul");
+}
+
+#[test]
+fn matmul_2d_shape_inference_no_transpose() {
+    use crate::ir::stdlib::{infer_output_shape, StdOp};
+    use crate::ir::types::Shape;
+    let a = Shape(vec![2, 4]);
+    let b = Shape(vec![4, 8]);
+    let out = infer_output_shape(StdOp::Matmul, &[a, b], &[]).expect("infer");
+    assert_eq!(out.0, vec![2, 8]);
+}
+
+#[test]
+fn matmul_2d_shape_inference_transpose_b() {
+    use crate::ir::stdlib::{infer_output_shape, StdOp};
+    use crate::ir::types::{AttrValue, OpAttr, Shape};
+    let a = Shape(vec![2, 4]);
+    // transpose_b=true means b is logically [N, K] → [8, 4].
+    let b = Shape(vec![8, 4]);
+    let attrs = vec![OpAttr {
+        name: "transpose_b".to_string(),
+        value: AttrValue::Symbol("true".to_string()),
+    }];
+    let out = infer_output_shape(StdOp::Matmul, &[a, b], &attrs).expect("infer");
+    assert_eq!(out.0, vec![2, 8]);
+}
+
+#[test]
+fn matmul_4d_shape_inference_no_transpose() {
+    use crate::ir::stdlib::{infer_output_shape, StdOp};
+    use crate::ir::types::Shape;
+    let a = Shape(vec![2, 4, 16, 8]);
+    let b = Shape(vec![2, 4, 8, 16]);
+    let out = infer_output_shape(StdOp::Matmul, &[a, b], &[]).expect("infer");
+    assert_eq!(out.0, vec![2, 4, 16, 16]);
+}
+
+#[test]
+fn matmul_4d_shape_inference_transpose_b() {
+    use crate::ir::stdlib::{infer_output_shape, StdOp};
+    use crate::ir::types::{AttrValue, OpAttr, Shape};
+    let a = Shape(vec![2, 4, 16, 16]);
+    // transpose_b=true → b interpreted as [..., N, K] = [2, 4, 16, 16].
+    let b = Shape(vec![2, 4, 16, 16]);
+    let attrs = vec![OpAttr {
+        name: "transpose_b".to_string(),
+        value: AttrValue::Symbol("true".to_string()),
+    }];
+    let out = infer_output_shape(StdOp::Matmul, &[a, b], &attrs).expect("infer");
+    assert_eq!(out.0, vec![2, 4, 16, 16]);
+}
+
+#[test]
+fn matmul_leading_dim_mismatch_errors() {
+    use crate::ir::stdlib::{infer_output_shape, ShapeError, StdOp};
+    use crate::ir::types::Shape;
+    let a = Shape(vec![2, 4, 16, 8]);
+    let b = Shape(vec![2, 5, 8, 16]); // heads dim 4 vs 5 — strict mismatch
+    let err = infer_output_shape(StdOp::Matmul, &[a, b], &[]).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ShapeError::LeadingDimMismatch {
+                dim_index: 1,
+                lhs: 4,
+                rhs: 5
+            }
+        ),
+        "unexpected error: {:?}",
+        err
+    );
+}
+
+#[test]
+fn matmul_inner_dim_mismatch_errors() {
+    use crate::ir::stdlib::{infer_output_shape, ShapeError, StdOp};
+    use crate::ir::types::Shape;
+    let a = Shape(vec![2, 4]);
+    let b = Shape(vec![5, 8]); // K=4 vs K=5
+    let err = infer_output_shape(StdOp::Matmul, &[a, b], &[]).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ShapeError::InnerDimMismatch {
+                lhs_k: 4,
+                rhs_k: 5,
+                transpose_b: false,
+            }
+        ),
+        "unexpected error: {:?}",
+        err
+    );
+}
+
+#[test]
+fn matmul_rank_mismatch_errors() {
+    use crate::ir::stdlib::{infer_output_shape, ShapeError, StdOp};
+    use crate::ir::types::Shape;
+    let a = Shape(vec![2, 4]);
+    let b = Shape(vec![2, 4, 4, 8]);
+    let err = infer_output_shape(StdOp::Matmul, &[a, b], &[]).unwrap_err();
+    assert!(
+        matches!(err, ShapeError::RankMismatch { lhs: 2, rhs: 4 }),
+        "unexpected error: {:?}",
+        err
+    );
+}
+
+#[test]
+fn matmul_rank_too_low_errors() {
+    use crate::ir::stdlib::{infer_output_shape, ShapeError, StdOp};
+    use crate::ir::types::Shape;
+    let a = Shape(vec![4]);
+    let b = Shape(vec![4]);
+    let err = infer_output_shape(StdOp::Matmul, &[a, b], &[]).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ShapeError::RankTooLow {
+                required: 2,
+                actual: 1
+            }
+        ),
+        "unexpected error: {:?}",
+        err
+    );
+}
+
+#[test]
+fn matmul_wrong_input_count_errors() {
+    use crate::ir::stdlib::{infer_output_shape, ShapeError, StdOp};
+    use crate::ir::types::Shape;
+    let a = Shape(vec![2, 4]);
+    let err = infer_output_shape(StdOp::Matmul, &[a], &[]).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ShapeError::WrongInputCount {
+                expected: 2,
+                actual: 1
+            }
+        ),
+        "unexpected error: {:?}",
+        err
+    );
+}
+
+#[test]
+fn transpose_b_true_recognised() {
+    use crate::ir::stdlib::matmul_transpose_b;
+    use crate::ir::types::{AttrValue, OpAttr};
+
+    let attrs_true = vec![OpAttr {
+        name: "transpose_b".to_string(),
+        value: AttrValue::Symbol("true".to_string()),
+    }];
+    let attrs_false = vec![OpAttr {
+        name: "transpose_b".to_string(),
+        value: AttrValue::Symbol("false".to_string()),
+    }];
+    let attrs_empty: Vec<OpAttr> = vec![];
+
+    assert!(matmul_transpose_b(&attrs_true));
+    assert!(!matmul_transpose_b(&attrs_false));
+    assert!(!matmul_transpose_b(&attrs_empty)); // default=false when omitted
+}
