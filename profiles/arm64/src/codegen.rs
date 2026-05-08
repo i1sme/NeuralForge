@@ -116,6 +116,7 @@ fn walk_model(
     let mut relu_idx = 0usize;
     let mut softmax_idx = 0usize;
     let mut dropout_idx = 0usize;
+    let mut matmul_idx = 0usize;
     for (node_idx, node) in model.nodes.iter().enumerate() {
         if let NodeKind::Op { op, operands, .. } = &node.kind {
             match op {
@@ -207,6 +208,49 @@ fn walk_model(
                     ));
                     softmax_idx += 1;
                 }
+                StdOp::Matmul => {
+                    // Operands: input (operands[0]) is A (the LHS, which
+                    // came from the pipeline). The Tensor-resolved B
+                    // operand is operands[1] — pushed by build_op from
+                    // `tensor_operands`.
+                    let a_id = operands[0];
+                    let b_id = operands[1];
+                    let a_shape = &model.nodes[a_id].ty.shape;
+                    let b_shape = &model.nodes[b_id].ty.shape;
+                    let r = a_shape.0.len();
+                    debug_assert!(r >= 2, "matmul shape inference enforces rank >= 2");
+
+                    let leading_count: u64 = a_shape.0[..(r - 2)].iter().product();
+                    let m = a_shape.0[r - 2];
+                    let k = a_shape.0[r - 1];
+                    let transpose_b = compiler::ir::stdlib::matmul_transpose_b(match &node.kind {
+                        NodeKind::Op { attrs, .. } => attrs,
+                        _ => unreachable!("matched NodeKind::Op above"),
+                    });
+                    let n = if transpose_b {
+                        b_shape.0[r - 2]
+                    } else {
+                        b_shape.0[r - 1]
+                    };
+
+                    let a_loc = resolve_loc(&assignment.locs, a_id);
+                    let b_loc = resolve_loc(&assignment.locs, b_id);
+                    let dst_loc = resolve_loc(&assignment.locs, node_idx);
+                    body.push_str(&crate::ops::emit_matmul(
+                        leading_count,
+                        m,
+                        k,
+                        n,
+                        transpose_b,
+                        model_idx,
+                        matmul_idx,
+                        a_loc,
+                        b_loc,
+                        dst_loc,
+                        node.source_span,
+                    )?);
+                    matmul_idx += 1;
+                }
                 // M5c: #[non_exhaustive] on StdOp requires a wildcard
                 // arm. Future ops (e.g. Tanh, Gelu, Embedding) will
                 // route here until codegen learns them. Returning
@@ -258,8 +302,10 @@ fn classify_op(
         StdOp::Relu => Ok(()),
         StdOp::Dropout => Ok(()),
         StdOp::Softmax => Ok(()),
+        StdOp::Matmul => Ok(()),
         // M5c: #[non_exhaustive] on StdOp requires a wildcard arm.
-        // Future ops are rejected here until codegen learns them.
+        // Future ops (and StdOp::MulScalar until M10 group 7) are
+        // rejected here until codegen learns them.
         #[allow(unreachable_patterns)]
         _ => Err(LowerError::UnsupportedOp {
             op: format!("{op}"),

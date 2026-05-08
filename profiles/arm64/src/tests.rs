@@ -775,3 +775,178 @@ fn linear_rowwise_softmax_tail_uses_re_materialised_cmps() {
         "old fsmx i-loop literal-imm cmp must be removed"
     );
 }
+
+#[test]
+fn matmul_4d_emits_outer_loop_wrapper() {
+    let src = "\
+model M [batch=2, heads=4, seq=4, head_dim=4]:
+    x: Tensor[batch, heads, seq, head_dim]
+
+    out: Tensor[batch, heads, seq, seq] = x -> matmul[x, transpose_b=true]
+";
+    let ast = compiler::parse(src).expect("parse");
+    let uir = compiler::ir::build(&ast).expect("build");
+    let asm = crate::lower(&uir).expect("lower");
+    // Outer loop wrapper present.
+    assert!(
+        asm.source.contains(".Lmm4d_outer_0_0:"),
+        "asm:\n{}",
+        asm.source
+    );
+    assert!(
+        asm.source.contains(".Lmm4d_outer_end_0_0:"),
+        "asm:\n{}",
+        asm.source
+    );
+    // Inner triple-loop labels present.
+    assert!(asm.source.contains(".Lmm4d_i_0_0:"), "asm:\n{}", asm.source);
+    assert!(asm.source.contains(".Lmm4d_j_0_0:"), "asm:\n{}", asm.source);
+    assert!(asm.source.contains(".Lmm4d_k_0_0:"), "asm:\n{}", asm.source);
+    // FMA in inner k-body.
+    assert!(
+        asm.source.contains("fmadd   s0, s1, s2, s0"),
+        "asm:\n{}",
+        asm.source
+    );
+}
+
+#[test]
+fn matmul_2d_collapses_to_outer_count_one() {
+    let src = "\
+model M [batch=2]:
+    a: Tensor[batch, 4]
+    b: Tensor[4, 8]
+
+    out: Tensor[batch, 8] = a -> matmul[b]
+";
+    let ast = compiler::parse(src).expect("parse");
+    let uir = compiler::ir::build(&ast).expect("build");
+    let asm = crate::lower(&uir).expect("lower");
+    // The outer loop is still emitted, but its bound is 1, so a single
+    // emit_imm32 line "movz/movk → x10, #1" should appear before the
+    // outer loop. We assert structurally on the comment header instead
+    // (more readable).
+    assert!(
+        asm.source.contains("leading_count=1"),
+        "asm:\n{}",
+        asm.source
+    );
+}
+
+#[test]
+fn matmul_transpose_b_inner_addressing_differs() {
+    let src_no_t = "\
+model M [batch=2]:
+    a: Tensor[batch, 4]
+    b: Tensor[4, 8]
+
+    out: Tensor[batch, 8] = a -> matmul[b]
+";
+    // For a transpose_b version we need shapes that match: [batch, 4]
+    // with b transposed [N, K] = [8, 4].
+    let src_t = "\
+model M [batch=2]:
+    a: Tensor[batch, 4]
+    b: Tensor[8, 4]
+
+    out: Tensor[batch, 8] = a -> matmul[b, transpose_b=true]
+";
+    let asm_no_t = crate::lower(&compiler::ir::build(&compiler::parse(src_no_t).unwrap()).unwrap())
+        .expect("lower no-t")
+        .source;
+    let asm_t = crate::lower(&compiler::ir::build(&compiler::parse(src_t).unwrap()).unwrap())
+        .expect("lower t")
+        .source;
+    // Both compute b_offset, but with different operand orders.
+    // No-transpose: `mul x6, x9, x15` (k_inner * N).
+    // Transpose:   `mul x6, x7, x16` (j * K).
+    assert!(
+        asm_no_t.contains("mul     x6, x9, x15"),
+        "no-t asm:\n{}",
+        asm_no_t
+    );
+    assert!(asm_t.contains("mul     x6, x7, x16"), "t asm:\n{}", asm_t);
+    assert_ne!(asm_no_t, asm_t, "transpose_b should change emitted asm");
+}
+
+#[test]
+fn matmul_transpose_b_false_default_matches_explicit_false() {
+    // Spec §8.3 — guard against drift between the omit-attr code path
+    // and the explicit-false path.
+    let src_default = "\
+model M [batch=2]:
+    a: Tensor[batch, 4]
+    b: Tensor[4, 8]
+
+    out: Tensor[batch, 8] = a -> matmul[b]
+";
+    let src_explicit = "\
+model M [batch=2]:
+    a: Tensor[batch, 4]
+    b: Tensor[4, 8]
+
+    out: Tensor[batch, 8] = a -> matmul[b, transpose_b=false]
+";
+    let asm_d = crate::lower(&compiler::ir::build(&compiler::parse(src_default).unwrap()).unwrap())
+        .expect("lower default")
+        .source;
+    let asm_e =
+        crate::lower(&compiler::ir::build(&compiler::parse(src_explicit).unwrap()).unwrap())
+            .expect("lower explicit")
+            .source;
+    assert_eq!(asm_d, asm_e, "default omit must match explicit false");
+}
+
+#[test]
+fn matmul_does_not_call_extern_math() {
+    let src = "\
+model M [batch=2, heads=4, seq=4, head_dim=4]:
+    x: Tensor[batch, heads, seq, head_dim]
+
+    out: Tensor[batch, heads, seq, seq] = x -> matmul[x, transpose_b=true]
+";
+    let asm = crate::lower(&compiler::ir::build(&compiler::parse(src).unwrap()).unwrap())
+        .expect("lower")
+        .source;
+    assert!(
+        !asm.contains("bl      _expf"),
+        "matmul must not call extern math: {}",
+        asm
+    );
+    assert!(
+        !asm.contains("expf@PLT"),
+        "matmul must not call extern math: {}",
+        asm
+    );
+}
+
+#[test]
+fn matmul_preserves_ffi_register_invariants_x1_x2() {
+    // Critical regression test: emit_matmul must not leak its scratch use
+    // of x1/x2 as A_slice/B_slice pointers into the FFI register state
+    // visible to downstream emitters (per AArch64 ABI, x1=params, x2=output).
+    //
+    // The fix is to spill via `stp x1, x2, [sp, #-16]!` before the outer
+    // loop and `ldp x1, x2, [sp], #16` after. This test asserts the spill
+    // pair is present.
+    let src = "\
+model M [batch=2, heads=4, seq=4, head_dim=4]:
+    x: Tensor[batch, heads, seq, head_dim]
+
+    out: Tensor[batch, heads, seq, seq] = x -> matmul[x, transpose_b=true]
+";
+    let asm = crate::lower(&compiler::ir::build(&compiler::parse(src).unwrap()).unwrap())
+        .expect("lower")
+        .source;
+
+    assert!(
+        asm.contains("stp     x1, x2, [sp, #-16]!"),
+        "emit_matmul must spill x1/x2 before the outer loop; asm:\n{}",
+        asm
+    );
+    assert!(
+        asm.contains("ldp     x1, x2, [sp], #16"),
+        "emit_matmul must restore x1/x2 after the outer loop; asm:\n{}",
+        asm
+    );
+}
