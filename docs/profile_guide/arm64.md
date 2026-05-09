@@ -1,6 +1,6 @@
 # `arm64` Profile — AArch64 Scalar Codegen
 
-> **Status:** M12 complete (multi-input ABI). Lowers `linear` (with or without
+> **Status:** M13 complete (add op + emit_linear ABI fix). Lowers `linear` (with or without
 > `bias=true`), `relu`, `dropout` (no-op pass-through at inference, or
 > explicit copy-loop when dropout IS model output — see §M8),
 > `softmax` (numerically stable 3-pass via libm `expf`, generalised to
@@ -928,3 +928,62 @@ clobbers scratch registers.
 The old `stp x1, x2, [sp, #-16]!` / `ldp x1, x2, [sp], #16` outer-loop spill
 block from M10 is fully eliminated. Any model containing `emit_matmul` now emits
 fewer instructions per matmul op.
+
+---
+
+## M13 ops
+
+### `emit_add` (`profiles/arm64/src/ops/add.rs`)
+
+Flat elementwise tensor addition: `dst[i] = a[i] + other[i]` over
+`total_elements = product(shape)`.
+
+**Register layout:**
+- `x9` — `a` pointer (caller-saved scratch, materialised via
+  `AbiContext::materialise_ptr`).
+- `x10` — `other` pointer (same).
+- `x11` — `dst` pointer (same).
+- `x12` — loop counter (caller-saved scratch).
+- `x13` — total_elements bound (caller-saved scratch).
+- `s0`, `s1`, `s2` — load-load-add-store scalar FP registers.
+
+**No callee-saved register usage.** No FFI save/restore (no `bl _expf`).
+
+Inner loop (per iter):
+```
+ldr     s0, [x9, x12, lsl #2]    ; load a[i]
+ldr     s1, [x10, x12, lsl #2]   ; load other[i]
+fadd    s2, s0, s1
+str     s2, [x11, x12, lsl #2]   ; store dst[i]
+add     x12, x12, #1
+```
+
+Closest existing template: `emit_mulscalar` (M10). The shell is
+identical; `emit_add` reads two input pointers (a, other) where
+`emit_mulscalar` reads one input + a pre-loaded scalar in `s4`.
+
+### M13 emit_linear ABI register save (N≥2)
+
+Pre-Task-5 fix: `emit_linear` previously used `x3`/`x4`/`x5` as
+i/j/k loop counters, which silently overlap with ABI argument
+registers at N≥2 (output_reg = `INPUT_REGS[n_inputs+1]`; at N=2
+that's `x3`, at N=3 `x4`, at N=4 `x5`). M12 missed this because all
+M12 multi-input fixtures used matmul-only; M13's `residual_add.nfl`
+is the first multi-input fixture with a `linear` op and surfaced the
+bug via SIGSEGV in the FFI test.
+
+The fix uses `stp`/`ldp` save/restore around the i-loop body: at
+N=2 push `(x3, xzr)`; at N=3 push `(x3, x4)`; at N=4 push `(x3, x4)`
+plus `(x5, xzr)`. Restore in strict LIFO order. Inner-loop body is
+unchanged.
+
+Save/restore was chosen over relocating counters to `x9`-`x15`
+because `emit_linear`'s bias paths and fused `PostOp::SoftmaxRow`
+dispatch already touch `x9`-`x16` extensively — a counter rename
+would cascade through too many sites. Trade-off: 2-4 extra
+instructions per linear op invocation at N≥2 vs a smaller, lower-
+risk diff.
+
+Cross-reference: same class of bug as Task 1's x86_64 `emit_matmul`
+fix (j-counter `%r9` collided with output_reg at N=4); resolved on
+x86_64 via register relocation (`%rbp`), on arm64 via save/restore.
