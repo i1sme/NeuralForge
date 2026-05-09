@@ -1,0 +1,17 @@
+# Residual add. M13 Group E acceptance fixture for StdOp::Add end-to-end
+# on both profiles.
+#
+# Pipeline: x -> linear[dim] -> relu -> add[skip]
+#
+# linear[dim] uses bias=false (default — no bias=true arg, so
+# params_floats = dim * dim = 16 floats for dim=4).
+# add[skip] exercises the add emitter with a second top-level input.
+#
+# ABI slot layout (declaration order):
+#   N=2: x (x0/%rdi), skip (x1/%rsi), params (x2/%rdx), out (x3/%rcx).
+
+model ResidualBlock [batch=2, dim=4]:
+    x: Tensor[batch, dim]
+    skip: Tensor[batch, dim]
+
+    x -> linear[dim] -> relu -> add[skip]

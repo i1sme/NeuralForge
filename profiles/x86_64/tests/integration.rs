@@ -1329,3 +1329,172 @@ fn too_many_inputs_returns_too_many_inputs_error() {
         Ok(_) => panic!("expected Err, got Ok"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// M13 Group E: residual_add + four_input_matmul (x86_64).
+//
+// E.2: residual_add_match_numerically — same fixture as arm64 E.1 but with
+//      x86_64-specific reference: matmul uses separate mul+add (NOT FMA) to
+//      match x86_64 mulss+addss codegen.
+// E.3: four_input_matmul_match_numerically — closes Group A (Task 1)
+//      end-to-end on x86_64. Exercises N=4 ABI mapping, matmul (the M12
+//      bug surface closed by %rbp j-counter relocation), and emit_add at
+//      N=4 in one fixture.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn residual_add_match_numerically() {
+    if !common::cc_available() {
+        eprintln!("skip: integration test requires `cc` on PATH");
+        return;
+    }
+
+    let src =
+        std::fs::read_to_string("../../tests/fixtures/residual_add.nfl").expect("fixture readable");
+    let nfl = compiler::parse(&src).expect("parse");
+    let uir = compiler::ir::build(&nfl).expect("ir::build");
+    let asm = profiles_x86_64::lower(&uir).expect("lower");
+
+    let sig = &asm.functions[0];
+    assert_eq!(sig.inputs_floats.len(), 2, "residual_add has arity 2");
+    assert_eq!(sig.inputs_floats[0], 2 * 4, "x is [2,4]=8 floats");
+    assert_eq!(sig.inputs_floats[1], 2 * 4, "skip is [2,4]=8 floats");
+    // linear[dim] with no bias=true → params = dim*dim = 16 floats (weights only).
+    assert_eq!(
+        sig.params_floats,
+        4 * 4,
+        "linear weights only, 4x4=16 floats"
+    );
+
+    let so_path = common::compile_to_so(&asm.source, "residual_add");
+    let lib = unsafe { libloading::Library::new(&so_path) }.expect("dlopen");
+
+    // SysV ABI: x (%rdi), skip (%rsi), params (%rdx), out (%rcx).
+    type ForwardFn = unsafe extern "C" fn(*const f32, *const f32, *const f32, *mut f32);
+    let forward: libloading::Symbol<ForwardFn> =
+        unsafe { lib.get(b"nfl_forward_ResidualBlock") }.expect("dlsym");
+
+    let batch = 2usize;
+    let dim = 4usize;
+    let x: Vec<f32> = (0..batch * dim).map(|i| (i as f32) * 0.1).collect();
+    let skip: Vec<f32> = (0..batch * dim).map(|i| (i as f32) * 0.07).collect();
+    // Linear weights: dim×dim row-major (no bias).
+    let weights: Vec<f32> = (0..dim * dim).map(|i| (i as f32) * 0.05).collect();
+    let mut out = vec![0.0f32; batch * dim];
+
+    unsafe {
+        forward(
+            x.as_ptr(),
+            skip.as_ptr(),
+            weights.as_ptr(),
+            out.as_mut_ptr(),
+        );
+    }
+
+    // Reference: relu(x @ W) + skip, element-wise.
+    // Matmul uses separate mul+add (NOT FMA) to match x86_64 mulss+addss.
+    // ReLU uses f32::max(0.0) to match the fused fmax in emit_matmul.
+    let mut expected = vec![0.0f32; batch * dim];
+    for b in 0..batch {
+        for j in 0..dim {
+            let mut sum = 0.0f32;
+            for kk in 0..dim {
+                sum += x[b * dim + kk] * weights[kk * dim + j];
+            }
+            let relu_out = sum.max(0.0f32);
+            expected[b * dim + j] = relu_out + skip[b * dim + j];
+        }
+    }
+
+    for (i, (got, want)) in out.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            got.to_bits() == want.to_bits(),
+            "mismatch at index {i}: got {got} ({:#010x}), want {want} ({:#010x})",
+            got.to_bits(),
+            want.to_bits()
+        );
+    }
+
+    drop(lib);
+}
+
+#[test]
+fn four_input_matmul_match_numerically() {
+    if !common::cc_available() {
+        eprintln!("skip: integration test requires `cc` on PATH");
+        return;
+    }
+
+    let src = std::fs::read_to_string("../../tests/fixtures/four_input_matmul.nfl")
+        .expect("fixture readable");
+    let nfl = compiler::parse(&src).expect("parse");
+    let uir = compiler::ir::build(&nfl).expect("ir::build");
+    // Pre-M13 this would fail: matmul at N=4 used %r9 as j-counter (collision
+    // with output pointer). M13 Task 1 relocated j-counter to %rbp.
+    let asm = profiles_x86_64::lower(&uir).expect("lower (M13 closed N=4 + matmul gap)");
+
+    let sig = &asm.functions[0];
+    assert_eq!(sig.inputs_floats.len(), 4, "four_input_matmul has arity 4");
+    let m = 4usize;
+    let k = 8usize;
+    let n = 4usize;
+    assert_eq!(sig.inputs_floats[0], m * k, "a is [4,8]=32 floats");
+    assert_eq!(sig.inputs_floats[1], k * n, "b is [8,4]=32 floats");
+    assert_eq!(sig.inputs_floats[2], m * n, "c is [4,4]=16 floats");
+    assert_eq!(sig.inputs_floats[3], m * n, "d is [4,4]=16 floats");
+    assert_eq!(
+        sig.params_floats, 0,
+        "matmul + add have no learnable params"
+    );
+
+    let so_path = common::compile_to_so(&asm.source, "four_input_matmul");
+    let lib = unsafe { libloading::Library::new(&so_path) }.expect("dlopen");
+
+    // SysV ABI: a (%rdi), b (%rsi), c (%rdx), d (%rcx), params (%r8, empty), out (%r9).
+    type ForwardFn =
+        unsafe extern "C" fn(*const f32, *const f32, *const f32, *const f32, *const f32, *mut f32);
+    let forward: libloading::Symbol<ForwardFn> =
+        unsafe { lib.get(b"nfl_forward_FourInputMatmul") }.expect("dlsym");
+
+    let a: Vec<f32> = (0..m * k).map(|i| (i as f32) * 0.1).collect();
+    let b: Vec<f32> = (0..k * n).map(|i| (i as f32) * 0.07).collect();
+    let c: Vec<f32> = (0..m * n).map(|i| (i as f32) * 0.03).collect();
+    let d: Vec<f32> = (0..m * n).map(|i| (i as f32) * 0.02).collect();
+    let params: Vec<f32> = vec![]; // matmul + add have no params
+    let mut out = vec![0.0f32; m * n];
+
+    unsafe {
+        forward(
+            a.as_ptr(),
+            b.as_ptr(),
+            c.as_ptr(),
+            d.as_ptr(),
+            params.as_ptr(),
+            out.as_mut_ptr(),
+        );
+    }
+
+    // Reference: (a @ b) + c + d.
+    // Matmul uses separate mul+add (NOT FMA) to match x86_64 mulss+addss.
+    let mut expected = vec![0.0f32; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            let mut sum = 0.0f32;
+            for kk in 0..k {
+                sum += a[i * k + kk] * b[kk * n + j];
+            }
+            expected[i * n + j] = sum + c[i * n + j] + d[i * n + j];
+        }
+    }
+
+    for (i, (got, want)) in out.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            got.to_bits() == want.to_bits(),
+            "mismatch at index {i}: got {got} ({:#010x}), want {want} ({:#010x})",
+            got.to_bits(),
+            want.to_bits()
+        );
+    }
+
+    drop(lib);
+}

@@ -1,0 +1,10 @@
+# Negative fixture: add with mismatched shapes.
+# x is [batch, 4], skip is [batch, 8] — shapes differ along last axis.
+# IR build must reject with ShapeError::AddShapeMismatch.
+# Auto-discovered by compiler/tests/negative_fixtures.rs.
+
+model BadAdd [batch=2]:
+    x: Tensor[batch, 4]
+    skip: Tensor[batch, 8]
+
+    x -> add[skip]

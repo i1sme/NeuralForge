@@ -1,0 +1,20 @@
+# Four-input matmul. M13 Group A end-to-end acceptance fixture for
+# x86_64 N=4 + matmul (the M12 bug surface closed by Task 1).
+#
+# Pipeline: a -> matmul[b] -> add[c] -> add[d]
+#
+# Exercises N=4 ABI mapping, matmul at N=4 (M12 bug surface — %rbp
+# j-counter relocation), and emit_add at N=4 in a single fixture.
+# No learnable params (matmul and add are param-free).
+#
+# ABI slot layout (declaration order, SysV AMD64):
+#   N=4: a (%rdi), b (%rsi), c (%rdx), d (%rcx),
+#        params (%r8, empty), out (%r9).
+
+model FourInputMatmul [m=4, k=8, n=4]:
+    a: Tensor[m, k]
+    b: Tensor[k, n]
+    c: Tensor[m, n]
+    d: Tensor[m, n]
+
+    a -> matmul[b] -> add[c] -> add[d]
