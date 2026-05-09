@@ -314,6 +314,13 @@ fn walk_model(
                     ));
                     mulscalar_idx += 1;
                 }
+                StdOp::Add => {
+                    // M13 placeholder: emit_add lands in Task 3 (arm64).
+                    return Err(LowerError::UnsupportedOp {
+                        op: "add (M13 codegen pending — Task 3/4)".into(),
+                        span: node.source_span,
+                    });
+                }
                 // M5c: #[non_exhaustive] on StdOp requires a wildcard
                 // arm. Future ops (e.g. Tanh, Gelu, Embedding) will
                 // route here until codegen learns them. Returning
@@ -367,6 +374,7 @@ fn classify_op(
         StdOp::Softmax => Ok(()),
         StdOp::Matmul => Ok(()),
         StdOp::MulScalar => Ok(()),
+        StdOp::Add => Ok(()), // M13: codegen lands in Task 3 (arm64)
         // M5c: #[non_exhaustive] on StdOp requires a wildcard arm.
         // Future ops are rejected here until codegen learns them.
         #[allow(unreachable_patterns)]

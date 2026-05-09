@@ -21,6 +21,10 @@ pub enum StdOp {
     /// Scalar lives in `attrs` as an `AttrValue::Float(f64)`; codegen
     /// truncates to f32 at lowering time. New in M10.
     MulScalar,
+    /// Per-element tensor addition. Two tensor operands, strict shape
+    /// equality (no broadcasting per design principle #1). Shape is
+    /// preserved. New in M13 — first A2 brick (residual connections).
+    Add,
 }
 
 pub struct Signature {
@@ -90,6 +94,12 @@ pub enum ShapeError {
         rhs_k: u64,
         transpose_b: bool,
     },
+    /// Two `add` operands have different shapes. Strict equality required —
+    /// no broadcasting per design principle #1. New in M13.
+    AddShapeMismatch {
+        expected: Shape,
+        got: Shape,
+    },
 }
 
 impl std::fmt::Display for ShapeError {
@@ -132,6 +142,11 @@ impl std::fmt::Display for ShapeError {
                 "matmul contraction dim mismatch: lhs.K={}, rhs.K={}, transpose_b={}",
                 lhs_k, rhs_k, transpose_b
             ),
+            ShapeError::AddShapeMismatch { expected, got } => write!(
+                f,
+                "add operand shape mismatch: expected {}, got {} (no broadcasting)",
+                expected, got
+            ),
         }
     }
 }
@@ -144,6 +159,7 @@ pub fn resolve(name: &str) -> Option<StdOp> {
         "softmax" => Some(StdOp::Softmax),
         "matmul" => Some(StdOp::Matmul),
         "mul_scalar" => Some(StdOp::MulScalar),
+        "add" => Some(StdOp::Add),
         _ => None,
     }
 }
@@ -199,6 +215,14 @@ pub fn signature(op: StdOp) -> Signature {
             }],
             named: &[],
         },
+        StdOp::Add => Signature {
+            positional: &[ArgSlot {
+                name: "other",
+                ty: Tensor,
+                required: true,
+            }],
+            named: &[],
+        },
     }
 }
 
@@ -236,6 +260,21 @@ pub fn infer_output_shape(
             Ok(input.clone())
         }
         StdOp::Matmul => infer_matmul_shape(inputs, attrs),
+        StdOp::Add => {
+            if inputs.len() != 2 {
+                return Err(ShapeError::WrongInputCount {
+                    expected: 2,
+                    actual: inputs.len(),
+                });
+            }
+            if inputs[0] != inputs[1] {
+                return Err(ShapeError::AddShapeMismatch {
+                    expected: inputs[0].clone(),
+                    got: inputs[1].clone(),
+                });
+            }
+            Ok(inputs[0].clone())
+        }
     }
 }
 
@@ -388,7 +427,12 @@ pub fn validate_attrs(op: StdOp, attrs: &[OpAttr]) -> Result<(), AttrError> {
             }
             Ok(())
         }
-        StdOp::Linear | StdOp::Relu | StdOp::Softmax | StdOp::Matmul | StdOp::MulScalar => Ok(()),
+        StdOp::Linear
+        | StdOp::Relu
+        | StdOp::Softmax
+        | StdOp::Matmul
+        | StdOp::MulScalar
+        | StdOp::Add => Ok(()),
     }
 }
 
@@ -412,6 +456,7 @@ impl std::fmt::Display for StdOp {
             StdOp::Softmax => "softmax",
             StdOp::Matmul => "matmul",
             StdOp::MulScalar => "mul_scalar",
+            StdOp::Add => "add",
         };
         write!(f, "{}", name)
     }

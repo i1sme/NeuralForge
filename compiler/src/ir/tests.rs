@@ -999,3 +999,49 @@ fn softmax_rank_too_low_caught_at_uir() {
         err
     );
 }
+
+// M13 Group B: StdOp::Add IR foundation tests.
+
+#[test]
+fn build_add_op_two_input_model() {
+    // M13 Group B: minimal positive case.
+    // NFL requires [param=val] generic params on model; literal Tensor
+    // dims are fine when mixed with a named param (b=2, d=4).
+    let src = "model AddDemo [b=2, d=4]:\n    x: Tensor[b, d]\n    skip: Tensor[b, d]\n\n    x -> add[skip]\n";
+    let nfl = crate::parse(src).expect("parse");
+    let uir = crate::ir::build(&nfl).expect("ir::build");
+    let model = &uir.models[0];
+    // Expect: 2 Input nodes (x, skip) + 1 Op node (add) = 3 nodes.
+    assert_eq!(model.nodes.len(), 3, "expected 3 nodes");
+    // Output node is the Add.
+    let add_node = &model.nodes[model.output];
+    use crate::ir::stdlib::StdOp;
+    use crate::ir::types::NodeKind;
+    let NodeKind::Op { op, operands, .. } = &add_node.kind else {
+        panic!("output is not an Op: {:?}", add_node.kind);
+    };
+    assert_eq!(*op, StdOp::Add, "output op must be StdOp::Add");
+    assert_eq!(operands.len(), 2, "Add must have 2 operands");
+    // Output shape preserved.
+    assert_eq!(add_node.ty.shape.0, vec![2, 4]);
+}
+
+#[test]
+fn build_add_op_rejects_shape_mismatch() {
+    // M13 Group B: strict shape equality — no broadcasting.
+    // x is [b, d1] = [2, 4], skip is [b, d2] = [2, 8] — mismatch.
+    // ShapeError::AddShapeMismatch is surfaced as BuildErrorKind::ShapeMismatch
+    // whose `detail` field carries the Display string from AddShapeMismatch.
+    let src = "model BadAdd [b=2, d1=4, d2=8]:\n    x: Tensor[b, d1]\n    skip: Tensor[b, d2]\n\n    x -> add[skip]\n";
+    let nfl = crate::parse(src).expect("parse");
+    let result = crate::ir::build(&nfl);
+    let err = result.expect_err("expected build error for mismatched shapes");
+    assert!(
+        matches!(
+            &err.kind,
+            crate::ir::error::BuildErrorKind::ShapeMismatch { detail }
+                if detail.contains("add operand shape mismatch")
+        ),
+        "expected ShapeMismatch with 'add operand shape mismatch'; got {err:?}"
+    );
+}

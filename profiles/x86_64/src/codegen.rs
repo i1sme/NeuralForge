@@ -322,6 +322,13 @@ fn walk_model(
                     ));
                     mulscalar_idx += 1;
                 }
+                StdOp::Add => {
+                    // M13 placeholder: emit_add lands in Task 4 (x86_64).
+                    return Err(LowerError::UnsupportedOp {
+                        op: "add (M13 codegen pending — Task 3/4)".into(),
+                        span: node.source_span,
+                    });
+                }
                 #[allow(unreachable_patterns)]
                 _ => {
                     return Err(LowerError::UnsupportedOp {
@@ -364,6 +371,7 @@ fn classify_op(
         StdOp::Softmax => Ok(()),
         StdOp::Matmul => Ok(()),
         StdOp::MulScalar => Ok(()),
+        StdOp::Add => Ok(()), // M13: codegen lands in Task 4 (x86_64)
         #[allow(unreachable_patterns)]
         _ => Err(LowerError::UnsupportedOp {
             op: format!("{op}"),
