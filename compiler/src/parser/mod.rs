@@ -254,23 +254,14 @@ pub(crate) fn parse_operation(p: &mut Parser) -> Result<Operation, ParseError> {
 
 use crate::ast::PipelineStmt;
 
-pub(crate) fn parse_pipeline_stmt(p: &mut Parser) -> Result<PipelineStmt, ParseError> {
-    let TokenKind::Ident(source) = p.peek_kind().clone() else {
-        return Err(p.error_expected(&["identifier"]));
-    };
-    let (line, col) = (p.peek().line, p.peek().col);
-    p.advance();
-
-    // pipeline_chain = pipeline_step , { pipeline_step } ; — at least one step.
-    // Continuation lines: the lexer suppresses INDENT/DEDENT when a line starts
-    // with `->` at deeper indent (grammar §5.2), but it still emits a Newline
-    // between the previous step and the continuation. Tolerate that Newline
-    // here so the chain is parsed as a single pipeline_stmt.
+/// `pipeline_chain = pipeline_step , { pipeline_step }`. Caller is positioned
+/// at the first `->`. Tolerates a single Newline between steps when the next
+/// line begins with `->` (continuation-line per grammar §5.2).
+fn parse_pipeline_chain(p: &mut Parser) -> Result<Vec<Operation>, ParseError> {
     let mut steps = Vec::new();
     p.consume(TokenKind::Arrow, "->")?;
     steps.push(parse_operation(p)?);
     loop {
-        // Skip a single Newline if it precedes a continuation Arrow.
         while matches!(p.peek_kind(), TokenKind::Newline)
             && matches!(p.peek_at(1), Some(TokenKind::Arrow))
         {
@@ -282,6 +273,22 @@ pub(crate) fn parse_pipeline_stmt(p: &mut Parser) -> Result<PipelineStmt, ParseE
         p.advance();
         steps.push(parse_operation(p)?);
     }
+    Ok(steps)
+}
+
+pub(crate) fn parse_pipeline_stmt(p: &mut Parser) -> Result<PipelineStmt, ParseError> {
+    let TokenKind::Ident(source) = p.peek_kind().clone() else {
+        return Err(p.error_expected(&["identifier"]));
+    };
+    let (line, col) = (p.peek().line, p.peek().col);
+    p.advance();
+
+    // pipeline_chain = pipeline_step , { pipeline_step } ; — at least one step.
+    // Continuation lines: the lexer suppresses INDENT/DEDENT when a line starts
+    // with `->` at deeper indent (grammar §5.2), but it still emits a Newline
+    // between the previous step and the continuation. parse_pipeline_chain
+    // tolerates that Newline so the chain is parsed as a single pipeline_stmt.
+    let steps = parse_pipeline_chain(p)?;
 
     Ok(PipelineStmt {
         source,
@@ -382,20 +389,69 @@ pub(crate) fn parse_model_params(p: &mut Parser) -> Result<Vec<NamedValue>, Pars
     Ok(params)
 }
 
-use crate::ast::{ModelDef, ModelStmt};
+use crate::ast::{ModelDef, ModelStmt, NamedPipelineStmt};
 
 pub(crate) fn parse_model_stmt(p: &mut Parser) -> Result<ModelStmt, ParseError> {
-    // Disambiguate: variable_decl is `Ident ":" Tensor[...]`, pipeline_stmt
-    // is `Ident "->" ...`. Look at the token after the leading identifier.
+    // Disambiguate three cases by looking at the token immediately
+    // after the leading identifier:
+    //   - `Ident "->"`               → pipeline_stmt
+    //   - `Ident ":"  Tensor … "="`  → named_pipeline_stmt
+    //   - `Ident ":"  Tensor … (Newline | Dedent)`  → variable_decl
+    //
+    // The pipeline_stmt vs colon-prefixed forms is decided by peek_at(1).
+    // The variable_decl vs named_pipeline_stmt distinction is decided by
+    // looking past the type_expr — but that requires unbounded lookahead.
+    // We sidestep this by parsing through the type_expr greedily and then
+    // branching on whether `=` follows. parse_variable_decl already
+    // consumes `Ident ":" type_expr` and stops; parse_named_pipeline_stmt
+    // requires `=` after the type_expr.
+    //
+    // Implementation: peek 1 ahead. If `:`, parse the prefix once, then
+    // dispatch on whether `=` follows (one-token lookahead on Equals).
+    // If `->`, dispatch to pipeline_stmt directly.
     let after = match p.peek_at(1) {
         Some(k) => k,
         None => return Err(p.error_expected(&["':'", "'->'"])),
     };
     match after {
-        TokenKind::Colon => Ok(ModelStmt::VariableDecl(parse_variable_decl(p)?)),
         TokenKind::Arrow => Ok(ModelStmt::Pipeline(parse_pipeline_stmt(p)?)),
+        TokenKind::Colon => parse_decl_or_named_pipeline(p),
         _ => Err(p.error_expected(&["':'", "'->'"])),
     }
+}
+
+/// Common prefix `Ident ":" type_expr` is shared between variable_decl
+/// and named_pipeline_stmt. We optimistically call `parse_variable_decl`
+/// to consume the prefix, then look one token ahead: if `=`, the prefix
+/// was actually the head of a named_pipeline_stmt and we promote the
+/// parsed `VariableDecl` into a `NamedPipelineStmt`; otherwise we keep
+/// the variable_decl as-is.
+fn parse_decl_or_named_pipeline(p: &mut Parser) -> Result<ModelStmt, ParseError> {
+    let decl = parse_variable_decl(p)?;
+
+    // One-token lookahead on `=`.
+    if !matches!(p.peek_kind(), TokenKind::Equals) {
+        return Ok(ModelStmt::VariableDecl(decl));
+    }
+    p.advance();
+
+    // Source identifier (the variable being piped from).
+    let TokenKind::Ident(source) = p.peek_kind().clone() else {
+        return Err(p.error_expected(&["identifier"]));
+    };
+    p.advance();
+
+    // Pipeline chain — at least one `-> operation`. Reuse the same
+    // continuation-line newline tolerance as parse_pipeline_stmt.
+    let steps = parse_pipeline_chain(p)?;
+
+    Ok(ModelStmt::NamedPipeline(NamedPipelineStmt {
+        binding_name: decl.name,
+        declared_ty: decl.ty,
+        source,
+        steps,
+        span: decl.span,
+    }))
 }
 
 pub(crate) fn parse_model_body(p: &mut Parser) -> Result<Vec<ModelStmt>, ParseError> {
@@ -413,9 +469,20 @@ pub(crate) fn parse_model_body(p: &mut Parser) -> Result<Vec<ModelStmt>, ParseEr
             break;
         }
         stmts.push(parse_model_stmt(p)?);
-        // After each stmt the lexer emits a Newline (or it's followed
-        // immediately by Dedent at EOF). Consume one if present.
-        p.eat(&TokenKind::Newline);
+        // Per EBNF `model_body = model_stmt , { newline , model_stmt }`,
+        // successive statements must be separated by a newline. The body
+        // also ends with a Dedent (block close); we accept that as a
+        // terminator without requiring a preceding Newline because the
+        // lexer is allowed to elide the final Newline at EOF.
+        match p.peek_kind() {
+            TokenKind::Newline => {
+                p.advance();
+            }
+            TokenKind::Dedent | TokenKind::Eof => {}
+            _ => {
+                return Err(p.error_expected(&["newline", "dedent"]));
+            }
+        }
     }
     p.consume(TokenKind::Dedent, "dedent")?;
     Ok(stmts)

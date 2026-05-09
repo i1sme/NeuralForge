@@ -154,7 +154,10 @@ use crate::ast::{ArgValue, OpArg};
 #[test]
 fn resolve_args_one_positional_integer() {
     let args = vec![OpArg::Positional(ArgValue::Integer(512))];
-    let attrs = resolve_args(StdOp::Linear, &args, &HashMap::new(), span()).unwrap();
+    let env: HashMap<String, super::types::NodeId> = HashMap::new();
+    let (operands, attrs) =
+        resolve_args(StdOp::Linear, &args, &HashMap::new(), &env, span()).unwrap();
+    assert!(operands.is_empty());
     assert_eq!(attrs.len(), 1);
     assert_eq!(attrs[0].name, "out_dim");
     assert_eq!(attrs[0].value, AttrValue::Integer(512));
@@ -163,7 +166,8 @@ fn resolve_args_one_positional_integer() {
 #[test]
 fn resolve_args_missing_required_positional() {
     let args: Vec<OpArg> = vec![]; // linear needs out_dim
-    let err = resolve_args(StdOp::Linear, &args, &HashMap::new(), span()).unwrap_err();
+    let env: HashMap<String, super::types::NodeId> = HashMap::new();
+    let err = resolve_args(StdOp::Linear, &args, &HashMap::new(), &env, span()).unwrap_err();
     assert!(matches!(
         err.kind,
         BuildErrorKind::ArgCountMismatch { .. } | BuildErrorKind::MissingRequiredArg { .. }
@@ -176,14 +180,16 @@ fn resolve_args_extra_positional() {
         OpArg::Positional(ArgValue::Integer(2)),
         OpArg::Positional(ArgValue::Integer(3)),
     ];
-    let err = resolve_args(StdOp::Linear, &args, &HashMap::new(), span()).unwrap_err();
+    let env: HashMap<String, super::types::NodeId> = HashMap::new();
+    let err = resolve_args(StdOp::Linear, &args, &HashMap::new(), &env, span()).unwrap_err();
     assert!(matches!(err.kind, BuildErrorKind::ArgCountMismatch { .. }));
 }
 
 #[test]
 fn resolve_args_type_mismatch() {
     let args = vec![OpArg::Positional(ArgValue::Float(2.5))]; // out_dim wants Integer
-    let err = resolve_args(StdOp::Linear, &args, &HashMap::new(), span()).unwrap_err();
+    let env: HashMap<String, super::types::NodeId> = HashMap::new();
+    let err = resolve_args(StdOp::Linear, &args, &HashMap::new(), &env, span()).unwrap_err();
     assert!(matches!(err.kind, BuildErrorKind::ArgTypeMismatch { .. }));
 }
 
@@ -193,7 +199,10 @@ fn resolve_args_named_only_dropout() {
         name: "rate".into(),
         value: ArgValue::Float(0.2),
     }];
-    let attrs = resolve_args(StdOp::Dropout, &args, &HashMap::new(), span()).unwrap();
+    let env: HashMap<String, super::types::NodeId> = HashMap::new();
+    let (operands, attrs) =
+        resolve_args(StdOp::Dropout, &args, &HashMap::new(), &env, span()).unwrap();
+    assert!(operands.is_empty());
     assert_eq!(attrs.len(), 1);
     assert_eq!(attrs[0].name, "rate");
     assert_eq!(attrs[0].value, AttrValue::Float(0.2));
@@ -206,7 +215,9 @@ fn resolve_args_symbol_resolves_against_params() {
     let args = vec![OpArg::Positional(ArgValue::Symbol("output".into()))];
     let mut params: HashMap<&str, u64> = HashMap::new();
     params.insert("output", 10);
-    let attrs = resolve_args(StdOp::Linear, &args, &params, span()).unwrap();
+    let env: HashMap<String, super::types::NodeId> = HashMap::new();
+    let (operands, attrs) = resolve_args(StdOp::Linear, &args, &params, &env, span()).unwrap();
+    assert!(operands.is_empty());
     assert_eq!(attrs.len(), 1);
     assert_eq!(attrs[0].name, "out_dim");
     assert_eq!(attrs[0].value, AttrValue::Integer(10));
@@ -222,7 +233,10 @@ fn resolve_args_symbol_not_in_params_stays_symbol() {
             value: ArgValue::Symbol("true".into()),
         },
     ];
-    let attrs = resolve_args(StdOp::Linear, &args, &HashMap::new(), span()).unwrap();
+    let env: HashMap<String, super::types::NodeId> = HashMap::new();
+    let (operands, attrs) =
+        resolve_args(StdOp::Linear, &args, &HashMap::new(), &env, span()).unwrap();
+    assert!(operands.is_empty());
     assert_eq!(attrs.len(), 2);
     assert_eq!(attrs[1].name, "bias");
     assert_eq!(attrs[1].value, AttrValue::Symbol("true".into()));
@@ -253,7 +267,16 @@ fn build_op_linear_produces_correct_node() {
     };
     let mut out_nodes = nodes.clone();
     let input_shape = nodes[0].ty.shape.clone();
-    let id = build_op(&op_ast, 0, &input_shape, &HashMap::new(), &mut out_nodes).unwrap();
+    let env: HashMap<String, super::types::NodeId> = HashMap::new();
+    let id = build_op(
+        &op_ast,
+        0,
+        &input_shape,
+        &HashMap::new(),
+        &env,
+        &mut out_nodes,
+    )
+    .unwrap();
     assert_eq!(id, 1);
     assert_eq!(out_nodes.len(), 2);
     let NodeKind::Op {
@@ -281,7 +304,16 @@ fn build_op_softmax_preserves_input_shape() {
     };
     let mut out_nodes = nodes.clone();
     let input_shape = nodes[0].ty.shape.clone();
-    let id = build_op(&op_ast, 0, &input_shape, &HashMap::new(), &mut out_nodes).unwrap();
+    let env: HashMap<String, super::types::NodeId> = HashMap::new();
+    let id = build_op(
+        &op_ast,
+        0,
+        &input_shape,
+        &HashMap::new(),
+        &env,
+        &mut out_nodes,
+    )
+    .unwrap();
     assert_eq!(out_nodes[id].ty.shape.0, vec![8, 2]);
 }
 
@@ -295,7 +327,16 @@ fn build_op_unknown_op_errors() {
     };
     let mut out_nodes = nodes.clone();
     let input_shape = nodes[0].ty.shape.clone();
-    let err = build_op(&op_ast, 0, &input_shape, &HashMap::new(), &mut out_nodes).unwrap_err();
+    let env: HashMap<String, super::types::NodeId> = HashMap::new();
+    let err = build_op(
+        &op_ast,
+        0,
+        &input_shape,
+        &HashMap::new(),
+        &env,
+        &mut out_nodes,
+    )
+    .unwrap_err();
     assert!(matches!(err.kind, BuildErrorKind::UnknownOp { .. }));
 }
 
@@ -411,7 +452,16 @@ fn build_op_dropout_out_of_range_errors() {
     };
     let mut out_nodes = nodes.clone();
     let input_shape = nodes[0].ty.shape.clone();
-    let err = build_op(&op_ast, 0, &input_shape, &HashMap::new(), &mut out_nodes).unwrap_err();
+    let env: HashMap<String, super::types::NodeId> = HashMap::new();
+    let err = build_op(
+        &op_ast,
+        0,
+        &input_shape,
+        &HashMap::new(),
+        &env,
+        &mut out_nodes,
+    )
+    .unwrap_err();
     assert!(matches!(err.kind, BuildErrorKind::InvalidAttrValue { .. }));
 }
 
@@ -428,7 +478,16 @@ fn build_op_dropout_in_range_succeeds() {
     };
     let mut out_nodes = nodes.clone();
     let input_shape = nodes[0].ty.shape.clone();
-    let id = build_op(&op_ast, 0, &input_shape, &HashMap::new(), &mut out_nodes).unwrap();
+    let env: HashMap<String, super::types::NodeId> = HashMap::new();
+    let id = build_op(
+        &op_ast,
+        0,
+        &input_shape,
+        &HashMap::new(),
+        &env,
+        &mut out_nodes,
+    )
+    .unwrap();
     assert_eq!(out_nodes[id].ty.shape.0, vec![8, 4]);
 }
 
@@ -645,5 +704,298 @@ fn verbose_uir_snapshot_matches_expected_format() {
     assert!(
         !rendered.contains("-> fused:"),
         "pre-pass UIR must not have fused post-ops"
+    );
+}
+
+#[test]
+fn matmul_resolves_via_stdlib() {
+    use crate::ir::stdlib::{resolve, StdOp};
+    assert_eq!(resolve("matmul"), Some(StdOp::Matmul));
+    assert_eq!(format!("{}", StdOp::Matmul), "matmul");
+}
+
+#[test]
+fn matmul_2d_shape_inference_no_transpose() {
+    use crate::ir::stdlib::{infer_output_shape, StdOp};
+    use crate::ir::types::Shape;
+    let a = Shape(vec![2, 4]);
+    let b = Shape(vec![4, 8]);
+    let out = infer_output_shape(StdOp::Matmul, &[a, b], &[]).expect("infer");
+    assert_eq!(out.0, vec![2, 8]);
+}
+
+#[test]
+fn matmul_2d_shape_inference_transpose_b() {
+    use crate::ir::stdlib::{infer_output_shape, StdOp};
+    use crate::ir::types::{AttrValue, OpAttr, Shape};
+    let a = Shape(vec![2, 4]);
+    // transpose_b=true means b is logically [N, K] → [8, 4].
+    let b = Shape(vec![8, 4]);
+    let attrs = vec![OpAttr {
+        name: "transpose_b".to_string(),
+        value: AttrValue::Symbol("true".to_string()),
+    }];
+    let out = infer_output_shape(StdOp::Matmul, &[a, b], &attrs).expect("infer");
+    assert_eq!(out.0, vec![2, 8]);
+}
+
+#[test]
+fn matmul_4d_shape_inference_no_transpose() {
+    use crate::ir::stdlib::{infer_output_shape, StdOp};
+    use crate::ir::types::Shape;
+    let a = Shape(vec![2, 4, 16, 8]);
+    let b = Shape(vec![2, 4, 8, 16]);
+    let out = infer_output_shape(StdOp::Matmul, &[a, b], &[]).expect("infer");
+    assert_eq!(out.0, vec![2, 4, 16, 16]);
+}
+
+#[test]
+fn matmul_4d_shape_inference_transpose_b() {
+    use crate::ir::stdlib::{infer_output_shape, StdOp};
+    use crate::ir::types::{AttrValue, OpAttr, Shape};
+    let a = Shape(vec![2, 4, 16, 16]);
+    // transpose_b=true → b interpreted as [..., N, K] = [2, 4, 16, 16].
+    let b = Shape(vec![2, 4, 16, 16]);
+    let attrs = vec![OpAttr {
+        name: "transpose_b".to_string(),
+        value: AttrValue::Symbol("true".to_string()),
+    }];
+    let out = infer_output_shape(StdOp::Matmul, &[a, b], &attrs).expect("infer");
+    assert_eq!(out.0, vec![2, 4, 16, 16]);
+}
+
+#[test]
+fn matmul_leading_dim_mismatch_errors() {
+    use crate::ir::stdlib::{infer_output_shape, ShapeError, StdOp};
+    use crate::ir::types::Shape;
+    let a = Shape(vec![2, 4, 16, 8]);
+    let b = Shape(vec![2, 5, 8, 16]); // heads dim 4 vs 5 — strict mismatch
+    let err = infer_output_shape(StdOp::Matmul, &[a, b], &[]).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ShapeError::LeadingDimMismatch {
+                dim_index: 1,
+                lhs: 4,
+                rhs: 5
+            }
+        ),
+        "unexpected error: {:?}",
+        err
+    );
+}
+
+#[test]
+fn matmul_inner_dim_mismatch_errors() {
+    use crate::ir::stdlib::{infer_output_shape, ShapeError, StdOp};
+    use crate::ir::types::Shape;
+    let a = Shape(vec![2, 4]);
+    let b = Shape(vec![5, 8]); // K=4 vs K=5
+    let err = infer_output_shape(StdOp::Matmul, &[a, b], &[]).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ShapeError::InnerDimMismatch {
+                lhs_k: 4,
+                rhs_k: 5,
+                transpose_b: false,
+            }
+        ),
+        "unexpected error: {:?}",
+        err
+    );
+}
+
+#[test]
+fn matmul_rank_mismatch_errors() {
+    use crate::ir::stdlib::{infer_output_shape, ShapeError, StdOp};
+    use crate::ir::types::Shape;
+    let a = Shape(vec![2, 4]);
+    let b = Shape(vec![2, 4, 4, 8]);
+    let err = infer_output_shape(StdOp::Matmul, &[a, b], &[]).unwrap_err();
+    assert!(
+        matches!(err, ShapeError::RankMismatch { lhs: 2, rhs: 4 }),
+        "unexpected error: {:?}",
+        err
+    );
+}
+
+#[test]
+fn matmul_rank_too_low_errors() {
+    use crate::ir::stdlib::{infer_output_shape, ShapeError, StdOp};
+    use crate::ir::types::Shape;
+    let a = Shape(vec![4]);
+    let b = Shape(vec![4]);
+    let err = infer_output_shape(StdOp::Matmul, &[a, b], &[]).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ShapeError::RankTooLow {
+                required: 2,
+                actual: 1
+            }
+        ),
+        "unexpected error: {:?}",
+        err
+    );
+}
+
+#[test]
+fn matmul_wrong_input_count_errors() {
+    use crate::ir::stdlib::{infer_output_shape, ShapeError, StdOp};
+    use crate::ir::types::Shape;
+    let a = Shape(vec![2, 4]);
+    let err = infer_output_shape(StdOp::Matmul, &[a], &[]).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ShapeError::WrongInputCount {
+                expected: 2,
+                actual: 1
+            }
+        ),
+        "unexpected error: {:?}",
+        err
+    );
+}
+
+#[test]
+fn transpose_b_true_recognised() {
+    use crate::ir::stdlib::matmul_transpose_b;
+    use crate::ir::types::{AttrValue, OpAttr};
+
+    let attrs_true = vec![OpAttr {
+        name: "transpose_b".to_string(),
+        value: AttrValue::Symbol("true".to_string()),
+    }];
+    let attrs_false = vec![OpAttr {
+        name: "transpose_b".to_string(),
+        value: AttrValue::Symbol("false".to_string()),
+    }];
+    let attrs_empty: Vec<OpAttr> = vec![];
+
+    assert!(matmul_transpose_b(&attrs_true));
+    assert!(!matmul_transpose_b(&attrs_false));
+    assert!(!matmul_transpose_b(&attrs_empty)); // default=false when omitted
+}
+
+#[test]
+fn mul_scalar_resolves() {
+    use crate::ir::stdlib::{resolve, StdOp};
+    assert_eq!(resolve("mul_scalar"), Some(StdOp::MulScalar));
+    assert_eq!(format!("{}", StdOp::MulScalar), "mul_scalar");
+}
+
+#[test]
+fn mul_scalar_preserves_shape() {
+    use crate::ir::stdlib::{infer_output_shape, StdOp};
+    use crate::ir::types::{AttrValue, OpAttr, Shape};
+    let input = Shape(vec![2, 4, 16, 16]);
+    let attrs = vec![OpAttr {
+        name: "value".to_string(),
+        value: AttrValue::Float(0.25),
+    }];
+    let out =
+        infer_output_shape(StdOp::MulScalar, std::slice::from_ref(&input), &attrs).expect("infer");
+    assert_eq!(out.0, input.0);
+}
+
+#[test]
+fn mul_scalar_signature_requires_float_positional() {
+    use crate::ir::stdlib::{signature, ArgType, StdOp};
+    let sig = signature(StdOp::MulScalar);
+    assert_eq!(sig.positional.len(), 1);
+    assert_eq!(sig.positional[0].name, "value");
+    assert!(matches!(sig.positional[0].ty, ArgType::Float));
+    assert!(sig.positional[0].required);
+    assert_eq!(sig.named.len(), 0);
+}
+
+#[test]
+fn named_pipeline_shape_match_succeeds() {
+    // Declared shape matches the pipeline's actual output shape.
+    let src = "\
+model M [batch=2]:
+    x: Tensor[batch, 4]
+
+    y: Tensor[batch, 4] = x -> relu
+";
+    let ast = crate::parse(src).expect("parse");
+    let uir = crate::ir::build(&ast).expect("build");
+    let model = &uir.models[0];
+    // Output is `y` (the last/only named pipeline).
+    let out_id = model.output;
+    assert_eq!(model.nodes[out_id].ty.shape.0, vec![2, 4]);
+}
+
+#[test]
+fn named_pipeline_shape_mismatch_errors() {
+    // Declared `Tensor[batch, 8]` but `relu` preserves shape, so actual
+    // is `Tensor[batch, 4]`. Build must fail with DeclaredShapeMismatch.
+    let src = "\
+model M [batch=2]:
+    x: Tensor[batch, 4]
+
+    y: Tensor[batch, 8] = x -> relu
+";
+    let ast = crate::parse(src).expect("parse");
+    let err = crate::ir::build(&ast).unwrap_err();
+    assert!(
+        matches!(
+            err.kind,
+            crate::ir::error::BuildErrorKind::DeclaredShapeMismatch { .. }
+        ),
+        "unexpected error kind: {:?}",
+        err.kind
+    );
+}
+
+#[test]
+fn tensor_arg_resolves_from_env() {
+    // The `x` positional arg in matmul[x] resolves against env to the
+    // input variable's NodeId. The resulting Op node should have two
+    // operands: input_id (the LHS, which is x itself in this self-mul
+    // example) plus the env-resolved x. They're identical here — the
+    // Op node carries operands=[x_id, x_id].
+    //
+    // With x: Tensor[batch, 4] and matmul[x, transpose_b=true]:
+    //   LHS = x = [batch, 4] (M=batch, K=4)
+    //   RHS = x = [batch, 4], transpose_b=true → contract on last dim
+    //          (rhs_K = 4) so N = batch (rhs second-to-last)
+    //   output = [M, N] = [batch, batch]
+    let src = "\
+model M [batch=2]:
+    x: Tensor[batch, 4]
+
+    y: Tensor[batch, batch] = x -> matmul[x, transpose_b=true]
+";
+    let ast = crate::parse(src).expect("parse");
+    let uir = crate::ir::build(&ast).expect("build");
+    let model = &uir.models[0];
+    let out_id = model.output;
+    let crate::ir::types::NodeKind::Op { operands, .. } = &model.nodes[out_id].kind else {
+        panic!("expected Op node, got Input");
+    };
+    assert_eq!(operands.len(), 2);
+    // Both operands point at the same NodeId — x itself, since q=k=v=x.
+    assert_eq!(operands[0], operands[1]);
+}
+
+#[test]
+fn softmax_rank_too_low_caught_at_uir() {
+    use crate::ir::stdlib::{infer_output_shape, ShapeError, StdOp};
+    use crate::ir::types::Shape;
+    let input_1d = Shape(vec![16]);
+    let err = infer_output_shape(StdOp::Softmax, &[input_1d], &[]).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ShapeError::RankTooLow {
+                required: 2,
+                actual: 1
+            }
+        ),
+        "unexpected error: {:?}",
+        err
     );
 }

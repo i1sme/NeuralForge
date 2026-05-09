@@ -25,6 +25,16 @@ use crate::ops::linear::materialise_ptr;
 /// Callee-saved s8 (per-row max) and s9 (per-row sum) are handled by the
 /// function-level prologue via `compute_callee_saved` / `d8_d9` in RegSet.
 /// The function-level prologue also saves x19-x23 when `x19_x23` is set.
+///
+/// FFI register preservation (M10): `bl _expf` is a function call which
+/// per AAPCS64 clobbers caller-saved regs x0-x18. Any downstream emitter
+/// reading x0 (input ptr), x1 (params ptr), or x2 (output ptr) via
+/// `materialise_ptr` would see garbage. Spec §[register preservation]:
+/// any emitter that clobbers an FFI register that a follow-up emitter
+/// reads must save/restore. Self-attention exercises this: matmul → soft
+/// → matmul where the second matmul reads x0 (input) and x2 (output) for
+/// `materialise_ptr`. Spill x0/x1/x2 onto the stack at entry and restore
+/// at exit so the AArch64 FFI register state survives.
 pub fn emit_softmax(
     b: u64,
     k: u64,
@@ -41,8 +51,17 @@ pub fn emit_softmax(
     ));
 
     // Materialise src/dst into callee-saved x22/x23 so they survive bl _expf.
+    // MUST happen before the FFI-reg spill below: `materialise_ptr` for any
+    // `BufferLoc::StackOffset(off)` emits `add x22, sp, #off` against the
+    // current sp. Spilling first would shift sp and corrupt the offset.
     s.push_str(&materialise_ptr("x22", src_loc));
     s.push_str(&materialise_ptr("x23", dst_loc));
+
+    // Spill FFI input regs x0 (input ptr), x1 (params ptr), x2 (output ptr)
+    // so they survive bl _expf. Restored at function exit before any
+    // downstream emitter (e.g. emit_matmul reading x0/x2 via materialise_ptr).
+    s.push_str("    stp     x0, x1, [sp, #-16]!\n");
+    s.push_str("    stp     x2, xzr, [sp, #-16]!\n");
 
     // Outer per-row loop: x19 = i.
     s.push_str("    mov     x19, #0\n");
@@ -110,6 +129,11 @@ pub fn emit_softmax(
     s.push_str("    add     x19, x19, #1\n");
     s.push_str(&format!("    b       .Lsm_i_{sid}\n"));
     s.push_str(&format!(".Lsm_i_end_{sid}:\n"));
+
+    // Restore FFI input regs x0/x1/x2 — must match the `stp` pair above.
+    // Order is reversed (LIFO): x2/xzr first (top of stack), then x0/x1.
+    s.push_str("    ldp     x2, xzr, [sp], #16\n");
+    s.push_str("    ldp     x0, x1, [sp], #16\n");
 
     s
 }

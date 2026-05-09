@@ -76,6 +76,74 @@ fn reference_linear_relu(input: &[f32; 32], params: &[f32; 8]) -> [f32; 16] {
     out
 }
 
+/// Architecture-matched x86_64 reference for SelfAttention. Uses
+/// separate `mul + add` (no FMA) to match emit_matmul x86_64's
+/// deliberate non-FMA design from M9 — intentional divergence from
+/// the arm64 reference, not a defect. `f32::exp` wraps platform libm
+/// `expf` (glibc on Linux x86_64).
+fn reference_self_attention_x86_64(
+    x: &[f32],
+    batch: usize,
+    heads: usize,
+    seq: usize,
+    head_dim: usize,
+) -> Vec<f32> {
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+    let head_stride = seq * head_dim;
+    let head_count = batch * heads;
+    let mut out = vec![0.0f32; head_count * head_stride];
+
+    let mut scores = vec![0.0f32; seq * seq];
+    let mut attn = vec![0.0f32; seq * seq];
+
+    for head in 0..head_count {
+        let x_head = &x[head * head_stride..(head + 1) * head_stride];
+        let out_head = &mut out[head * head_stride..(head + 1) * head_stride];
+
+        for i in 0..seq {
+            for j in 0..seq {
+                let mut acc = 0.0f32;
+                for k in 0..head_dim {
+                    let prod = x_head[i * head_dim + k] * x_head[j * head_dim + k];
+                    acc += prod; // separate mul + add (NOT mul_add)
+                }
+                scores[i * seq + j] = acc * scale;
+            }
+        }
+
+        for i in 0..seq {
+            let row = &scores[i * seq..(i + 1) * seq];
+            let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let mut sum = 0.0f32;
+            for j in 0..seq {
+                let e = (row[j] - max).exp();
+                attn[i * seq + j] = e;
+                sum += e;
+            }
+            for j in 0..seq {
+                attn[i * seq + j] /= sum;
+            }
+        }
+
+        for i in 0..seq {
+            for k in 0..head_dim {
+                let mut acc = 0.0f32;
+                for j in 0..seq {
+                    let prod = attn[i * seq + j] * x_head[j * head_dim + k];
+                    acc += prod;
+                }
+                out_head[i * head_dim + k] = acc;
+            }
+        }
+    }
+
+    out
+}
+
+fn deterministic_input(total: usize) -> Vec<f32> {
+    (0..total).map(|i| (i as f32).sin() * 0.1).collect()
+}
+
 // ─── Reference-validation unit tests (always run on linux-x86_64 CI) ─────────
 
 #[test]
@@ -976,4 +1044,65 @@ fn fused_softmax_xmm_spill_x86_64() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// M10 acceptance: SelfAttention end-to-end FFI.
+//
+// Bit-exact assertion against an architecture-matched x86_64 reference.
+// x86_64 emit_matmul uses `mulss + addss` (no FMA, two roundings);
+// reference uses separate `let prod = a*b; acc = acc + prod;`. libm expf
+// (glibc on Linux x86_64) is the same function called in both asm and
+// reference.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn self_attention_ffi_matches_reference() {
+    // x86_64 FFI tests are cfg-gated at the module level via
+    // #![cfg(all(target_os = "linux", target_arch = "x86_64"))] —
+    // see existing module attribute. This test runs only on the
+    // Linux x86_64 CI job.
+    if !common::cc_available() {
+        eprintln!("skip: integration test requires `cc` on PATH");
+        return;
+    }
+
+    const BATCH: usize = 2;
+    const HEADS: usize = 4;
+    const SEQ: usize = 16;
+    const HEAD_DIM: usize = 16;
+    const TOTAL: usize = BATCH * HEADS * SEQ * HEAD_DIM;
+
+    let src = std::fs::read_to_string("../../tests/fixtures/self_attention.nfl")
+        .expect("fixture readable");
+    let ast = compiler::parse(&src).expect("parse");
+    let uir = compiler::ir::build(&ast).expect("ir::build");
+    let uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
+
+    let asm = profiles_x86_64::lower(&uir).expect("lower");
+    let sig = &asm.functions[0];
+    assert_eq!(sig.input_floats, TOTAL);
+    assert_eq!(sig.output_floats, TOTAL);
+    assert_eq!(sig.params_floats, 0);
+
+    let so_path = common::compile_to_so(&asm.source, "self_attention");
+
+    let input = deterministic_input(TOTAL);
+    let mut output = vec![0.0f32; TOTAL];
+    let params: Vec<f32> = vec![0.0f32; sig.params_floats];
+
+    unsafe {
+        let lib = libloading::Library::new(&so_path).expect("dlopen");
+        let forward: libloading::Symbol<unsafe extern "C" fn(*const f32, *const f32, *mut f32)> =
+            lib.get(sig.name.as_bytes()).expect("dlsym");
+        forward(input.as_ptr(), params.as_ptr(), output.as_mut_ptr());
+    }
+
+    let reference = reference_self_attention_x86_64(&input, BATCH, HEADS, SEQ, HEAD_DIM);
+
+    assert_eq!(
+        output, reference,
+        "SelfAttention FFI output must match x86_64 reference bit-exactly"
+    );
 }

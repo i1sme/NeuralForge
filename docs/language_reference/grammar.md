@@ -1,8 +1,10 @@
-# NFL v0.1 — Language Reference
+# NFL v0.1 / v0.2 — Language Reference
 
-> **Status:** Defines NFL as of grammar v0.1 (Milestone 1).
+> **Status:** Defines NFL through grammar v0.2 (Milestone 10).
 > **Authoritative grammar:** [`language/grammar.ebnf`](../../language/grammar.ebnf).
-> **Scope:** inference-only. Training syntax (loss, optimiser) is planned for v0.2.
+> **Scope:** inference-only. Training syntax (loss, optimiser) is still planned for a
+> future grammar revision; M10's v0.2 added named pipelines (§5.4) and tensor-typed
+> positional arguments (§5.4 / §6.2) for self-attention patterns.
 
 This document is the human-facing companion to the formal EBNF grammar. Each section
 follows the same top-down order as the grammar file. Every production has at least one
@@ -227,6 +229,88 @@ The value produced by the last operation of the **last** `pipeline_stmt` in a mo
 body is implicitly the model's output. There is no explicit `output:` declaration in
 v0.1.
 
+In v0.2 (M10) the same rule applies to a `named_pipeline_stmt` — see §5.4: the last
+statement's right-hand-side bound value (rather than the original source identifier)
+is the model's output.
+
+### 5.4 Named pipelines (v0.2, M10)
+
+```ebnf
+named_pipeline_stmt = identifier , ":" , type_expr , "=" , identifier , pipeline_chain ;
+```
+
+A **named pipeline** binds a pipeline result to a named, declared-shape variable so it
+can be referenced by later statements in the same model body. Unlike `pipeline_stmt`,
+which is anonymous (its value is only addressable as the implicit model output), a
+`named_pipeline_stmt` produces an in-scope identifier that subsequent statements may
+read — exactly the affordance attention patterns need (Q/K/V projections, attention
+scores, attention output) without inventing a new construct.
+
+```nfl
+q: Tensor[8, 64]   = x -> linear[64]
+k: Tensor[8, 64]   = x -> linear[64]
+scores: Tensor[8, 8] = q -> matmul[k, transpose_b=true]
+```
+
+#### Lookahead disambiguation
+
+`variable_decl` and `named_pipeline_stmt` share the same first three tokens
+(`identifier`, `":"`, `type_expr`). The parser disambiguates with one extra token of
+lookahead **after** the closing `]` of the `type_expr`:
+
+| Next token | Production |
+|---|---|
+| `=` | `named_pipeline_stmt` |
+| anything else (typically `newline`) | `variable_decl` |
+
+If the parser sees `=`, it consumes it, expects an `identifier` (the source), and then
+parses a `pipeline_chain` exactly as in §5.1. Otherwise the statement is closed as a
+plain `variable_decl`.
+
+#### Two examples
+
+A 2D classifier with named intermediates:
+
+```nfl
+model NamedClassifier [batch=8, input=4, hidden=16, output=2]:
+    x: Tensor[batch, input]
+
+    h: Tensor[batch, hidden] = x -> linear[hidden] -> relu
+    h -> linear[output] -> softmax
+```
+
+A 4D self-attention sketch (Q/K/V over `[batch, heads, seq, dim]`):
+
+```nfl
+model SelfAttention [batch=2, heads=4, seq=8, dim=16, scale_int=4]:
+    x: Tensor[batch, heads, seq, dim]
+
+    q: Tensor[batch, heads, seq, dim] = x -> linear[dim]
+    k: Tensor[batch, heads, seq, dim] = x -> linear[dim]
+    v: Tensor[batch, heads, seq, dim] = x -> linear[dim]
+    scores: Tensor[batch, heads, seq, seq] = q -> matmul[k, transpose_b=true]
+    scaled: Tensor[batch, heads, seq, seq] = scores -> mul_scalar[scale_int]
+    attn:   Tensor[batch, heads, seq, seq] = scaled -> softmax
+    attn -> matmul[v]
+```
+
+#### Tensor-typed positional arguments
+
+Note the `matmul[k, transpose_b=true]` and `matmul[v]` operations above. The first
+positional argument is an `identifier`, not a number — the grammar already accepts
+this via `arg_value = number | identifier` (see §6.2). What is new in v0.2 is that
+the stdlib operation `matmul` declares its first positional parameter as a `Tensor`
+rather than an integer. Resolution from "identifier-token" to "the actual tensor
+node in the UIR graph" happens at UIR-build time (`ArgType::Tensor` resolution); the
+grammar itself is unchanged.
+
+#### Output-rule generalisation
+
+The §5.3 implicit-output rule generalises naturally: the last statement of a model
+body is the implicit output regardless of whether it is a `pipeline_stmt` (anonymous,
+output is the chain's terminal value) or a `named_pipeline_stmt` (output is the
+right-hand-side bound value). A model body may freely intermix the two forms.
+
 ---
 
 ## 6. Operations and arguments
@@ -277,6 +361,11 @@ must always come before named ones.
 Booleans-as-keywords (`true`, `false`) are just identifiers in v0.1; the stdlib decides
 whether a given operation accepts them.
 
+In v0.2 (M10) `arg_value = identifier` also covers tensor-typed positional arguments —
+e.g. the second matmul operand in `matmul[k, transpose_b=true]`. The grammar is
+unchanged; the `ArgType::Tensor` machinery in the UIR builder resolves the identifier
+to the matching `NodeId` at build time. See §5.4 for the language-level perspective.
+
 ---
 
 ## 7. Implicit semantics (NOT enforced by the grammar)
@@ -300,9 +389,10 @@ These constructs are **not** part of NFL v0.1 and will not parse:
 
 - **Training syntax**: no loss specification, no optimiser declaration, no training-loop
   hints. Planned for v0.2 as a coherent group.
-- **Multi-output models**: a model body has effectively one pipeline (any further
-  pipelines are syntactically permitted by the grammar but the implicit-output
-  convention only treats the last one as the output).
+- **Multi-output models**: a model body has effectively one output — the implicit-
+  output convention only treats the **last** statement (whether `pipeline_stmt` or
+  `named_pipeline_stmt`) as the model's output. Earlier `named_pipeline_stmt` bindings
+  are in scope for *internal* references but are not externally exposed.
 - **Custom operations**: there is no syntax for declaring user-defined operations in
   NFL itself. v0.1 operations must come from the stdlib (M2+).
 - **Control flow**: no conditionals, no loops at the NFL level.

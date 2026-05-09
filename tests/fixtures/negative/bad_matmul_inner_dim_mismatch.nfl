@@ -1,0 +1,8 @@
+# Matmul contraction-dim disagreement: a is [batch, 4], b is [3, 8].
+# K=4 vs K=3. Rejected with ShapeError::InnerDimMismatch.
+
+model M [batch=2]:
+    a: Tensor[batch, 4]
+    b: Tensor[3, 8]
+
+    out: Tensor[batch, 8] = a -> matmul[b]

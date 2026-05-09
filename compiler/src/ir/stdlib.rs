@@ -13,6 +13,14 @@ pub enum StdOp {
     Relu,
     Dropout,
     Softmax,
+    /// Matrix multiplication, rank ≥ 2 inputs. With `transpose_b=true`
+    /// (named arg), the second operand's last two dims are interpreted
+    /// transposed. New in M10.
+    Matmul,
+    /// Per-element multiply by a scalar literal. Shape is preserved.
+    /// Scalar lives in `attrs` as an `AttrValue::Float(f64)`; codegen
+    /// truncates to f32 at lowering time. New in M10.
+    MulScalar,
 }
 
 pub struct Signature {
@@ -31,14 +39,19 @@ pub enum ArgType {
     Integer,
     Float,
     Symbol,
+    /// A tensor-by-name argument. The arg appears in NFL source as an
+    /// identifier (e.g. `matmul[x]` where `x` is a previously-declared
+    /// variable name). The builder resolves it against the variable
+    /// environment to a `NodeId`. Resolved IDs go into the op node's
+    /// `operands` field, NOT `attrs`. New in M10.
+    Tensor,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShapeError {
     /// Defensive guard. Emitted by `single_input` if a multi-operand op
-    /// reaches single-input shape inference. No M3 op constructs >1 operand,
-    /// so no test fires this path; the constructor exists so M5+ multi-input
-    /// ops (add/concat) cannot silently misroute through single-input helpers.
+    /// reaches single-input shape inference. M5+ multi-input ops (Matmul)
+    /// cannot silently misroute through single-input helpers.
     WrongInputCount {
         expected: usize,
         actual: usize,
@@ -50,6 +63,32 @@ pub enum ShapeError {
     },
     MissingAttr {
         name: &'static str,
+    },
+    /// Two operands have different ranks (e.g. `[2, 4] @ [2, 4, 8, 8]`).
+    RankMismatch {
+        lhs: usize,
+        rhs: usize,
+    },
+    /// Operand rank is below the minimum required by the op
+    /// (e.g. 1D input to Matmul, which requires rank ≥ 2).
+    RankTooLow {
+        required: usize,
+        actual: usize,
+    },
+    /// Two operands' leading dims (indices `0..rank-2`) disagree.
+    /// Strict-equal — no broadcasting per design principle #1.
+    LeadingDimMismatch {
+        dim_index: usize,
+        lhs: u64,
+        rhs: u64,
+    },
+    /// Matmul contraction dim disagreement.
+    /// `lhs_k` is `a.shape[rank-1]`. `rhs_k` is `b.shape[rank-1]` if
+    /// `transpose_b=true`, otherwise `b.shape[rank-2]`.
+    InnerDimMismatch {
+        lhs_k: u64,
+        rhs_k: u64,
+        transpose_b: bool,
     },
 }
 
@@ -65,6 +104,34 @@ impl std::fmt::Display for ShapeError {
                 dim_index: _,
             } => write!(f, "expected rank {}, got {}", expected, actual),
             ShapeError::MissingAttr { name } => write!(f, "missing required attribute: '{}'", name),
+            ShapeError::RankMismatch { lhs, rhs } => write!(
+                f,
+                "operand rank mismatch: lhs has rank {}, rhs has rank {}",
+                lhs, rhs
+            ),
+            ShapeError::RankTooLow { required, actual } => write!(
+                f,
+                "operand rank too low: requires {}, got {}",
+                required, actual
+            ),
+            ShapeError::LeadingDimMismatch {
+                dim_index,
+                lhs,
+                rhs,
+            } => write!(
+                f,
+                "leading dim mismatch at index {}: lhs={}, rhs={} (no broadcasting)",
+                dim_index, lhs, rhs
+            ),
+            ShapeError::InnerDimMismatch {
+                lhs_k,
+                rhs_k,
+                transpose_b,
+            } => write!(
+                f,
+                "matmul contraction dim mismatch: lhs.K={}, rhs.K={}, transpose_b={}",
+                lhs_k, rhs_k, transpose_b
+            ),
         }
     }
 }
@@ -75,6 +142,8 @@ pub fn resolve(name: &str) -> Option<StdOp> {
         "relu" => Some(StdOp::Relu),
         "dropout" => Some(StdOp::Dropout),
         "softmax" => Some(StdOp::Softmax),
+        "matmul" => Some(StdOp::Matmul),
+        "mul_scalar" => Some(StdOp::MulScalar),
         _ => None,
     }
 }
@@ -110,6 +179,26 @@ pub fn signature(op: StdOp) -> Signature {
             positional: &[],
             named: &[],
         },
+        StdOp::Matmul => Signature {
+            positional: &[ArgSlot {
+                name: "other",
+                ty: Tensor,
+                required: true,
+            }],
+            named: &[ArgSlot {
+                name: "transpose_b",
+                ty: Symbol,
+                required: false,
+            }],
+        },
+        StdOp::MulScalar => Signature {
+            positional: &[ArgSlot {
+                name: "value",
+                ty: Float,
+                required: true,
+            }],
+            named: &[],
+        },
     }
 }
 
@@ -125,11 +214,99 @@ pub fn infer_output_shape(
             let out_dim = get_int_attr(attrs, "out_dim")?;
             Ok(Shape(vec![input.0[0], out_dim]))
         }
-        StdOp::Relu | StdOp::Softmax | StdOp::Dropout => {
+        StdOp::Relu | StdOp::Dropout | StdOp::MulScalar => {
             let input = single_input(inputs)?;
             Ok(input.clone())
         }
+        StdOp::Softmax => {
+            let input = single_input(inputs)?;
+            // M10: tightened to rank ≥ 2 (was: any rank). Fail-fast at
+            // UIR rather than fail-late at codegen — both arm64 and
+            // x86_64 walk_model dispatch already assume rank ≥ 2 to
+            // compute (b, k) for the emitter (b = product of leading
+            // dims, k = last dim). 1D softmax is mathematically valid
+            // but excluded by project convention; all NFL practical
+            // use cases are 2D / 4D batch-first.
+            if input.rank() < 2 {
+                return Err(ShapeError::RankTooLow {
+                    required: 2,
+                    actual: input.rank(),
+                });
+            }
+            Ok(input.clone())
+        }
+        StdOp::Matmul => infer_matmul_shape(inputs, attrs),
     }
+}
+
+/// Matmul shape inference: rank ≥ 2 inputs of equal rank, leading dims
+/// strict-equal (no broadcasting), inner-dim contraction matches.
+/// Output: leading dims of `a` followed by `[M, N]` where M = a's
+/// second-to-last and N is the non-contracted dim of `b`.
+fn infer_matmul_shape(inputs: &[Shape], attrs: &[OpAttr]) -> Result<Shape, ShapeError> {
+    // Step 1: input count.
+    if inputs.len() != 2 {
+        return Err(ShapeError::WrongInputCount {
+            expected: 2,
+            actual: inputs.len(),
+        });
+    }
+    let a = &inputs[0];
+    let b = &inputs[1];
+
+    // Step 2: ranks match.
+    if a.rank() != b.rank() {
+        return Err(ShapeError::RankMismatch {
+            lhs: a.rank(),
+            rhs: b.rank(),
+        });
+    }
+
+    // Step 3: rank ≥ 2.
+    if a.rank() < 2 {
+        return Err(ShapeError::RankTooLow {
+            required: 2,
+            actual: a.rank(),
+        });
+    }
+    let r = a.rank();
+
+    // Step 4: leading dims (indices 0..r-2) match exactly.
+    for i in 0..(r - 2) {
+        if a.0[i] != b.0[i] {
+            return Err(ShapeError::LeadingDimMismatch {
+                dim_index: i,
+                lhs: a.0[i],
+                rhs: b.0[i],
+            });
+        }
+    }
+
+    // Step 5: inner contraction.
+    let transpose_b = matmul_transpose_b(attrs);
+    let m = a.0[r - 2];
+    let lhs_k = a.0[r - 1];
+    let (rhs_k, n) = if transpose_b {
+        // b shape [..., N, K] — contract on b's last dim.
+        (b.0[r - 1], b.0[r - 2])
+    } else {
+        // b shape [..., K, N] — contract on b's second-to-last dim.
+        (b.0[r - 2], b.0[r - 1])
+    };
+    if lhs_k != rhs_k {
+        return Err(ShapeError::InnerDimMismatch {
+            lhs_k,
+            rhs_k,
+            transpose_b,
+        });
+    }
+
+    // Output: leading dims + [M, N].
+    let mut out = Vec::with_capacity(r);
+    out.extend_from_slice(&a.0[..(r - 2)]);
+    out.push(m);
+    out.push(n);
+    Ok(Shape(out))
 }
 
 fn single_input(inputs: &[Shape]) -> Result<&Shape, ShapeError> {
@@ -211,7 +388,7 @@ pub fn validate_attrs(op: StdOp, attrs: &[OpAttr]) -> Result<(), AttrError> {
             }
             Ok(())
         }
-        StdOp::Linear | StdOp::Relu | StdOp::Softmax => Ok(()),
+        StdOp::Linear | StdOp::Relu | StdOp::Softmax | StdOp::Matmul | StdOp::MulScalar => Ok(()),
     }
 }
 
@@ -233,6 +410,8 @@ impl std::fmt::Display for StdOp {
             StdOp::Relu => "relu",
             StdOp::Dropout => "dropout",
             StdOp::Softmax => "softmax",
+            StdOp::Matmul => "matmul",
+            StdOp::MulScalar => "mul_scalar",
         };
         write!(f, "{}", name)
     }
@@ -246,4 +425,15 @@ pub fn linear_has_bias(attrs: &[OpAttr]) -> bool {
     attrs
         .iter()
         .any(|a| a.name == "bias" && matches!(&a.value, AttrValue::Symbol(s) if s == "true"))
+}
+
+/// True iff the op's attribute list includes `transpose_b=true`.
+///
+/// Used by Matmul shape inference and by both arm64 and x86_64 codegen
+/// to choose the inner-loop addressing pattern for the B operand.
+/// New in M10.
+pub fn matmul_transpose_b(attrs: &[OpAttr]) -> bool {
+    attrs
+        .iter()
+        .any(|a| a.name == "transpose_b" && matches!(&a.value, AttrValue::Symbol(s) if s == "true"))
 }

@@ -61,14 +61,17 @@ NeuralForge/
 │   │   │   ├── ops/
 │   │   │   │   ├── mod.rs        ← per-op submodule entry + re-exports
 │   │   │   │   ├── linear.rs     ← emit_linear (matmul ± bias) + materialise_ptr
+│   │   │   │   ├── matmul.rs     ← emit_matmul (rank ≥ 2, optional transpose_b, M10)
+│   │   │   │   ├── mulscalar.rs  ← emit_mulscalar (scalar pre-load + flat loop, M10)
 │   │   │   │   ├── relu.rs       ← emit_relu (elementwise copy-clamp)
 │   │   │   │   ├── softmax.rs    ← emit_softmax (3-pass + bl _expf)
 │   │   │   │   └── dropout.rs    ← marker (no emitter — aliasing only)
 │   │   │   └── tests.rs    ← unit tests on asm shape + analyzers
 │   │   └── tests/
-│   │       ├── integration.rs    ← end-to-end FFI tests for all 5 M3 fixtures + M4a
+│   │       ├── integration.rs    ← end-to-end FFI tests for all 5 M3 fixtures + M4a + M10 self_attention
 │   │       └── common/mod.rs     ← cc + tempdir helpers
 │   └── x86_64/             ← Linux ELF scalar SSE2 codegen profile, M9
+│       └── src/ops/        ← linear.rs, matmul.rs (M10), mulscalar.rs (M10), relu.rs, softmax.rs, dropout.rs
 │
 ├── language/
 │   ├── grammar.ebnf        ← formal NFL grammar
@@ -161,9 +164,15 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-**Milestone 9 complete. 284 tests passing on macOS arm64 (~300 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean
+**Milestone 10 complete. 331 tests passing on macOS arm64 (~347 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean
 (`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo fmt --all -- --check`, `cargo test --workspace`).
+
+M10 closed the first leg of Axis 2: NFL grammar v0.2 (`named_pipeline_stmt` +
+tensor-typed positional args) + new `StdOp::Matmul` / `StdOp::MulScalar` +
+rank-≥-2 softmax dispatch lower a complete self-attention pattern (Q/Kᵀ
+matmul, scale, softmax, attn·V matmul) end-to-end on both profiles, bit-exact
+per-profile.
 
 Strategic direction: see `PROJECT_SPEC.md` §"Strategic Roadmap" — three open
 axes (codegen breadth, modelling depth, deployment reach) presented as a

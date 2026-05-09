@@ -1,0 +1,21 @@
+# Single-input self-attention (q = k = v = x). Mathematically degenerate
+# (no learnable Q/K/V projections), but exercises every M10 primitive:
+# 4D matmul, 4D matmul with transpose_b, scalar multiply, last-axis
+# softmax over a 4D tensor.
+#
+# Shape derivation:
+#   x          → [2, 4, 16, 16]
+#   x @ x.T    → leading [2, 4], inner [16,16] @ [16,16].T = [16,16]
+#                output [2, 4, 16, 16]
+#   * 0.25     → shape preserved (1/sqrt(head_dim) = 1/sqrt(16))
+#   softmax    → shape preserved (last-axis softmax over seq=16)
+#   attn @ x   → leading [2, 4], inner [16,16] @ [16,16] = [16,16]
+#                output [2, 4, 16, 16]
+
+model SelfAttention [batch=2, heads=4, seq=16, head_dim=16]:
+    x: Tensor[batch, heads, seq, head_dim]
+
+    scores: Tensor[batch, heads, seq, seq] = x -> matmul[x, transpose_b=true]
+    scaled: Tensor[batch, heads, seq, seq] = scores -> mul_scalar[0.25]
+    attn:   Tensor[batch, heads, seq, seq] = scaled -> softmax
+    out:    Tensor[batch, heads, seq, head_dim] = attn -> matmul[x]

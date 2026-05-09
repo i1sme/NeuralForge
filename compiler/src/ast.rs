@@ -30,6 +30,7 @@ pub struct NamedValue {
 pub enum ModelStmt {
     VariableDecl(VariableDecl),
     Pipeline(PipelineStmt),
+    NamedPipeline(NamedPipelineStmt),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -56,6 +57,22 @@ pub enum Dim {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PipelineStmt {
     pub source: String,
+    pub steps: Vec<Operation>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NamedPipelineStmt {
+    /// The bound name on the LHS, e.g. `scores` in
+    /// `scores: Tensor[...] = x -> matmul[x, transpose_b=true]`.
+    pub binding_name: String,
+    /// The declared type of the bound name. The builder verifies the
+    /// pipeline's actual output shape matches this declared shape, raising
+    /// `BuildErrorKind::DeclaredShapeMismatch` on disagreement.
+    pub declared_ty: TypeExpr,
+    /// The pipeline source identifier (the `x` after `=`).
+    pub source: String,
+    /// One or more chained operations, identical in shape to PipelineStmt.steps.
     pub steps: Vec<Operation>,
     pub span: Span,
 }

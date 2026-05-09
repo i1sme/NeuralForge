@@ -314,6 +314,33 @@ fn print_stmt(s: &compiler::ModelStmt, depth: usize) {
             }
             println!();
         }
+        compiler::ModelStmt::NamedPipeline(np) => {
+            print!(
+                "{pad}named_pipeline {} : Tensor[{}] = {}",
+                np.binding_name,
+                format_dims(&np.declared_ty.dims),
+                np.source
+            );
+            for op in &np.steps {
+                print!(" -> {}", op.name);
+                if !op.args.is_empty() {
+                    print!("[");
+                    for (i, a) in op.args.iter().enumerate() {
+                        if i > 0 {
+                            print!(", ");
+                        }
+                        match a {
+                            compiler::OpArg::Positional(v) => print!("{}", format_arg(v)),
+                            compiler::OpArg::Named { name, value } => {
+                                print!("{name}={}", format_arg(value))
+                            }
+                        }
+                    }
+                    print!("]");
+                }
+            }
+            println!();
+        }
     }
 }
 

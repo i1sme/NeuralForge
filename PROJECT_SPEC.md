@@ -65,8 +65,8 @@ Profiles translate UIR into assembly for a specific hardware target.
 Initial target profiles:
 | Profile     | Architecture       | Key capability              |
 |-------------|--------------------|-----------------------------|
-| `arm64`     | Apple Silicon / AArch64 POSIX | Scalar AArch64 assembly: linear (± bias), relu, dropout (no-op pass-through), softmax (libm `expf`). All 5 M3 fixtures lower end-to-end (M4a + M4b). NEON / SVE / AMX in later slices. |
-| `x86_64`    | Intel / AMD (Linux ELF) | Linux ELF scalar SSE2: linear (± bias), relu, dropout, softmax (libm expf via PLT). Full op-parity with arm64 minus SIMD/AVX. macOS x86_64 (Mach-O) and SIMD remain open. |
+| `arm64`     | Apple Silicon / AArch64 POSIX | Scalar AArch64 assembly: linear (± bias), relu, dropout (no-op pass-through), softmax (libm `expf`, rank ≥ 2 since M10), matmul (rank ≥ 2, optional `transpose_b`, since M10), mul_scalar (since M10). All 5 M3 fixtures + the M10 self_attention fixture lower end-to-end. NEON / SVE / AMX in later slices. |
+| `x86_64`    | Intel / AMD (Linux ELF) | Linux ELF scalar SSE2: linear (± bias), relu, dropout, softmax (libm expf via PLT, rank ≥ 2 since M10), matmul (rank ≥ 2, optional `transpose_b`, since M10 — `mulss + addss`, no FMA), mul_scalar (since M10). Full op-parity with arm64 minus SIMD/AVX. macOS x86_64 (Mach-O) and SIMD remain open. |
 | `riscv64`   | RISC-V             | RVV vector extension (future) |
 
 A profile is a self-contained module. Adding support for a new architecture means writing a new profile — the language and compiler core remain unchanged.
@@ -160,6 +160,7 @@ NeuralForge is designed so that LLMs can write, read, and reason about NFL code 
 | 7 | Shared 3-step rebuild helper extraction (complete) | New `compiler/src/passes/rewriter.rs` (`pub(crate) struct RewritePlan` + `pub(crate) fn rewrite_model`); plan-as-data API (three HashMaps + one constructor that precomputes `consumer_count`); migration of three existing passes (`EliminateDropout`, `FuseLinearRelu`, `FuseLinearSoftmax`) onto the shared helper, each pass body shrinks ~60% (70-100 → 26-39 lines); closes M6 holistic-review Finding #1 (three-strikes-then-refactor trigger fired in M6, deferred to M7); §8 invariant 6 unit test added (closes M6 Finding #7); atomic-task-pack convention demonstrated via 4 sequential clean commits |
 | 8 | ARM64 codegen hardening + viewer v0.1 (complete) | Two arm64 codegen bugs closed: dropout-as-output now emits an explicit copy-loop via new `ops/dropout.rs::emit_dropout_copy` (BufferLoc::OutputReg branch in walk_model::Dropout); dim-immediate encoding routed uniformly through `asm::emit_imm32` across 17 sites (12 cmp + 5 mov), with hoist-outside-loop (Group A: relu, dropout-copy, matmul body) and re-materialise-at-loop-top (Group B: standalone softmax, fused RowWise tail) placement strategies; new fixtures `large_classifier_{k,n}.nfl` (k=8192 / out=5120) prove > 4095 dim now compiles. Viewer v0.1: `compiler::ir::types::{VerboseUir, VerboseModel, VerboseNode}` newtype wrappers + `Uir::calls_extern_math` / `UirModel::calls_extern_math` predicate; new `nflc parse --uir-verbose` flag (mutually exclusive with `--uir`) renders annotated UIR with top-level + per-model summary, fused post-ops on separate indented lines. `docs/language_reference/uir.md` gets new "Viewing UIR" section. Test count: 208 → 223. |
 | 9 | x86_64 Linux ELF profile + profile-api contract (complete) | x86_64 scalar SSE2 codegen with full op-parity with arm64 (linear ± bias, relu, fused relu, softmax_row, dropout alias). `Profile` trait in new `profile-api` crate abstracts the profile contract (`lower` + `sym_prefix`); both `profiles-arm64` and `profiles-x86_64` implement it. SysV AMD64 ABI compliance: prologue/epilogue saves callee-saved registers conditionally (`%rbp` always; `%rbx/%r12–%r15` when `calls_extern_math()`); matmul body uses only caller-saved registers (`%rdi/%rsi/%rdx` as k-counter/scratch/bias-base). `docs/profile_guide/x86_64.md` added. Test count: 223 → 284. |
+| 10 | NFL v0.2 self-attention + 4D codegen (complete) | NFL grammar v0.2 — new `named_pipeline_stmt = identifier , ":" , type_expr , "=" , identifier , pipeline_chain` production with one-token lookahead disambiguation from `variable_decl`. UIR: `ArgType::Tensor` + `resolve_args` cascade through `build_op` / `build_model`. Two new stdlib ops: `StdOp::Matmul` (rank ≥ 2 inputs, optional `transpose_b`, four new `ShapeError` variants) and `StdOp::MulScalar` (per-element scalar multiply, shape-preserving). New `BuildErrorKind::DeclaredShapeMismatch` for the named-pipeline declared-vs-inferred shape check. `Softmax` rank tightened to ≥ 2 (any-rank, last-axis). Both profiles ship `emit_matmul` (outer-loop wrapper over `leading_count`; arm64 FMA inner triple-loop, x86_64 `mulss + addss` — intentional ISA divergence) + `emit_mulscalar` (scalar pre-load + flat in-place loop) + softmax dispatch generalised to `b = product(shape[..-1]), k = shape[-1]`. arm64's `emit_softmax` spills `x0/x1/x2` via `stp/ldp` around `bl _expf` and `emit_matmul` spills `x1/x2` via `stp/ldp` around the outer loop; x86_64's `emit_softmax` spills `%rdi/%rsi/%rdx` via `pushq`/`popq` and `emit_matmul` spills `%rdi/%rsi/%rdx` via `movq` to/from `%xmm6/%xmm7/%xmm8`. End-to-end self-attention fixture compiles + runs bit-exact per-profile via FFI on both profiles. Test count: 284 → 331. |
 
 ---
 
@@ -172,7 +173,7 @@ its own trigger condition and lives under "Open Questions" below.
 
 ```
 x86_64 profile [M9 complete] → MACHO_SYM_PREFIX rename [closed — abstracted as Profile::sym_prefix() in M9]
-NFL v0.2 grammar → attention ops → profile-level viewer annotations
+NFL v0.2 self-attention [complete in M10] → multi-input grammar (Q/K/V) → transformer block (residual + LayerNorm + FFN) → profile-level viewer annotations
 bare-metal expf → drop libm dependency
 ```
 
@@ -182,11 +183,14 @@ bare-metal expf → drop libm dependency
   milestone. M9 ships scalar Linux ELF; SIMD/AVX and macOS x86_64 remain as
   possible follow-ups. `MACHO_SYM_PREFIX rename` closed — abstracted as
   `Profile::sym_prefix()` in M9.
-- **Axis 2 — modelling depth.** NFL v0.2 grammar unblocks attention patterns
-  (Q/K/V projections, scaled dot-product, axis-N softmax). Profile-level viewer
-  annotations (per-node footprint, stack frame, callee-saved set) follow once a
-  non-trivial attention model lowers end-to-end, and double as a profile-agnostic
-  split validation.
+- **Axis 2 — modelling depth.** M10 closed the first leg: NFL v0.2's
+  `named_pipeline_stmt` + tensor-typed positional args + new `StdOp::Matmul`
+  / `StdOp::MulScalar` + rank-≥-2 softmax dispatch lower a complete
+  self-attention pattern (Q/Kᵀ matmul, scale, softmax, attn·V matmul) end-to-end
+  on both profiles. Open follow-ups along this axis: multi-input grammar
+  (separate `q`/`k`/`v` inputs to a single model), transformer block (residual
+  + LayerNorm + FFN), and profile-level viewer annotations (per-node footprint,
+  stack frame, callee-saved set).
 - **Axis 3 — deployment reach.** Replacing the `bl _expf` libm call with a
   Taylor-series `expf` removes the only runtime dependency, unlocking bare-metal
   targets.

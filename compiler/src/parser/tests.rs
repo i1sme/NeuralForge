@@ -249,3 +249,187 @@ fn library_parse_round_trip_minimal() {
     let nfl = crate::parse(src).expect("must parse");
     assert_eq!(nfl.models[0].name, "X");
 }
+
+#[test]
+fn parse_named_pipeline_stmt_2d() {
+    let src = "\
+model M [batch=2]:
+    x: Tensor[batch, 4]
+
+    y: Tensor[batch, 4] = x -> relu
+";
+    let ast = crate::parse(src).expect("parse");
+    let model = &ast.models[0];
+    assert_eq!(model.body.len(), 2);
+    let np = match &model.body[1] {
+        crate::ast::ModelStmt::NamedPipeline(np) => np,
+        other => panic!("expected NamedPipeline, got {:?}", other),
+    };
+    assert_eq!(np.binding_name, "y");
+    assert_eq!(np.source, "x");
+    assert_eq!(np.steps.len(), 1);
+    assert_eq!(np.steps[0].name, "relu");
+    assert_eq!(np.declared_ty.dims.len(), 2);
+}
+
+#[test]
+fn parse_named_pipeline_stmt_4d() {
+    let src = "\
+model M [batch=2, heads=4, seq=16, head_dim=16]:
+    x: Tensor[batch, heads, seq, head_dim]
+
+    scores: Tensor[batch, heads, seq, seq] = x -> matmul[x, transpose_b=true]
+";
+    let ast = crate::parse(src).expect("parse");
+    let np = match &ast.models[0].body[1] {
+        crate::ast::ModelStmt::NamedPipeline(np) => np,
+        other => panic!("expected NamedPipeline, got {:?}", other),
+    };
+    assert_eq!(np.binding_name, "scores");
+    assert_eq!(np.declared_ty.dims.len(), 4);
+    assert_eq!(np.source, "x");
+    assert_eq!(np.steps.len(), 1);
+    assert_eq!(np.steps[0].name, "matmul");
+    // First positional arg is the tensor identifier `x`.
+    let crate::ast::OpArg::Positional(crate::ast::ArgValue::Symbol(s)) = &np.steps[0].args[0]
+    else {
+        panic!("expected positional Symbol arg");
+    };
+    assert_eq!(s, "x");
+    // Second arg is named `transpose_b=true`.
+    let crate::ast::OpArg::Named { name, value } = &np.steps[0].args[1] else {
+        panic!("expected named arg");
+    };
+    assert_eq!(name, "transpose_b");
+    let crate::ast::ArgValue::Symbol(v) = value else {
+        panic!("expected Symbol value");
+    };
+    assert_eq!(v, "true");
+}
+
+#[test]
+fn parse_named_pipeline_with_tensor_op_arg() {
+    // Just confirms the parser accepts an identifier as a positional arg
+    // (the existing `arg_value = number | identifier` rule). The semantic
+    // tensor-name resolution lands in Group 2.
+    let src = "\
+model M [batch=2]:
+    x: Tensor[batch, 4]
+
+    y: Tensor[batch, 4] = x -> matmul[x]
+";
+    let ast = crate::parse(src).expect("parse");
+    let np = match &ast.models[0].body[1] {
+        crate::ast::ModelStmt::NamedPipeline(np) => np,
+        _ => panic!(),
+    };
+    assert_eq!(np.steps[0].name, "matmul");
+    assert_eq!(np.steps[0].args.len(), 1);
+    let crate::ast::OpArg::Positional(crate::ast::ArgValue::Symbol(s)) = &np.steps[0].args[0]
+    else {
+        panic!("expected positional Symbol arg");
+    };
+    assert_eq!(s, "x");
+}
+
+#[test]
+fn parse_lookahead_distinguishes_variable_decl_from_named_pipeline() {
+    // Both forms share the prefix `Ident ":" Tensor[...]`. The presence
+    // of `=` after the type expression is the sole disambiguator.
+    let src_var = "\
+model M [batch=2]:
+    x: Tensor[batch, 4]
+
+    x -> relu
+";
+    let src_np = "\
+model M [batch=2]:
+    x: Tensor[batch, 4]
+
+    y: Tensor[batch, 4] = x -> relu
+";
+    let ast_var = crate::parse(src_var).expect("var parse");
+    let ast_np = crate::parse(src_np).expect("np parse");
+    // First stmt is VariableDecl in both.
+    assert!(matches!(
+        ast_var.models[0].body[0],
+        crate::ast::ModelStmt::VariableDecl(_)
+    ));
+    assert!(matches!(
+        ast_np.models[0].body[0],
+        crate::ast::ModelStmt::VariableDecl(_)
+    ));
+    // Second stmt: Pipeline in src_var, NamedPipeline in src_np.
+    assert!(matches!(
+        ast_var.models[0].body[1],
+        crate::ast::ModelStmt::Pipeline(_)
+    ));
+    assert!(matches!(
+        ast_np.models[0].body[1],
+        crate::ast::ModelStmt::NamedPipeline(_)
+    ));
+}
+
+#[test]
+fn parse_named_pipeline_missing_eq_after_type() {
+    // `y: Tensor[...] x -> relu` (missing `=`) should fail at the parser
+    // level. After the type_expr, the lookahead branch sees neither
+    // `Equals` (named pipeline) nor end-of-stmt (variable_decl), so we
+    // get a variable_decl, then the followup `x` becomes a fresh stmt
+    // start, then we see `-> relu` with no leading identifier — error.
+    //
+    // The exact error wording depends on which branch hits the failure
+    // first. We don't pin it; we only require that parse() returns Err.
+    let src = "\
+model M [batch=2]:
+    x: Tensor[batch, 4]
+
+    y: Tensor[batch, 4] x -> relu
+";
+    let result = crate::parse(src);
+    assert!(result.is_err(), "expected parse error, got Ok");
+}
+
+#[test]
+fn parse_named_pipeline_multi_step() {
+    let src = "\
+model M [batch=2]:
+    x: Tensor[batch, 4]
+
+    y: Tensor[batch, 2] = x -> linear[2] -> relu
+";
+    let ast = crate::parse(src).expect("parse");
+    let np = match &ast.models[0].body[1] {
+        crate::ast::ModelStmt::NamedPipeline(np) => np,
+        other => panic!("expected NamedPipeline, got {:?}", other),
+    };
+    assert_eq!(np.steps.len(), 2);
+    assert_eq!(np.steps[0].name, "linear");
+    assert_eq!(np.steps[1].name, "relu");
+}
+
+#[test]
+fn parse_named_pipeline_missing_source_after_eq() {
+    // After `=`, parser expects an identifier (the source). `->` instead is
+    // a parse error.
+    let src = "\
+model M [batch=2]:
+    x: Tensor[batch, 4]
+
+    y: Tensor[batch, 4] = -> relu
+";
+    assert!(crate::parse(src).is_err());
+}
+
+#[test]
+fn parse_named_pipeline_missing_arrow_after_source() {
+    // After the source identifier, parser expects `->`. A bare identifier
+    // (no chain) is a parse error.
+    let src = "\
+model M [batch=2]:
+    x: Tensor[batch, 4]
+
+    y: Tensor[batch, 4] = x relu
+";
+    assert!(crate::parse(src).is_err());
+}

@@ -7,7 +7,9 @@
 (*                                                              *)
 (* Implicit semantics (NOT enforced by this grammar):           *)
 (*   - The output of a model is the value produced by the last  *)
-(*     operation of the last pipeline_stmt in its body.         *)
+(*     operation of the last pipeline_stmt or named_pipeline_   *)
+(*     stmt in its body. For a named_pipeline_stmt, the output  *)
+(*     is the bound right-hand-side value.                      *)
 (*   - Symbolic dims in Tensor[…] must reference an identifier  *)
 (*     declared in model_params.                                *)
 (*   - Operation names must resolve against the stdlib.         *)
@@ -26,7 +28,8 @@ named_value      = identifier , "=" , integer ;
 
 (* === Model body =============================================== *)
 model_body       = model_stmt , { newline , model_stmt } ;
-model_stmt       = variable_decl | pipeline_stmt ;
+model_stmt          = variable_decl | pipeline_stmt | named_pipeline_stmt ;
+named_pipeline_stmt = identifier , ":" , type_expr , "=" , identifier , pipeline_chain ;
 
 variable_decl    = identifier , ":" , type_expr ;
 
