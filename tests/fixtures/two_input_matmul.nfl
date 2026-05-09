@@ -1,0 +1,10 @@
+# Two-input matmul. Sanity for N=2 register layout (a→x0/%rdi,
+# b→x1/%rsi, params at x2/%rdx, output at x3/%rcx). Does NOT
+# exercise post-FFI register survival — that's the multi_input_
+# attention fixture's job.
+
+model TwoInputMatmul [m=4, k=8, n=4]:
+    a: Tensor[m, k]
+    b: Tensor[k, n]
+
+    out: Tensor[m, n] = a -> matmul[b]
