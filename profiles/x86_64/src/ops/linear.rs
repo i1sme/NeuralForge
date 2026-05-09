@@ -153,6 +153,10 @@ pub fn emit_linear(
         s.push_str("    pushq   %rdi\n");
         s.push_str("    pushq   %rsi\n");
         s.push_str("    pushq   %rcx\n");
+        // 3 pushes = 24 bytes; %rsp mod 16 = 8 (misaligned). Add a
+        // 4th pushq for 16-byte alignment in case any operation in
+        // the body or downstream consumer needs aligned stack.
+        s.push_str("    pushq   %rax              # alignment padding\n");
     }
 
     // 2. Outer i-loop: %rax = i, compared against b.
@@ -243,6 +247,7 @@ pub fn emit_linear(
     // BEFORE the SoftmaxRow tail so any `call expf@PLT` in the tail
     // sees a properly-aligned RSP and uncorrupted ABI registers.
     if save_abi {
+        s.push_str("    popq    %rax              # discard alignment padding\n");
         s.push_str("    popq    %rcx\n");
         s.push_str("    popq    %rsi\n");
         s.push_str("    popq    %rdi\n");

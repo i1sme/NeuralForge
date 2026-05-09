@@ -1512,7 +1512,7 @@ fn emit_linear_x86_64_save_block_balances_at_all_n() {
     use crate::buffer::BufferLoc;
     use compiler::ast::Span;
     use compiler::PostOp;
-    let cases = [(1usize, 0usize), (2, 3), (3, 3), (4, 3)];
+    let cases = [(1usize, 0usize), (2, 4), (3, 4), (4, 4)];
     for &(n_inputs, expected_pushes) in &cases {
         let abi = AbiContext { n_inputs };
         let post: Vec<PostOp> = vec![];
