@@ -156,6 +156,7 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 2. Write the minimum code to make it pass (green)
 3. Refactor without breaking tests (refactor)
 4. Update PROJECT_SPEC.md if the design changed
+5. **ABI audit (x86_64):** When adding a new operation emitter OR when a milestone expands input arity, run an ABI audit across all x86_64 emitters in `profiles/x86_64/src/ops/`. For each emitter, verify that no ABI-argument register (from `AbiContext`) appears as a long-lived counter or scratch. Document any violations found as entries in `PROJECT_SPEC.md` §"Known Latent Hazards" before closing the milestone.
 
 ### When adding a new operation to NFL:
 1. Add it to `language/grammar.ebnf`
