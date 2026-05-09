@@ -192,7 +192,9 @@ transparent.
 ### 5.3 Workspace Cargo.toml change
 
 `Cargo.toml` `[workspace] members = [...]` gains `"bench"` as the
-sixth member, alphabetically placed.
+**first** entry alphabetically (existing members are `compiler`,
+`nflc`, `profile-api`, `profiles/arm64`, `profiles/x86_64`; `b` sorts
+before `c`).
 
 ### 5.4 Shared compile-to-dylib helper
 
@@ -272,10 +274,14 @@ dereferences, matching the existing M10 FFI integration-test contract.
 ### 6.2 Statistics
 
 Two reported figures per fixture:
-- **Median** (50th percentile): sort the 100 measurements,
-  return `samples[50]`. Robust against right-skewed inference latency
-  distributions (typical of short-running kernels with OS scheduling
-  jitter).
+- **Median** (50th percentile): sort the 100 measurements (indices
+  `0..=99`), return the average of the two middle elements
+  `(samples[49] + samples[50]) / 2`. For even N the strict median is
+  the mean of the two central order statistics; using `samples[50]`
+  alone would be the upper-median and a slight upward bias (`< 1`
+  sample's worth in practice, but mismatching the "median" label).
+  Robust against right-skewed inference latency distributions
+  (typical of short-running kernels with OS scheduling jitter).
 - **p95** (95th percentile): `samples[95]`. Shows the right-tail
   behaviour; for noisy hosts the gap between median and p95 is the
   noise envelope.
@@ -565,12 +571,14 @@ needed; M11's scope is "produce the numbers", not "police the numbers".
 - **Co-tenancy.** GitHub runners share underlying hardware with
   other tenants; cross-run absolute-µs values vary.
 - **`RUSTFLAGS=-C target-cpu=native`.** Explicitly **not** set.
-  We bench what we ship; what we ship is `--release` with
-  default codegen flags. Setting `target-cpu=native` would inflate
-  the scalar baseline by enabling host-specific instructions in
-  the host-side timing loop (not the generated `.dylib`/`.so`,
-  which is unaffected — but cleaner to keep all build flags
-  identical to a normal release build).
+  We bench what we ship; what we ship is `--release` with default
+  codegen flags. Setting `target-cpu=native` would affect only the
+  rustc-compiled host-side timing loop, *not* the generated
+  `.dylib`/`.so` — the generated `.s` is assembled and linked by
+  system `cc`, never by rustc, so `RUSTFLAGS` never reach the
+  generated assembly. Even so, leaving `target-cpu=native` unset
+  keeps host-side overhead identical to a normal release build,
+  which is what the produced numbers should reflect.
 - **Memory layout / huge pages / NUMA.** Not relevant on
   single-thread tiny-buffer fixtures.
 
@@ -695,7 +703,11 @@ The plan synthesis stage will need to answer:
 5. **`workflow_dispatch` smoke**: how does the implementer exercise
    the workflow on the feature branch before opening the PR? Plan
    sketches the flow (push to `claude/<branch>`, trigger via gh-cli
-   `gh workflow run bench.yml --ref <branch>`).
+   `gh workflow run bench.yml --ref <branch>`). **Pre-condition:**
+   `bench.yml` must already be committed and pushed to the feature
+   branch — `gh workflow run` only sees workflows that exist at the
+   ref it targets. Plan must order workflow-file commit + push
+   *before* the smoke step, not after.
 
 These are implementation-level details surface in plan synthesis; the
 spec defers them.
