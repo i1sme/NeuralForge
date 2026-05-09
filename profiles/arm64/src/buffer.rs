@@ -11,9 +11,14 @@ use compiler::{NodeId, NodeKind, StdOp, UirModel};
 const BYTES_PER_ELEMENT: usize = 4;
 
 /// Where an Op-node's output buffer lives at run time.
+///
+/// `InputReg(idx)` carries the input's position in `model.inputs`
+/// (M12+). The codegen profile maps `idx` → ABI register via
+/// `AbiContext::input_reg`. For N=1 this is always `0` (= `x0`),
+/// preserving M3-M11 behaviour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BufferLoc {
-    InputReg,
+    InputReg(usize),
     OutputReg,
     StackOffset(usize),
     Alias(NodeId),
@@ -30,12 +35,22 @@ pub struct BufferAssignment {
 
 /// Assign a `BufferLoc` per UIR node + compute aligned total stack frame size.
 pub fn assign_buffers(model: &UirModel) -> BufferAssignment {
-    let mut locs = vec![BufferLoc::InputReg; model.nodes.len()];
+    let mut locs = vec![BufferLoc::InputReg(0); model.nodes.len()];
     let mut stack_offset: usize = 0;
 
     for (id, node) in model.nodes.iter().enumerate() {
         locs[id] = match &node.kind {
-            NodeKind::Input { .. } => BufferLoc::InputReg,
+            NodeKind::Input { .. } => {
+                // Find this node's index in `model.inputs` (declaration
+                // order). This index is later mapped to an ABI register
+                // by `AbiContext::input_reg(idx)` in the codegen pass.
+                let idx = model
+                    .inputs
+                    .iter()
+                    .position(|&i| i == id)
+                    .expect("Input node must appear in model.inputs");
+                BufferLoc::InputReg(idx)
+            }
             NodeKind::Op { op, operands, .. } => {
                 if id == model.output {
                     BufferLoc::OutputReg

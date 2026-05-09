@@ -9,63 +9,64 @@ _nfl_forward_SelfAttention:
     mov     x29, sp
     sub     sp, sp, #4, lsl #12
     ; matmul (leading_count=8): [16,16] x [16,16] -> [16,16], transpose_b=true
-    mov     x11, x0
-    mov     x13, x0
-    mov     x12, sp
-    stp     x1, x2, [sp, #-16]!
-    mov     x17, #0
+    mov     x9, x0
+    mov     x10, x0
+    mov     x11, sp
+    mov     x15, #0
 .Lmm4d_outer_0_0:
-    movz    x10, #0x0008
-    cmp     x17, x10
+    movz    x8, #0x0008
+    cmp     x15, x8
     b.ge    .Lmm4d_outer_end_0_0
     movz    x8, #0x0100
-    mul     x6, x17, x8
-    add     x1, x11, x6, lsl #2
+    mul     x6, x15, x8
+    add     x12, x9, x6, lsl #2
     movz    x8, #0x0100
-    mul     x6, x17, x8
-    add     x2, x13, x6, lsl #2
+    mul     x6, x15, x8
+    add     x13, x10, x6, lsl #2
     movz    x8, #0x0100
-    mul     x6, x17, x8
-    add     x4, x12, x6, lsl #2
-    movz    x10, #0x0010
-    movz    x15, #0x0010
-    movz    x16, #0x0010
-    mov     x5, #0
+    mul     x6, x15, x8
+    add     x14, x11, x6, lsl #2
+    mov     x16, #0
 .Lmm4d_i_0_0:
-    cmp     x5, x10
+    movz    x8, #0x0010
+    cmp     x16, x8
     b.ge    .Lmm4d_i_end_0_0
-    mov     x7, #0
+    mov     x17, #0
 .Lmm4d_j_0_0:
-    cmp     x7, x15
+    movz    x8, #0x0010
+    cmp     x17, x8
     b.ge    .Lmm4d_j_end_0_0
     fmov    s0, wzr
-    mov     x9, #0
+    mov     x7, #0
 .Lmm4d_k_0_0:
-    cmp     x9, x16
+    movz    x8, #0x0010
+    cmp     x7, x8
     b.ge    .Lmm4d_k_end_0_0
-    mul     x6, x5, x16
-    add     x6, x6, x9
-    ldr     s1, [x1, x6, lsl #2]
-    mul     x6, x7, x16
-    add     x6, x6, x9
-    ldr     s2, [x2, x6, lsl #2]
+    movz    x8, #0x0010
+    mul     x6, x16, x8
+    add     x6, x6, x7
+    ldr     s1, [x12, x6, lsl #2]
+    movz    x8, #0x0010
+    mul     x6, x17, x8
+    add     x6, x6, x7
+    ldr     s2, [x13, x6, lsl #2]
     fmadd   s0, s1, s2, s0
-    add     x9, x9, #1
+    add     x7, x7, #1
     b       .Lmm4d_k_0_0
 .Lmm4d_k_end_0_0:
-    mul     x6, x5, x15
-    add     x6, x6, x7
-    str     s0, [x4, x6, lsl #2]
-    add     x7, x7, #1
+    movz    x8, #0x0010
+    mul     x6, x16, x8
+    add     x6, x6, x17
+    str     s0, [x14, x6, lsl #2]
+    add     x17, x17, #1
     b       .Lmm4d_j_0_0
 .Lmm4d_j_end_0_0:
-    add     x5, x5, #1
+    add     x16, x16, #1
     b       .Lmm4d_i_0_0
 .Lmm4d_i_end_0_0:
-    add     x17, x17, #1
+    add     x15, x15, #1
     b       .Lmm4d_outer_0_0
 .Lmm4d_outer_end_0_0:
-    ldp     x1, x2, [sp], #16
     ; mul_scalar: total_elements=2048, scalar_bits=0x3e800000
     movz    w9, #0x0000
     movk    w9, #0x3e80, lsl #16
@@ -143,63 +144,64 @@ _nfl_forward_SelfAttention:
     ldp     x2, xzr, [sp], #16
     ldp     x0, x1, [sp], #16
     ; matmul (leading_count=8): [16,16] x [16,16] -> [16,16], transpose_b=false
-    add     x11, sp, #2, lsl #12
-    mov     x13, x0
-    mov     x12, x2
-    stp     x1, x2, [sp, #-16]!
-    mov     x17, #0
+    add     x9, sp, #2, lsl #12
+    mov     x10, x0
+    mov     x11, x2
+    mov     x15, #0
 .Lmm4d_outer_0_1:
-    movz    x10, #0x0008
-    cmp     x17, x10
+    movz    x8, #0x0008
+    cmp     x15, x8
     b.ge    .Lmm4d_outer_end_0_1
     movz    x8, #0x0100
-    mul     x6, x17, x8
-    add     x1, x11, x6, lsl #2
+    mul     x6, x15, x8
+    add     x12, x9, x6, lsl #2
     movz    x8, #0x0100
-    mul     x6, x17, x8
-    add     x2, x13, x6, lsl #2
+    mul     x6, x15, x8
+    add     x13, x10, x6, lsl #2
     movz    x8, #0x0100
-    mul     x6, x17, x8
-    add     x4, x12, x6, lsl #2
-    movz    x10, #0x0010
-    movz    x15, #0x0010
-    movz    x16, #0x0010
-    mov     x5, #0
+    mul     x6, x15, x8
+    add     x14, x11, x6, lsl #2
+    mov     x16, #0
 .Lmm4d_i_0_1:
-    cmp     x5, x10
+    movz    x8, #0x0010
+    cmp     x16, x8
     b.ge    .Lmm4d_i_end_0_1
-    mov     x7, #0
+    mov     x17, #0
 .Lmm4d_j_0_1:
-    cmp     x7, x15
+    movz    x8, #0x0010
+    cmp     x17, x8
     b.ge    .Lmm4d_j_end_0_1
     fmov    s0, wzr
-    mov     x9, #0
+    mov     x7, #0
 .Lmm4d_k_0_1:
-    cmp     x9, x16
+    movz    x8, #0x0010
+    cmp     x7, x8
     b.ge    .Lmm4d_k_end_0_1
-    mul     x6, x5, x16
-    add     x6, x6, x9
-    ldr     s1, [x1, x6, lsl #2]
-    mul     x6, x9, x15
+    movz    x8, #0x0010
+    mul     x6, x16, x8
     add     x6, x6, x7
-    ldr     s2, [x2, x6, lsl #2]
+    ldr     s1, [x12, x6, lsl #2]
+    movz    x8, #0x0010
+    mul     x6, x7, x8
+    add     x6, x6, x17
+    ldr     s2, [x13, x6, lsl #2]
     fmadd   s0, s1, s2, s0
-    add     x9, x9, #1
+    add     x7, x7, #1
     b       .Lmm4d_k_0_1
 .Lmm4d_k_end_0_1:
-    mul     x6, x5, x15
-    add     x6, x6, x7
-    str     s0, [x4, x6, lsl #2]
-    add     x7, x7, #1
+    movz    x8, #0x0010
+    mul     x6, x16, x8
+    add     x6, x6, x17
+    str     s0, [x14, x6, lsl #2]
+    add     x17, x17, #1
     b       .Lmm4d_j_0_1
 .Lmm4d_j_end_0_1:
-    add     x5, x5, #1
+    add     x16, x16, #1
     b       .Lmm4d_i_0_1
 .Lmm4d_i_end_0_1:
-    add     x17, x17, #1
+    add     x15, x15, #1
     b       .Lmm4d_outer_0_1
 .Lmm4d_outer_end_0_1:
-    ldp     x1, x2, [sp], #16
     add     sp, sp, #4, lsl #12
     ldp     x29, x30, [sp], #16
     ldp     d8, d9, [sp], #16

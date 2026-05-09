@@ -6,6 +6,7 @@
 //! [`Arm64Profile`]. The free [`lower`] shim is preserved for direct
 //! callers (arm64 integration tests) that pre-date the trait.
 
+mod abi;
 mod asm;
 mod buffer;
 mod codegen;
