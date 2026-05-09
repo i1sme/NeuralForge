@@ -14,6 +14,47 @@ Format for each entry:
 
 ---
 
+## 2026-05-09 — Milestone 11 closed: OQ-BENCH harness — closes M9-merge trigger
+
+### What was done
+- **`bench/` workspace crate** (new, first alphabetically). Single-file `bench/src/main.rs` (~660 lines) implementing the harness: hand-rolled CLI parser (`--profile {arm64|x86_64}`, `--format {markdown|github-summary}`, `--seed N` default 42), pure-function helpers (`median_ns`, `p95_ns`, `format_us`, `fill_random`, `parse_args`, `render_report`) covered by 13 unit tests, plus the wiring (`compile_to_dylib_for_host`, `time_forward`, `bench_one_fixture`, `main`).
+- **Three fixtures, three orthogonal signals** (per spec §8.1): hardcoded in `FIXTURES` const. `classifier` (matmul-mass, ~14 ms on local M1 — see Problems §1), `large_classifier_k` (large-K inner-loop accumulator, ~272 µs), `self_attention` (expf/softmax dispatch overhead, ~71 µs). No new `.nfl` files.
+- **Buffer plumbing from `FnSig` only.** `sig.input_floats` / `sig.params_floats` / `sig.output_floats` are the source of truth; bench does not duplicate `walk_model`'s param-layout logic. `params_floats == 0` (e.g. `self_attention`) handled by the standard `vec![0f32; 0].as_ptr()` non-null-aligned dangling-pointer pattern.
+- **CI workflow** `.github/workflows/bench.yml`. Two-leg matrix (`macos-14` arm64 + `ubuntu-latest` x86_64). Each leg pipes `cargo run -p bench --release -- --profile <leg> --format github-summary --seed 42` into `$GITHUB_STEP_SUMMARY`. No artifact upload/download anywhere. `concurrency: bench, cancel-in-progress: false`. Triggered on `workflow_dispatch` + `push: branches: [main]` with `paths-ignore: ['bench/results/**', 'docs/**', '**.md']` (prevents self-triggering on the combined-report commits and on doc-only changes).
+- **First combined report** `bench/results/<merge-date>.md` lands as a post-merge follow-up commit (sequenced per spec §11 #5 — inaugural CI run cannot precede merge).
+- **Documentation**: PROJECT_SPEC.md (M11 row in milestones table + OQ-BENCH closed under Trigger-driven cleanup + Current Status bumped + spec §7.1/§7.2 example values harmonised with §7.3 rounding rule), CLAUDE.md (Repository Structure tree gains `bench/`, Current Status to M11), this entry.
+
+### Decisions made
+
+**Median is strict (`(samples[49] + samples[50]) / 2`), not upper-median.** Spec review caught this in the §6.2 wording. For even N (=100) the upper-median index 50 introduces a < 1-sample upward bias; the strict formula matches the "median" label exactly.
+
+**`format_us` rounds half-up for ≥ 1000 µs.** Original plan code did `ns / 1_000` (truncation); fixed during Group B Minor-issue amend to `(ns + 500) / 1_000` matching spec §7.3 wording.
+
+**Symbol lookup uses `sig.name` directly.** Spec §5.5 step 7 said "prepend `_` for Mach-O" and spec §13 Q4 deferred verification to plan synthesis. Plan synthesis confirmed against the M3-M10 integration test pattern: `lib.get(b"nfl_forward_M4Demo")` works on macos-14. `libloading` + `dlsym` strip the leading `_` automatically. Bench passes `sig.name.as_bytes()` verbatim; `profile.sym_prefix()` is unused at the bench layer.
+
+**`compile_to_dylib_for_host` not extracted to a shared crate.** The arm64 integration tests' helper is hard-coded to `-arch arm64`; lifting both to a shared crate to share ~30 lines of `Command::new("cc")` wrapping is not worth a new crate-on-crate dependency at M11 scale (spec §5.4).
+
+**No artifact sharing, no aggregator job.** Reaffirmed M10 §11.2 rule.
+
+**`mean ± stddev` not reported.** Spec §6.2 picked median + p95 because inference latency on shared CI runners is right-skewed.
+
+**Default pipeline ON.** Per spec §8.3 the bench runs `EliminateDropout + FuseLinearRelu + FuseLinearSoftmax`.
+
+### Problems encountered
+
+1. **Plan-predicted `classifier` latency was too optimistic** (~3.4 ms predicted, ~14 ms observed on local M1). Cause: plan assumed SIMD-class GFLOPS (~10), but scalar single-issue FMA on M1 hits ~3.2 GFLOPS; theoretical floor for 34.3M FLOPs is ~11 ms; observed 14 ms = 75% of peak. Numbers are correct, plan-level prediction was wrong. Spec §8.1 expected-latency wording is "approximate"; future bench-prediction tables should base ranges on observed-from-prior-runs rather than theoretical FLOPS.
+
+2. **Plan §13 Q5 misunderstood `gh workflow run --ref <feature-branch>`** — GitHub requires the workflow file to exist on the default branch (`main`) before `workflow_dispatch` can dispatch it. The smoke step from the plan returned HTTP 404. Workaround for Group C: smoke via existing `ci.yml` (which triggers on `branches: [main, 'claude/**']`) confirmed `bench` compiles and 13 unit tests pass on both arch matrix legs. The true `bench.yml` smoke happens automatically on the post-merge push to `main`. Future workflow PRs that need pre-merge smoke should either (a) add `'claude/**'` to push trigger temporarily and revert, or (b) accept that the inaugural CI run is the first real smoke. Future plan synthesis should encode this constraint.
+
+3. **`drop(forward)` from plan code didn't compile.** `libloading::Symbol` does not implement `Drop`. Fix during Group B: NLL block scoping — the borrow on `Library` ends at the last use of `*forward`, then `drop(lib)` is called explicitly. The amended Group B commit also corrected the misleading inline comment that claimed Symbol drops first.
+
+### Next step
+Push branch + open PR titled `feat(m11): OQ-BENCH harness — close M9-merge trigger`. Once merged, the workflow runs automatically on the merge push to `main`. Copy both Job Summaries into `bench/results/<merge-date>.md`, push the follow-up commit directly to `main`, and backfill the OQ-BENCH `<TBD>` commit hash in PROJECT_SPEC.md. M11 is then fully closed.
+
+After M11, the next milestone selection runs over the post-M10 Strategic Roadmap (Axis 2 follow-ups: A1 multi-input grammar with ABI-scope disclosure, A2 transformer block, A3 viewer annotations; Axis 3 bare-metal `expf`; Axis 1 follow-ups: SIMD / macOS x86_64). M11's first numbers feed into that decision: if matmul dominates `classifier` as expected (~14 ms vs `large_classifier_k` and `self_attention` both < 300 µs combined), B1 (SIMD) becomes the highest-leverage next milestone.
+
+---
+
 ## 2026-05-09 — Milestone 10 closed: NFL v0.2 self-attention + 4D codegen
 
 ### What was done
