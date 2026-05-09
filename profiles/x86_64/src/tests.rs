@@ -1377,3 +1377,82 @@ fn emit_matmul_body_contains_zero_pushq() {
         "emit_matmul body must contain zero pushq instructions per §9.1; got {pushq_count}\n{result}"
     );
 }
+
+// ---- Group C Q11: N=4 rejection -------------------------------------------
+
+#[test]
+fn emit_matmul_rejects_n4_with_clear_error() {
+    // Q11 (Group C): %r9 is both the j-counter scratch in emit_matmul and
+    // output_reg() at N=4 (INPUT_REGS[5]). emit_matmul must reject N=4 with
+    // LowerError::UnsupportedOp rather than silently producing wrong asm.
+    use compiler::ast::Span;
+    let abi = AbiContext { n_inputs: 4 };
+    let span = Span::new(1, 1);
+    let result = crate::ops::matmul::emit_matmul(
+        &abi,
+        /* leading_count */ 1,
+        /* m */ 4,
+        /* k */ 8,
+        /* n */ 4,
+        /* transpose_b */ false,
+        /* model_idx */ 0,
+        /* matmul_idx */ 0,
+        /* a_loc */ BufferLoc::InputReg(0),
+        /* b_loc */ BufferLoc::InputReg(1),
+        /* dst_loc */ BufferLoc::OutputReg,
+        span,
+    );
+    match result {
+        Err(profile_api::LowerError::UnsupportedOp { op, .. }) => {
+            assert!(
+                op.contains("matmul"),
+                "error message must mention 'matmul'; got: {op}"
+            );
+            assert!(
+                op.contains("N=4") || op.contains("4 inputs"),
+                "error message must mention N=4 collision; got: {op}"
+            );
+        }
+        Err(other) => panic!("expected UnsupportedOp, got {other:?}"),
+        Ok(_) => panic!("emit_matmul accepted N=4; should have rejected per Group C Q11"),
+    }
+}
+
+// ---- Group C Q5: compute_callee_saved matmul-only branch ------------------
+
+#[test]
+fn compute_callee_saved_fires_for_matmul_only_no_softmax_model() {
+    // Q5 (Group C): the has_matmul branch of compute_callee_saved was only
+    // exercised end-to-end through self_attention.nfl which has BOTH softmax
+    // AND matmul. This test verifies the has_matmul trigger fires independently
+    // for a matmul-only model with no softmax.
+    let src = "\
+model MatmulOnly [batch=2]:
+    a: Tensor[batch, 4]
+    b: Tensor[4, 8]
+
+    out: Tensor[batch, 8] = a -> matmul[b]
+";
+    let ast = compiler::parse(src).expect("parse");
+    let uir = compiler::ir::build(&ast).expect("ir::build");
+    let model = &uir.models[0];
+    // Precondition: model has no softmax node.
+    let has_softmax = model.nodes.iter().any(|n| {
+        matches!(
+            n.kind,
+            compiler::NodeKind::Op {
+                op: compiler::StdOp::Softmax,
+                ..
+            }
+        )
+    });
+    assert!(
+        !has_softmax,
+        "fixture must not contain softmax for this test to be meaningful"
+    );
+    let regs = compute_callee_saved(model);
+    assert!(
+        regs.callee_saved_int,
+        "matmul-only model must trigger callee-saved register save (has_matmul branch)"
+    );
+}

@@ -43,9 +43,9 @@
 //!
 //! | Role               | Reg     | Lifetime               |
 //! |--------------------|---------|------------------------|
-//! | A base ptr         | %xmm8   | spill at entry, reload to %r12 once |
-//! | B base ptr         | %xmm6   | spill at entry, reload to %r13 once |
-//! | DST base ptr       | %xmm7   | spill at entry, reload to %r14 once |
+//! | A base ptr         | %xmm8   | full function (spill at entry; reloaded into %r12 each outer iter) |
+//! | B base ptr         | %xmm6   | full function (spill at entry; reloaded into %r13 each outer iter) |
+//! | DST base ptr       | %xmm7   | full function (spill at entry; reloaded into %r14 each outer iter) |
 //! | outer counter      | %r15    | full function (callee-saved)  |
 //! | A_slice ptr        | %r12    | per outer iter (callee-saved) |
 //! | B_slice ptr        | %r13    | per outer iter (callee-saved) |
@@ -123,8 +123,20 @@ pub fn emit_matmul(
     a_loc: BufferLoc,
     b_loc: BufferLoc,
     dst_loc: BufferLoc,
-    _node_span: Span,
+    node_span: Span,
 ) -> Result<String, LowerError> {
+    // Q11 (Group C): N=4 + matmul register collision.
+    // At N=4, output_reg() == %r9 (INPUT_REGS[5]). The inner j-loop uses
+    // %r9 as its counter, which would silently clobber the output pointer.
+    // The fix requires reassigning the j-counter to a different non-ABI
+    // scratch slot — deferred to M13+ register-cascade rework.
+    // Reject at lower() time rather than producing silently wrong asm.
+    if abi.n_inputs == 4 {
+        return Err(LowerError::UnsupportedOp {
+            op: "matmul at N=4 inputs on x86_64 (j-counter %r9 collides with output register; M13+ rework planned)".into(),
+            span: node_span,
+        });
+    }
     let mid = format!("{model_idx}_{matmul_idx}");
     let mut s = String::new();
     s.push_str(&format!(
