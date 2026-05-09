@@ -1344,16 +1344,22 @@ fn too_many_inputs_returns_too_many_inputs_error() {
 
 #[test]
 fn residual_add_match_numerically() {
+    eprintln!("DEBUG: 1 — entered residual_add_match_numerically");
     if !common::cc_available() {
         eprintln!("skip: integration test requires `cc` on PATH");
         return;
     }
+    eprintln!("DEBUG: 2 — cc available");
 
     let src =
         std::fs::read_to_string("../../tests/fixtures/residual_add.nfl").expect("fixture readable");
+    eprintln!("DEBUG: 3 — fixture read, {} bytes", src.len());
     let nfl = compiler::parse(&src).expect("parse");
+    eprintln!("DEBUG: 4 — parsed");
     let uir = compiler::ir::build(&nfl).expect("ir::build");
+    eprintln!("DEBUG: 5 — ir built");
     let asm = profiles_x86_64::lower(&uir).expect("lower");
+    eprintln!("DEBUG: 6 — lowered, {} bytes asm", asm.source.len());
 
     let sig = &asm.functions[0];
     assert_eq!(sig.inputs_floats.len(), 2, "residual_add has arity 2");
@@ -1365,14 +1371,18 @@ fn residual_add_match_numerically() {
         4 * 4,
         "linear weights only, 4x4=16 floats"
     );
+    eprintln!("DEBUG: 7 — sig assertions passed");
 
     let so_path = common::compile_to_so(&asm.source, "residual_add");
+    eprintln!("DEBUG: 8 — compiled to .so at {}", so_path.display());
     let lib = unsafe { libloading::Library::new(&so_path) }.expect("dlopen");
+    eprintln!("DEBUG: 9 — dlopened");
 
     // SysV ABI: x (%rdi), skip (%rsi), params (%rdx), out (%rcx).
     type ForwardFn = unsafe extern "C" fn(*const f32, *const f32, *const f32, *mut f32);
     let forward: libloading::Symbol<ForwardFn> =
         unsafe { lib.get(b"nfl_forward_ResidualBlock") }.expect("dlsym");
+    eprintln!("DEBUG: 10 — dlsym ok");
 
     let batch = 2usize;
     let dim = 4usize;
@@ -1381,7 +1391,12 @@ fn residual_add_match_numerically() {
     // Linear weights: dim×dim row-major (no bias).
     let weights: Vec<f32> = (0..dim * dim).map(|i| (i as f32) * 0.05).collect();
     let mut out = vec![0.0f32; batch * dim];
+    eprintln!("DEBUG: 11 — buffers prepared (x={}, skip={}, w={}, out={})",
+        x.len(), skip.len(), weights.len(), out.len());
+    eprintln!("DEBUG: 11b — first asm bytes:\n{}",
+        asm.source.lines().take(5).collect::<Vec<_>>().join("\n"));
 
+    eprintln!("DEBUG: 12 — about to call forward");
     unsafe {
         forward(
             x.as_ptr(),
@@ -1390,6 +1405,7 @@ fn residual_add_match_numerically() {
             out.as_mut_ptr(),
         );
     }
+    eprintln!("DEBUG: 13 — forward returned, out[0]={}", out[0]);
 
     // Reference: relu(x @ W) + skip, element-wise.
     // Matmul uses separate mul+add (NOT FMA) to match x86_64 mulss+addss.
