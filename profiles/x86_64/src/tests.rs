@@ -152,7 +152,7 @@ fn dropout_as_output_emits_copy_loop_no_maxss() {
     let s = lower_x86_no_passes(src).source;
     assert!(s.contains(".Ldropout_"), "missing dropout loop label:\n{s}");
     assert!(
-        s.contains("movss   (%r8, %rcx, 4), %xmm0"),
+        s.contains("movss   (%rax, %rcx, 4), %xmm0"),
         "missing load:\n{s}"
     );
     assert!(

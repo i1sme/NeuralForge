@@ -13,7 +13,7 @@ use crate::buffer::BufferLoc;
 /// `pipeline_styles.nfl` would otherwise collide on `.Lrelu_0` etc.).
 ///
 /// Register usage:
-///   %r8  (= src pointer)
+///   %rax (= src pointer)
 ///   %r11 (= dst pointer)
 ///   %r10d (= total_floats — written via emit_imm32_to_r10)
 ///   %rcx (= loop counter)
@@ -32,7 +32,7 @@ pub fn emit_relu(
     s.push_str(&format!(
         "    # relu: copy-clamp src→dst ({total_floats} elements)\n"
     ));
-    abi.materialise_ptr(src_loc, "%r8", &mut s);
+    abi.materialise_ptr(src_loc, "%rax", &mut s);
     abi.materialise_ptr(dst_loc, "%r11", &mut s);
     s.push_str("    xorps   %xmm1, %xmm1\n");
     s.push_str(&emit_imm32_to_r10(total_floats as u32));
@@ -40,7 +40,7 @@ pub fn emit_relu(
     s.push_str(&format!(".Lrelu_{rid}:\n"));
     s.push_str("    cmpq    %r10, %rcx\n");
     s.push_str(&format!("    jge     .Lrelu_end_{rid}\n"));
-    s.push_str("    movss   (%r8, %rcx, 4), %xmm0\n");
+    s.push_str("    movss   (%rax, %rcx, 4), %xmm0\n");
     s.push_str("    maxss   %xmm1, %xmm0\n");
     s.push_str("    movss   %xmm0, (%r11, %rcx, 4)\n");
     s.push_str("    incq    %rcx\n");

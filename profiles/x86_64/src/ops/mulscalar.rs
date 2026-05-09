@@ -6,7 +6,7 @@
 //!   movl $<scalar_bits>, %r10d
 //!   movd %r10d, %xmm4
 //! Inner loop:
-//!   movss (%r8, %rcx, 4), %xmm0
+//!   movss (%rax, %rcx, 4), %xmm0
 //!   mulss %xmm4, %xmm0
 //!   movss %xmm0, (%r11, %rcx, 4)
 //!
@@ -42,7 +42,7 @@ pub fn emit_mulscalar(
     s.push_str(&format!("    movl    $0x{:x}, %r10d\n", scalar_bits));
     s.push_str("    movd    %r10d, %xmm4\n");
 
-    abi.materialise_ptr(src_loc, "%r8", &mut s);
+    abi.materialise_ptr(src_loc, "%rax", &mut s);
     abi.materialise_ptr(dst_loc, "%r11", &mut s);
 
     // Flat loop, %rcx = i.
@@ -52,7 +52,7 @@ pub fn emit_mulscalar(
     s.push_str("    cmpq    %r10, %rcx\n");
     s.push_str(&format!("    jge     .Lms_end_{mid}\n"));
 
-    s.push_str("    movss   (%r8, %rcx, 4), %xmm0\n");
+    s.push_str("    movss   (%rax, %rcx, 4), %xmm0\n");
     s.push_str("    mulss   %xmm4, %xmm0\n");
     s.push_str("    movss   %xmm0, (%r11, %rcx, 4)\n");
 

@@ -84,14 +84,14 @@ nfl_forward_SelfAttention:
     # mul_scalar: total_elements=2048, scalar_bits=0x3e800000
     movl    $0x3e800000, %r10d
     movd    %r10d, %xmm4
-    leaq    16(%rsp), %r8
+    leaq    16(%rsp), %rax
     leaq    16(%rsp), %r11
     movq    $0, %rcx
 .Lms_0_0:
     movl    $2048, %r10d
     cmpq    %r10, %rcx
     jge     .Lms_end_0_0
-    movss   (%r8, %rcx, 4), %xmm0
+    movss   (%rax, %rcx, 4), %xmm0
     mulss   %xmm4, %xmm0
     movss   %xmm0, (%r11, %rcx, 4)
     addq    $1, %rcx
