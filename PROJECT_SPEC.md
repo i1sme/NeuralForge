@@ -162,16 +162,17 @@ NeuralForge is designed so that LLMs can write, read, and reason about NFL code 
 | 9 | x86_64 Linux ELF profile + profile-api contract (complete) | x86_64 scalar SSE2 codegen with full op-parity with arm64 (linear ± bias, relu, fused relu, softmax_row, dropout alias). `Profile` trait in new `profile-api` crate abstracts the profile contract (`lower` + `sym_prefix`); both `profiles-arm64` and `profiles-x86_64` implement it. SysV AMD64 ABI compliance: prologue/epilogue saves callee-saved registers conditionally (`%rbp` always; `%rbx/%r12–%r15` when `calls_extern_math()`); matmul body uses only caller-saved registers (`%rdi/%rsi/%rdx` as k-counter/scratch/bias-base). `docs/profile_guide/x86_64.md` added. Test count: 223 → 284. |
 | 10 | NFL v0.2 self-attention + 4D codegen (complete) | NFL grammar v0.2 — new `named_pipeline_stmt = identifier , ":" , type_expr , "=" , identifier , pipeline_chain` production with one-token lookahead disambiguation from `variable_decl`. UIR: `ArgType::Tensor` + `resolve_args` cascade through `build_op` / `build_model`. Two new stdlib ops: `StdOp::Matmul` (rank ≥ 2 inputs, optional `transpose_b`, four new `ShapeError` variants) and `StdOp::MulScalar` (per-element scalar multiply, shape-preserving). New `BuildErrorKind::DeclaredShapeMismatch` for the named-pipeline declared-vs-inferred shape check. `Softmax` rank tightened to ≥ 2 (any-rank, last-axis). Both profiles ship `emit_matmul` (outer-loop wrapper over `leading_count`; arm64 FMA inner triple-loop, x86_64 `mulss + addss` — intentional ISA divergence) + `emit_mulscalar` (scalar pre-load + flat in-place loop) + softmax dispatch generalised to `b = product(shape[..-1]), k = shape[-1]`. arm64's `emit_softmax` spills `x0/x1/x2` via `stp/ldp` around `bl _expf` and `emit_matmul` spills `x1/x2` via `stp/ldp` around the outer loop; x86_64's `emit_softmax` spills `%rdi/%rsi/%rdx` via `pushq`/`popq` and `emit_matmul` spills `%rdi/%rsi/%rdx` via `movq` to/from `%xmm6/%xmm7/%xmm8`. End-to-end self-attention fixture compiles + runs bit-exact per-profile via FFI on both profiles. Test count: 284 → 331. |
 | 11 | OQ-BENCH harness — close the M9-merge trigger (complete) | New `bench/` workspace crate (`cargo run -p bench --release -- --profile {arm64|x86_64} --format {markdown|github-summary} [--seed N]`) compiling 3 fixtures (`classifier`, `large_classifier_k`, `self_attention`) through host-native profile, timing 10 warmup + 100 measurement FFI calls, reporting median + p95 µs to stdout / Job Summary. New `.github/workflows/bench.yml` with 2-leg matrix (`macos-14` arm64 + `ubuntu-latest` x86_64); each leg writes to `$GITHUB_STEP_SUMMARY` (no artifact sharing, no aggregator). Cross-profile combined report composed manually post-CI to `bench/results/<date>.md`. Test count: 331 → 344. |
+| 12 | NFL multi-input ABI (A1 — first leg of Axis 2 follow-up) (complete) | Multi-input function ABI (N=1..4) via per-profile `AbiContext` connector. New `profiles/{arm64,x86_64}/src/abi.rs` carrying `n_inputs: usize`, arity-aware `input_reg/params_reg/output_reg/ffi_save_set/materialise_ptr` accessors, alignment-correct `emit_ffi_save/emit_ffi_restore` (xzr / pushq %rax padding for odd cardinality, strict LIFO restore). `BufferLoc::InputReg(usize)` carries input index. `walk_model` constructs AbiContext once and threads `&abi` through every op-emitter; arity > 4 returns `LowerError::TooManyInputs`. `emit_matmul` rework on both profiles per spec §9.1: per-iter slice pointers move off ABI registers (arm64: x12/x13/x14 in place of x1/x2/x4; x86_64: callee-saved %rbx/%r12-%r15 via extended `compute_callee_saved` trigger), eliminating M10 outer-loop spill blocks. New fixtures: `two_input_matmul.nfl` (N=2 sanity), `multi_input_attention.nfl` (N=3 acceptance — V consumed post-softmax), `tests/fixtures/profile-negative/too_many_inputs.nfl` (N=5 → LowerError). Bench `bench/src/main.rs` gains per-arity dispatch + seed cascade. Test count: 344 → 390. **Known follow-up:** x86_64 `emit_matmul` currently rejects N=4 (j-counter %r9 collides with output_reg); rework deferred to M13+. |
 
 ---
 
 ## Current Status
 
-**Milestone 11 complete. 344 tests passing on macOS arm64 (≥ 360 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean (`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, `cargo test --workspace`).
+**Milestone 12 complete. 390 tests passing on macOS arm64 (~398 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean (`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, `cargo test --workspace`).
 
-M11 closed OQ-BENCH (informational scalar-baseline bench harness) as a separate trigger-driven cleanup milestone. The harness lives in the new `bench/` workspace crate; CI integration via `bench.yml` writes per-profile Job Summaries on the existing 2-leg matrix without inter-leg artifact sharing.
+M12 closed A1 (multi-input ABI): NFL models can now declare N=1..4 typed inputs, each mapped to a distinct ABI argument register via per-profile `AbiContext`. Both `profiles/arm64` and `profiles/x86_64` ship `abi.rs`, reworked `emit_matmul` (scratch register reassignment eliminating outer-loop spill blocks), and `LowerError::TooManyInputs`. Three new fixtures: `two_input_matmul.nfl`, `multi_input_attention.nfl`, `tests/fixtures/profile-negative/too_many_inputs.nfl`. Bench gains per-arity dispatch + seed cascade.
 
-Strategic direction: see §"Strategic Roadmap" below — three open axes (codegen breadth, modelling depth, deployment reach) presented as a dependency graph. The next milestone is decided by selecting one axis to advance via fresh brainstorming, not by picking from a flat list. Trigger-driven cleanup items (OQ-7, OQ-8, OQ-9, M5c OQ-4) live in §"Open Questions" / "Trigger-driven cleanup" and stay dormant until their trigger fires. OQ-NEW closed in M9 (commit `a08fd24`). OQ-BENCH closed in M11 (commit `e7c29b8`).
+Strategic direction: see §"Strategic Roadmap" below — three axes. A1 (multi-input ABI) is closed; A2 (transformer block) and A3 (viewer annotations for multi-input) remain open along Axis 2. Trigger-driven cleanup items (OQ-7, OQ-8, OQ-9, M5c OQ-4) live in §"Open Questions" / "Trigger-driven cleanup" and stay dormant until their trigger fires. OQ-NEW closed in M9 (commit `a08fd24`). OQ-BENCH closed in M11 (commit `e7c29b8`). **Known M12 follow-up:** x86_64 `emit_matmul` rejects N=4+matmul combinations (j-counter %r9 collision); M13+ closes this gap.
 
 ---
 
@@ -184,7 +185,7 @@ its own trigger condition and lives under "Open Questions" below.
 
 ```
 x86_64 profile [M9 complete] → MACHO_SYM_PREFIX rename [closed — abstracted as Profile::sym_prefix() in M9]
-NFL v0.2 self-attention [complete in M10] → multi-input grammar (Q/K/V) → transformer block (residual + LayerNorm + FFN) → profile-level viewer annotations
+NFL v0.2 self-attention [complete in M10] → multi-input grammar A1 [closed M12] → transformer block A2 (residual + LayerNorm + FFN) → profile-level viewer annotations A3
 bare-metal expf → drop libm dependency
 ```
 
@@ -194,14 +195,15 @@ bare-metal expf → drop libm dependency
   milestone. M9 ships scalar Linux ELF; SIMD/AVX and macOS x86_64 remain as
   possible follow-ups. `MACHO_SYM_PREFIX rename` closed — abstracted as
   `Profile::sym_prefix()` in M9.
-- **Axis 2 — modelling depth.** M10 closed the first leg: NFL v0.2's
-  `named_pipeline_stmt` + tensor-typed positional args + new `StdOp::Matmul`
-  / `StdOp::MulScalar` + rank-≥-2 softmax dispatch lower a complete
-  self-attention pattern (Q/Kᵀ matmul, scale, softmax, attn·V matmul) end-to-end
-  on both profiles. Open follow-ups along this axis: multi-input grammar
-  (separate `q`/`k`/`v` inputs to a single model), transformer block (residual
-  + LayerNorm + FFN), and profile-level viewer annotations (per-node footprint,
-  stack frame, callee-saved set).
+- **Axis 2 — modelling depth.** M10 closed the first leg (NFL v0.2 self-attention).
+  M12 closed A1 (multi-input ABI): per-profile `AbiContext` maps N=1..4 typed inputs
+  to distinct ABI registers; both profiles ship reworked `emit_matmul` with scratch
+  register reassignment eliminating M10 outer-loop spill blocks. Open follow-ups:
+  A2 — transformer block (residual + LayerNorm + FFN, builds directly on M12 ABI),
+  A3 — profile-level viewer annotations (per-node footprint, stack frame,
+  callee-saved set). **Known gap:** x86_64 `emit_matmul` rejects N=4+matmul
+  (j-counter %r9 collides with output_reg at N=4); close before or as part of A2
+  if the transformer block requires N=4 attention masks.
 - **Axis 3 — deployment reach.** Replacing the `bl _expf` libm call with a
   Taylor-series `expf` removes the only runtime dependency, unlocking bare-metal
   targets.

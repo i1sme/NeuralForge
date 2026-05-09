@@ -1,0 +1,14 @@
+# 5 inputs, exceeds M12 N=4 hard-cap. Parser + IR-build accept;
+# profile lower() must reject with LowerError::TooManyInputs.
+# Lives in tests/fixtures/profile-negative/ (not negative/) because
+# the compiler-level test loop (compiler/tests/negative_fixtures.rs)
+# only covers parse/IR-build errors; this fixture fails at lower() time.
+
+model TooManyInputs [b=4, d=8]:
+    a: Tensor[b, d]
+    b_in: Tensor[b, d]
+    c: Tensor[b, d]
+    d_in: Tensor[b, d]
+    e: Tensor[b, d]
+
+    out: Tensor[b, d] = a -> linear[d]

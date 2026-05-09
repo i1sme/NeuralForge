@@ -2,7 +2,8 @@
 
 //! Softmax (per-row stable, libm expf via PLT) codegen — x86_64 SSE2.
 
-use crate::asm::{emit_imm32_to_r10, materialise_ptr};
+use crate::abi::AbiContext;
+use crate::asm::emit_imm32_to_r10;
 use crate::buffer::BufferLoc;
 
 /// Emit x86_64 asm for softmax over `[b, k]` shape (per-row normalize).
@@ -13,22 +14,27 @@ use crate::buffer::BufferLoc;
 /// `assign_buffers` per spec §7.4); see the register contract in
 /// profiles/x86_64/src/ops/linear.rs.
 ///
-/// FFI register preservation (M10): `call expf@PLT` clobbers caller-saved
-/// regs including %rdi (input), %rsi (params), %rdx (output) per SysV
-/// AMD64. Any downstream emitter that reads any of these via
-/// `materialise_ptr` would otherwise see garbage. Spec
-/// §[register preservation]: any emitter that clobbers an FFI register
-/// must save/restore. Self-attention exercises this: matmul → softmax →
-/// matmul where the second matmul's `materialise_ptr("%r9", InputReg)`
-/// emits `movq %rdi, %r9` after softmax has clobbered %rdi.
+/// FFI register preservation (M12): `call expf@PLT` clobbers caller-
+/// saved regs including the SysV argument registers (input(s), params,
+/// output) per AMD64 ABI. Any downstream emitter that reads any of
+/// these via `abi.materialise_ptr` would otherwise see garbage. Spec
+/// §5.4: any emitter that clobbers an ABI register that a follow-up
+/// emitter reads must save/restore. Self-attention exercises this:
+/// matmul → softmax → matmul where the second matmul's
+/// `abi.materialise_ptr(InputReg(_), …)` reads %rdi/%rsi after
+/// softmax's `call expf@PLT` has clobbered them.
 ///
-/// Strategy: at function entry, push %rdi/%rsi/%rdx (plus padding %rax
-/// for 16-byte alignment) onto the stack — 32 bytes total. The body's
-/// existing (%rsp) / 8(%rsp) row_max/row_sum slots shift to 32(%rsp) /
-/// 40(%rsp). Restore at exit. xmm-spill is unavailable here because all
-/// xmm regs are caller-saved on SysV AMD64 and `call expf@PLT` may
-/// clobber any of them.
+/// Strategy: at function entry, push the full `ffi_save_set()`
+/// (= INPUT_REGS[..N+2]) onto the stack, with `pushq %rax` padding
+/// for odd cardinality. For N=1 this is `pushq %rdi/%rsi/%rdx/%rax`
+/// — bit-identical to M11. For N=3 the body's row_max/row_sum slots
+/// shift from `(%rsp)/8(%rsp)` to `48(%rsp)/56(%rsp)` (6 pushes ×
+/// 8 bytes). The arithmetic for slot offsets follows the formula
+/// `slot_offset = ceil((N+2) / 2) * 16` — derivable from
+/// `ffi_save_set().len()` rounded up to even cardinality times 8.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_softmax(
+    abi: &AbiContext,
     b: u64,
     k: u64,
     model_idx: usize,
@@ -48,20 +54,28 @@ pub fn emit_softmax(
     // `BufferLoc::StackOffset(off)` emits `leaq off(%rsp), %rbx` against
     // the current %rsp. Pushing first would shift %rsp and corrupt the
     // intermediate-buffer offsets baked in at assign_buffers time.
-    s.push_str(&materialise_ptr("%rbx", src_loc));
-    s.push_str(&materialise_ptr("%r12", dst_loc));
+    abi.materialise_ptr(src_loc, "%rbx", &mut s);
+    abi.materialise_ptr(dst_loc, "%r12", &mut s);
 
-    // Spill FFI input regs %rdi (input ptr), %rsi (params ptr), %rdx
-    // (output ptr) — survive `call expf@PLT`. Restored at function exit
-    // before any downstream emitter reads them via materialise_ptr.
-    // The 4th push is padding (16-byte alignment requirement on call
-    // boundaries); %rax is just a convenient scratch reg to push. Total
-    // 32 bytes pushed → softmax body's row_max/row_sum slots shift from
-    // (%rsp)/8(%rsp) to 32(%rsp)/40(%rsp).
-    s.push_str("    pushq   %rdi\n");
-    s.push_str("    pushq   %rsi\n");
-    s.push_str("    pushq   %rdx\n");
-    s.push_str("    pushq   %rax\n"); // padding for 16-byte alignment
+    // Spill the full ABI argument set (inputs + params + output) so they
+    // survive `call expf@PLT`. Arity-aware via AbiContext (spec §5.4,
+    // §6.1). For N=1 this emits `pushq %rdi; pushq %rsi; pushq %rdx;
+    // pushq %rax` (with %rax as alignment padding) — bit-identical to
+    // the M11 hand-written block.
+    abi.emit_ffi_save(&mut s);
+
+    // Spill SP delta — used to compute the row_max / row_sum stack slot
+    // offsets after the FFI-reg push. SP delta is always a multiple of
+    // 16 bytes (16-byte alignment invariant); for N=1 → 32, N=3 → 48.
+    let push_count = abi.ffi_save_set().len()
+        + if abi.ffi_save_set().len().is_multiple_of(2) {
+            0
+        } else {
+            1
+        };
+    let sp_shift = push_count * 8;
+    let row_max_slot = sp_shift; // (was 0(%rsp))
+    let row_sum_slot = sp_shift + 8; // (was 8(%rsp))
 
     // Outer per-row loop: %r13 = i.
     s.push_str("    xorq    %r13, %r13\n");
@@ -75,8 +89,7 @@ pub fn emit_softmax(
     s.push_str("    movq    %r13, %r15\n");
     s.push_str("    imulq   %r10, %r15\n");
 
-    // Phase 1: row_max → 32(%rsp). Init xmm8 to -inf.
-    // (Was (%rsp) before the FFI-reg push above shifted offsets by 32.)
+    // Phase 1: row_max → row_max_slot(%rsp). Init xmm8 to -inf.
     s.push_str("    movl    $0xFF800000, %r10d\n");
     s.push_str("    movd    %r10d, %xmm8\n");
     s.push_str("    xorq    %r14, %r14\n");
@@ -91,11 +104,10 @@ pub fn emit_softmax(
     s.push_str("    incq    %r14\n");
     s.push_str(&format!("    jmp     .Lsm_max_{sid}\n"));
     s.push_str(&format!(".Lsm_max_end_{sid}:\n"));
-    s.push_str("    movss   %xmm8, 32(%rsp)\n");
+    s.push_str(&format!("    movss   %xmm8, {}(%rsp)\n", row_max_slot));
 
-    // Phase 2: exp(x - max) → dst, sum → 40(%rsp). Init sum to 0.
-    // (Was 8(%rsp) before the FFI-reg push above shifted offsets by 32.)
-    s.push_str("    movl    $0, 40(%rsp)\n");
+    // Phase 2: exp(x - max) → dst, sum → row_sum_slot(%rsp). Init sum to 0.
+    s.push_str(&format!("    movl    $0, {}(%rsp)\n", row_sum_slot));
     s.push_str("    xorq    %r14, %r14\n");
     s.push_str(&format!(".Lsm_exp_{sid}:\n"));
     s.push_str(&emit_imm32_to_r10(k as u32));
@@ -104,15 +116,15 @@ pub fn emit_softmax(
     s.push_str("    movq    %r15, %rax\n");
     s.push_str("    addq    %r14, %rax\n");
     s.push_str("    movss   (%rbx, %rax, 4), %xmm0\n");
-    s.push_str("    subss   32(%rsp), %xmm0\n");
+    s.push_str(&format!("    subss   {}(%rsp), %xmm0\n", row_max_slot));
     s.push_str(&format!("    call    {}expf@PLT\n", sym_prefix));
     // %rax clobbered by call; recompute.
     s.push_str("    movq    %r15, %rax\n");
     s.push_str("    addq    %r14, %rax\n");
     s.push_str("    movss   %xmm0, (%r12, %rax, 4)\n");
-    s.push_str("    movss   40(%rsp), %xmm1\n");
+    s.push_str(&format!("    movss   {}(%rsp), %xmm1\n", row_sum_slot));
     s.push_str("    addss   %xmm0, %xmm1\n");
-    s.push_str("    movss   %xmm1, 40(%rsp)\n");
+    s.push_str(&format!("    movss   %xmm1, {}(%rsp)\n", row_sum_slot));
     s.push_str("    incq    %r14\n");
     s.push_str(&format!("    jmp     .Lsm_exp_{sid}\n"));
     s.push_str(&format!(".Lsm_exp_end_{sid}:\n"));
@@ -126,7 +138,7 @@ pub fn emit_softmax(
     s.push_str("    movq    %r15, %rax\n");
     s.push_str("    addq    %r14, %rax\n");
     s.push_str("    movss   (%r12, %rax, 4), %xmm0\n");
-    s.push_str("    divss   40(%rsp), %xmm0\n");
+    s.push_str(&format!("    divss   {}(%rsp), %xmm0\n", row_sum_slot));
     s.push_str("    movss   %xmm0, (%r12, %rax, 4)\n");
     s.push_str("    incq    %r14\n");
     s.push_str(&format!("    jmp     .Lsm_norm_{sid}\n"));
@@ -136,12 +148,10 @@ pub fn emit_softmax(
     s.push_str(&format!("    jmp     .Lsm_i_{sid}\n"));
     s.push_str(&format!(".Lsm_i_end_{sid}:\n"));
 
-    // Restore FFI input regs — must match the 4-push sequence above.
-    // Order is reversed (LIFO): %rax (padding) first, then %rdx/%rsi/%rdi.
-    s.push_str("    popq    %rax\n"); // discard padding
-    s.push_str("    popq    %rdx\n");
-    s.push_str("    popq    %rsi\n");
-    s.push_str("    popq    %rdi\n");
+    // Restore the ABI argument set — strict LIFO order to match
+    // `abi.emit_ffi_save` above. For N=1 this emits `popq %rax;
+    // popq %rdx; popq %rsi; popq %rdi` (bit-identical to M11).
+    abi.emit_ffi_restore(&mut s);
 
     s
 }

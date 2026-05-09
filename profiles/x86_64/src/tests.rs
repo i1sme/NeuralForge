@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::asm::{compute_frame_size, emit_imm32_to_r10, materialise_ptr};
+use crate::asm::{compute_frame_size, emit_imm32_to_r10};
 use crate::buffer::{assign_buffers, compute_callee_saved, BufferLoc};
 use crate::LowerError;
 use compiler::ir;
 use compiler::passes;
+use profile_api::Profile;
 
 #[allow(dead_code)]
 fn lower_x86(src: &str) -> profile_api::Asm {
@@ -92,30 +93,6 @@ fn emit_imm32_to_r10_large_value() {
 }
 
 #[test]
-fn materialise_ptr_input_reg() {
-    let s = materialise_ptr("%rax", BufferLoc::InputReg);
-    assert_eq!(s, "    movq    %rdi, %rax\n");
-}
-
-#[test]
-fn materialise_ptr_output_reg() {
-    let s = materialise_ptr("%rbx", BufferLoc::OutputReg);
-    assert_eq!(s, "    movq    %rdx, %rbx\n");
-}
-
-#[test]
-fn materialise_ptr_stack_offset_zero() {
-    let s = materialise_ptr("%rax", BufferLoc::StackOffset(0));
-    assert_eq!(s, "    movq    %rsp, %rax\n");
-}
-
-#[test]
-fn materialise_ptr_stack_offset_nonzero() {
-    let s = materialise_ptr("%rax", BufferLoc::StackOffset(16));
-    assert_eq!(s, "    leaq    16(%rsp), %rax\n");
-}
-
-#[test]
 fn relu_emits_separate_loop_with_xorps_and_maxss() {
     // Use --no-passes path so relu stays as a separate node (the default
     // pipeline fuses linear→relu and inlines the maxss inside the matmul).
@@ -175,7 +152,7 @@ fn dropout_as_output_emits_copy_loop_no_maxss() {
     let s = lower_x86_no_passes(src).source;
     assert!(s.contains(".Ldropout_"), "missing dropout loop label:\n{s}");
     assert!(
-        s.contains("movss   (%r8, %rcx, 4), %xmm0"),
+        s.contains("movss   (%rax, %rcx, 4), %xmm0"),
         "missing load:\n{s}"
     );
     assert!(
@@ -383,7 +360,7 @@ fn linear_emits_function_with_correct_symbol_and_ret() {
     let sig = &asm.functions[0];
     assert_eq!(sig.name, "nfl_forward_M");
     assert_eq!(sig.model, "M");
-    assert_eq!(sig.input_floats, 6);
+    assert_eq!(sig.inputs_floats, vec![6]);
     assert_eq!(sig.params_floats, 6);
     assert_eq!(sig.output_floats, 4);
 
@@ -466,7 +443,7 @@ fn assign_buffers_input_node_is_input_reg() {
     let uir = ir::build(&ast).expect("ir::build");
     let model = &uir.models[0];
     let assignment = assign_buffers(model);
-    assert!(matches!(assignment.locs[0], BufferLoc::InputReg));
+    assert!(matches!(assignment.locs[0], BufferLoc::InputReg(0)));
 }
 
 #[test]
@@ -893,17 +870,18 @@ model M [batch=2]:
     // Both must use mulss (no FMA on x86_64).
     assert!(asm_no_t.contains("mulss"), "no-t asm:\n{}", asm_no_t);
     assert!(asm_t.contains("mulss"), "t asm:\n{}", asm_t);
+    // M12 register layout: k_inner counter %r11, j counter %r9.
     // Transpose flips inner b_offset computation:
-    //   no-transpose: `movq    %r10, %r11` then `imulq   $N, %r11` (k_inner * N + j)
-    //   transpose:    `movq    %rcx, %r11` then `imulq   $K, %r11` (j * K + k_inner)
+    //   no-transpose: `movq    %r11, %rax` (k_inner * N + j; %rax = k_inner)
+    //   transpose:    `movq    %r9, %rax`  (j * K + k_inner;  %rax = j)
     assert!(
-        asm_no_t.contains("movq    %r10, %r11"),
-        "no-t asm should compute b_offset from %r10 (k_inner):\n{}",
+        asm_no_t.contains("movq    %r11, %rax"),
+        "no-t asm should compute b_offset from %r11 (k_inner):\n{}",
         asm_no_t
     );
     assert!(
-        asm_t.contains("movq    %rcx, %r11"),
-        "t asm should compute b_offset from %rcx (j):\n{}",
+        asm_t.contains("movq    %r9, %rax"),
+        "t asm should compute b_offset from %r9 (j):\n{}",
         asm_t
     );
     assert_ne!(asm_no_t, asm_t, "transpose_b should change emitted asm");
@@ -972,14 +950,18 @@ model M [batch=2, heads=4, seq=4, head_dim=4]:
 }
 
 #[test]
-fn matmul_preserves_ffi_register_invariants_rdi_rsi_rdx() {
-    // Critical regression test: emit_matmul x86_64 must not leak its scratch
-    // use of %rdi/%rsi/%rdx as A_slice/B_slice/DST_slice pointers into the
-    // FFI register state visible to downstream emitters (per SysV AMD64 ABI,
-    // %rdi=input, %rsi=params, %rdx=output).
+fn matmul_preserves_ffi_register_invariants_no_spill() {
+    // M12 (spec §9.1) regression test, INVERTED from M11: emit_matmul
+    // must NOT spill any ABI argument register, because under the
+    // multi-input ABI %rsi/%rdx/%rcx/%r8 may hold input pointers
+    // downstream emitters need to read intact.
     //
-    // The fix is to spill all three to %xmm6/%xmm7/%xmm8 at function entry
-    // and restore at exit. This test asserts all three pairs are present.
+    // The pre-M12 spill pair `movq %rdi, %xmm8` / `movq %xmm8, %rdi`
+    // (and the matching %rsi/%rdx pairs) is gone; per-iter slice
+    // pointers move to non-ABI scratch (callee-saved %r12/%r13/%r14).
+    // emit_matmul does not call FFI, so no stack manipulation should
+    // appear in its body. Asserted by `emit_matmul_body_contains_zero_pushq`
+    // below; this test guards the legacy fixture-shape model end-to-end.
     let src = "\
 model M [batch=2, heads=4, seq=4, head_dim=4]:
     x: Tensor[batch, heads, seq, head_dim]
@@ -990,36 +972,40 @@ model M [batch=2, heads=4, seq=4, head_dim=4]:
         .expect("lower")
         .source;
 
-    // Entry spills.
+    // The matmul body should contain no spill of an ABI arg register
+    // INTO an %xmm scratch reg. The function-level prologue may push
+    // callee-saved %rbx/%r12-%r15 (because matmul triggers callee-saved
+    // per `compute_callee_saved`), but no `movq %rdi, %xmm…`/etc.
+    // The matmul-only fixture above is leaf w.r.t. FFI (no softmax),
+    // so no FFI-call spill block either.
     assert!(
-        asm.contains("movq    %rdi, %xmm8"),
-        "missing %rdi spill; asm:\n{}",
+        !asm.contains("movq    %rdi, %xmm"),
+        "M12 emit_matmul must not spill %rdi; asm:\n{}",
         asm
     );
     assert!(
-        asm.contains("movq    %rsi, %xmm6"),
-        "missing %rsi spill; asm:\n{}",
+        !asm.contains("movq    %rsi, %xmm"),
+        "M12 emit_matmul must not spill %rsi; asm:\n{}",
         asm
     );
     assert!(
-        asm.contains("movq    %rdx, %xmm7"),
-        "missing %rdx spill; asm:\n{}",
-        asm
-    );
-    // Exit restores.
-    assert!(
-        asm.contains("movq    %xmm8, %rdi"),
-        "missing %rdi restore; asm:\n{}",
+        !asm.contains("movq    %rdx, %xmm"),
+        "M12 emit_matmul must not spill %rdx; asm:\n{}",
         asm
     );
     assert!(
-        asm.contains("movq    %xmm6, %rsi"),
-        "missing %rsi restore; asm:\n{}",
+        !asm.contains("movq    %xmm8, %rdi"),
+        "M12 emit_matmul must not restore %rdi; asm:\n{}",
         asm
     );
     assert!(
-        asm.contains("movq    %xmm7, %rdx"),
-        "missing %rdx restore; asm:\n{}",
+        !asm.contains("movq    %xmm6, %rsi"),
+        "M12 emit_matmul must not restore %rsi; asm:\n{}",
+        asm
+    );
+    assert!(
+        !asm.contains("movq    %xmm7, %rdx"),
+        "M12 emit_matmul must not restore %rdx; asm:\n{}",
         asm
     );
 }
@@ -1052,4 +1038,421 @@ model M [batch=2]:
         .source;
     assert!(asm.contains("movl    $0x3e800000, %r10d"), "asm:\n{}", asm);
     assert!(asm.contains("movd    %r10d, %xmm4"), "asm:\n{}", asm);
+}
+
+/// N=1 regression invariant: every existing fixture must compile to
+/// the EXACT same assembly as the committed goldens in tests/golden/
+///
+/// This test loops over a list of fixtures and asserts byte-exact
+/// equality with the corresponding golden file. Spec §10.2 gate #4.
+///
+/// Mirrors the exact nflc compile pipeline: parse → build → default
+/// passes → lower. Golden files were generated by nflc compile with
+/// defaults (passes enabled).
+#[test]
+fn n1_regression_all_fixtures_bit_exact() {
+    use compiler::passes::{default_pipeline, run_pipeline};
+
+    let fixtures = [
+        "tiny_mlp",
+        "m4_linear_relu",
+        "mixed_args",
+        "softmax_with_bias",
+        "dropout_only",
+        "classifier",
+        "large_classifier_k",
+        "large_classifier_n",
+        "pipeline_styles",
+        "comments",
+        "self_attention",
+    ];
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    for f in fixtures {
+        let nfl_path = format!("{manifest_dir}/../../tests/fixtures/{f}.nfl");
+        let golden_path = format!("{manifest_dir}/tests/golden/{f}.s");
+        let src =
+            std::fs::read_to_string(&nfl_path).unwrap_or_else(|e| panic!("read {nfl_path}: {e}"));
+        let nfl = compiler::parse(&src).unwrap();
+        let uir = compiler::ir::build(&nfl).unwrap();
+        let uir =
+            run_pipeline(&uir, &default_pipeline()).unwrap_or_else(|e| panic!("pipeline {f}: {e}"));
+        let asm = crate::X86_64Profile.lower(&uir).unwrap().source;
+        let golden = std::fs::read_to_string(&golden_path)
+            .unwrap_or_else(|e| panic!("read {golden_path}: {e}"));
+        if asm != golden {
+            // Show first diverging line for diagnostic.
+            for (i, (a, g)) in asm.lines().zip(golden.lines()).enumerate() {
+                if a != g {
+                    panic!(
+                        "fixture {f}: divergence at line {}\n  generated: {a:?}\n  golden:    {g:?}",
+                        i + 1
+                    );
+                }
+            }
+            // Fallback if length differs but prefix matches.
+            panic!(
+                "fixture {f}: assembly differs from golden (length: gen={}, golden={})",
+                asm.len(),
+                golden.len()
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// M12 AbiContext unit tests — alignment, LIFO, ffi_save_set, materialise_ptr.
+// ---------------------------------------------------------------------
+
+use crate::abi::AbiContext;
+
+#[test]
+fn abi_input_reg_n1() {
+    let abi = AbiContext { n_inputs: 1 };
+    assert_eq!(abi.input_reg(0), "%rdi");
+}
+
+#[test]
+fn abi_input_reg_n3() {
+    let abi = AbiContext { n_inputs: 3 };
+    assert_eq!(abi.input_reg(0), "%rdi");
+    assert_eq!(abi.input_reg(1), "%rsi");
+    assert_eq!(abi.input_reg(2), "%rdx");
+}
+
+#[test]
+fn abi_params_reg_shifts_with_arity() {
+    assert_eq!(AbiContext { n_inputs: 1 }.params_reg(), "%rsi");
+    assert_eq!(AbiContext { n_inputs: 2 }.params_reg(), "%rdx");
+    assert_eq!(AbiContext { n_inputs: 3 }.params_reg(), "%rcx");
+    assert_eq!(AbiContext { n_inputs: 4 }.params_reg(), "%r8");
+}
+
+#[test]
+fn abi_output_reg_shifts_with_arity() {
+    assert_eq!(AbiContext { n_inputs: 1 }.output_reg(), "%rdx");
+    assert_eq!(AbiContext { n_inputs: 2 }.output_reg(), "%rcx");
+    assert_eq!(AbiContext { n_inputs: 3 }.output_reg(), "%r8");
+    assert_eq!(AbiContext { n_inputs: 4 }.output_reg(), "%r9");
+}
+
+#[test]
+fn abi_ffi_save_set_size_equals_n_plus_2() {
+    for n in 1..=4 {
+        assert_eq!(
+            AbiContext { n_inputs: n }.ffi_save_set().len(),
+            n + 2,
+            "n={n}"
+        );
+    }
+}
+
+#[test]
+fn abi_ffi_save_set_contents_n3() {
+    let abi = AbiContext { n_inputs: 3 };
+    assert_eq!(abi.ffi_save_set(), &["%rdi", "%rsi", "%rdx", "%rcx", "%r8"]);
+}
+
+#[test]
+fn abi_materialise_input_n1() {
+    let abi = AbiContext { n_inputs: 1 };
+    let mut s = String::new();
+    abi.materialise_ptr(BufferLoc::InputReg(0), "%r10", &mut s);
+    assert!(s.contains("movq    %rdi, %r10"), "got: {s}");
+}
+
+#[test]
+fn abi_materialise_input_n3_idx2() {
+    let abi = AbiContext { n_inputs: 3 };
+    let mut s = String::new();
+    abi.materialise_ptr(BufferLoc::InputReg(2), "%r11", &mut s);
+    assert!(s.contains("movq    %rdx, %r11"), "got: {s}");
+}
+
+#[test]
+fn abi_materialise_output_n2() {
+    let abi = AbiContext { n_inputs: 2 };
+    let mut s = String::new();
+    abi.materialise_ptr(BufferLoc::OutputReg, "%r12", &mut s);
+    // N=2 → output is %rcx (= INPUT_REGS[2 + 1]).
+    assert!(s.contains("movq    %rcx, %r12"), "got: {s}");
+}
+
+#[test]
+fn abi_materialise_stack_offset_small() {
+    let abi = AbiContext { n_inputs: 1 };
+    let mut s = String::new();
+    abi.materialise_ptr(BufferLoc::StackOffset(64), "%r12", &mut s);
+    assert!(s.contains("leaq    64(%rsp), %r12"), "got: {s}");
+}
+
+#[test]
+fn abi_materialise_stack_offset_zero_uses_movq_rsp() {
+    let abi = AbiContext { n_inputs: 1 };
+    let mut s = String::new();
+    abi.materialise_ptr(BufferLoc::StackOffset(0), "%r12", &mut s);
+    assert!(s.contains("movq    %rsp, %r12"), "got: {s}");
+}
+
+#[test]
+fn abi_emit_ffi_save_n1_three_regs_pads_rax() {
+    let abi = AbiContext { n_inputs: 1 };
+    let mut s = String::new();
+    abi.emit_ffi_save(&mut s);
+    assert!(s.contains("pushq   %rdi"), "got:\n{s}");
+    assert!(s.contains("pushq   %rsi"), "got:\n{s}");
+    assert!(s.contains("pushq   %rdx"), "got:\n{s}");
+    assert!(s.contains("pushq   %rax"), "got:\n{s}");
+    let push_count = s.matches("pushq").count();
+    assert_eq!(
+        push_count, 4,
+        "3 input/params/output + 1 padding; got {push_count}"
+    );
+}
+
+#[test]
+fn abi_emit_ffi_save_n2_four_regs_no_pad() {
+    let abi = AbiContext { n_inputs: 2 };
+    let mut s = String::new();
+    abi.emit_ffi_save(&mut s);
+    assert!(s.contains("pushq   %rdi"));
+    assert!(s.contains("pushq   %rsi"));
+    assert!(s.contains("pushq   %rdx"));
+    assert!(s.contains("pushq   %rcx"));
+    // No padding push when arity is even.
+    assert!(
+        !s.contains("padding"),
+        "no %rax padding for even arity; got:\n{s}"
+    );
+    assert_eq!(s.matches("pushq").count(), 4);
+}
+
+#[test]
+fn abi_emit_ffi_save_n3_five_regs_pads_rax() {
+    let abi = AbiContext { n_inputs: 3 };
+    let mut s = String::new();
+    abi.emit_ffi_save(&mut s);
+    assert!(s.contains("pushq   %rdi"));
+    assert!(s.contains("pushq   %rsi"));
+    assert!(s.contains("pushq   %rdx"));
+    assert!(s.contains("pushq   %rcx"));
+    assert!(s.contains("pushq   %r8"));
+    assert!(s.contains("pushq   %rax"));
+    assert_eq!(
+        s.matches("pushq").count(),
+        6,
+        "5 input/params/output + 1 padding"
+    );
+}
+
+#[test]
+fn abi_emit_ffi_save_n4_six_regs_no_pad() {
+    let abi = AbiContext { n_inputs: 4 };
+    let mut s = String::new();
+    abi.emit_ffi_save(&mut s);
+    assert!(s.contains("pushq   %rdi"));
+    assert!(s.contains("pushq   %rsi"));
+    assert!(s.contains("pushq   %rdx"));
+    assert!(s.contains("pushq   %rcx"));
+    assert!(s.contains("pushq   %r8"));
+    assert!(s.contains("pushq   %r9"));
+    assert!(!s.contains("padding"), "no padding for even arity");
+    assert_eq!(s.matches("pushq").count(), 6);
+}
+
+#[test]
+fn abi_emit_ffi_save_sp_delta_always_multiple_of_16() {
+    for n in 1..=4 {
+        let abi = AbiContext { n_inputs: n };
+        let mut s = String::new();
+        abi.emit_ffi_save(&mut s);
+        // Each `pushq` decrements rsp by 8.
+        let push_count = s.matches("pushq").count();
+        let sp_delta = push_count * 8;
+        assert!(sp_delta.is_multiple_of(16), "n={n} sp_delta={sp_delta}");
+        // Also: push_count == n+2 + (1 if odd else 0).
+        let expected = (n + 2) + if (n + 2).is_multiple_of(2) { 0 } else { 1 };
+        assert_eq!(push_count, expected, "n={n}: parity check");
+    }
+}
+
+#[test]
+fn abi_emit_ffi_restore_n1_lifo() {
+    // Save order: pushq %rdi; pushq %rsi; pushq %rdx; pushq %rax (pad).
+    // Restore order (LIFO): popq %rax (discard pad); popq %rdx; popq %rsi; popq %rdi.
+    let abi = AbiContext { n_inputs: 1 };
+    let mut s = String::new();
+    abi.emit_ffi_restore(&mut s);
+    let pos_pad = s.find("popq    %rax").expect("popq %rax (pad)");
+    let pos_rdx = s.find("popq    %rdx").expect("popq %rdx");
+    let pos_rsi = s.find("popq    %rsi").expect("popq %rsi");
+    let pos_rdi = s.find("popq    %rdi").expect("popq %rdi");
+    assert!(
+        pos_pad < pos_rdx,
+        "LIFO: padding pop comes first; got:\n{s}"
+    );
+    assert!(pos_rdx < pos_rsi, "LIFO: %rdx pop before %rsi");
+    assert!(pos_rsi < pos_rdi, "LIFO: %rsi pop before %rdi");
+}
+
+#[test]
+fn abi_emit_ffi_restore_n3_lifo() {
+    // Save: pushq %rdi/%rsi/%rdx/%rcx/%r8 + pushq %rax (pad).
+    // Restore (LIFO): popq %rax (pad); popq %r8; popq %rcx; popq %rdx; popq %rsi; popq %rdi.
+    let abi = AbiContext { n_inputs: 3 };
+    let mut s = String::new();
+    abi.emit_ffi_restore(&mut s);
+    let pad = s.find("popq    %rax").expect("padding pop");
+    let r8 = s.find("popq    %r8").expect("%r8 pop");
+    let rcx = s.find("popq    %rcx").expect("%rcx pop");
+    let rdx = s.find("popq    %rdx").expect("%rdx pop");
+    let rsi = s.find("popq    %rsi").expect("%rsi pop");
+    let rdi = s.find("popq    %rdi").expect("%rdi pop");
+    assert!(pad < r8, "LIFO: pad before %r8");
+    assert!(r8 < rcx, "LIFO: %r8 before %rcx");
+    assert!(rcx < rdx, "LIFO: %rcx before %rdx");
+    assert!(rdx < rsi, "LIFO: %rdx before %rsi");
+    assert!(rsi < rdi, "LIFO: %rsi before %rdi");
+}
+
+#[test]
+fn abi_save_then_restore_balances_sp() {
+    // Number of pushq == number of popq.
+    for n in 1..=4 {
+        let abi = AbiContext { n_inputs: n };
+        let mut save = String::new();
+        let mut restore = String::new();
+        abi.emit_ffi_save(&mut save);
+        abi.emit_ffi_restore(&mut restore);
+        assert_eq!(
+            save.matches("pushq").count(),
+            restore.matches("popq").count(),
+            "save/restore mismatch at n={n}"
+        );
+    }
+}
+
+#[test]
+fn abi_save_set_each_reg_appears_exactly_once_in_save_and_restore() {
+    for n in 1..=4 {
+        let abi = AbiContext { n_inputs: n };
+        let mut save = String::new();
+        let mut restore = String::new();
+        abi.emit_ffi_save(&mut save);
+        abi.emit_ffi_restore(&mut restore);
+        for &reg in abi.ffi_save_set() {
+            assert_eq!(save.matches(reg).count(), 1, "n={n} reg={reg} save");
+            assert_eq!(restore.matches(reg).count(), 1, "n={n} reg={reg} restore");
+        }
+    }
+}
+
+#[test]
+fn emit_matmul_body_contains_zero_pushq() {
+    // Spec §9.1: emit_matmul does not call FFI; only AbiContext::emit_ffi_save
+    // emits stack manipulation. After the M12 rework, emit_matmul body must
+    // contain zero `pushq` instructions. The function-level prologue (callee-
+    // saved regs %rbx/%r12-%r15) emits its own pushq — but that's outside
+    // emit_matmul. Mirror of arm64's `emit_matmul_body_contains_zero_stp`.
+    use compiler::ast::Span;
+    let abi = AbiContext { n_inputs: 2 };
+    let span = Span::new(0, 0);
+    let result = crate::ops::matmul::emit_matmul(
+        &abi,
+        /* leading_count */ 1,
+        /* m */ 4,
+        /* k */ 8,
+        /* n */ 4,
+        /* transpose_b */ false,
+        /* model_idx */ 0,
+        /* matmul_idx */ 0,
+        /* a_loc */ BufferLoc::InputReg(0),
+        /* b_loc */ BufferLoc::InputReg(1),
+        /* dst_loc */ BufferLoc::OutputReg,
+        span,
+    )
+    .expect("emit_matmul should succeed");
+    let pushq_count = result.matches("pushq").count();
+    assert_eq!(
+        pushq_count, 0,
+        "emit_matmul body must contain zero pushq instructions per §9.1; got {pushq_count}\n{result}"
+    );
+}
+
+// ---- Group C Q11: N=4 rejection -------------------------------------------
+
+#[test]
+fn emit_matmul_rejects_n4_with_clear_error() {
+    // Q11 (Group C): %r9 is both the j-counter scratch in emit_matmul and
+    // output_reg() at N=4 (INPUT_REGS[5]). emit_matmul must reject N=4 with
+    // LowerError::UnsupportedOp rather than silently producing wrong asm.
+    use compiler::ast::Span;
+    let abi = AbiContext { n_inputs: 4 };
+    let span = Span::new(1, 1);
+    let result = crate::ops::matmul::emit_matmul(
+        &abi,
+        /* leading_count */ 1,
+        /* m */ 4,
+        /* k */ 8,
+        /* n */ 4,
+        /* transpose_b */ false,
+        /* model_idx */ 0,
+        /* matmul_idx */ 0,
+        /* a_loc */ BufferLoc::InputReg(0),
+        /* b_loc */ BufferLoc::InputReg(1),
+        /* dst_loc */ BufferLoc::OutputReg,
+        span,
+    );
+    match result {
+        Err(profile_api::LowerError::UnsupportedOp { op, .. }) => {
+            assert!(
+                op.contains("matmul"),
+                "error message must mention 'matmul'; got: {op}"
+            );
+            assert!(
+                op.contains("N=4") || op.contains("4 inputs"),
+                "error message must mention N=4 collision; got: {op}"
+            );
+        }
+        Err(other) => panic!("expected UnsupportedOp, got {other:?}"),
+        Ok(_) => panic!("emit_matmul accepted N=4; should have rejected per Group C Q11"),
+    }
+}
+
+// ---- Group C Q5: compute_callee_saved matmul-only branch ------------------
+
+#[test]
+fn compute_callee_saved_fires_for_matmul_only_no_softmax_model() {
+    // Q5 (Group C): the has_matmul branch of compute_callee_saved was only
+    // exercised end-to-end through self_attention.nfl which has BOTH softmax
+    // AND matmul. This test verifies the has_matmul trigger fires independently
+    // for a matmul-only model with no softmax.
+    let src = "\
+model MatmulOnly [batch=2]:
+    a: Tensor[batch, 4]
+    b: Tensor[4, 8]
+
+    out: Tensor[batch, 8] = a -> matmul[b]
+";
+    let ast = compiler::parse(src).expect("parse");
+    let uir = compiler::ir::build(&ast).expect("ir::build");
+    let model = &uir.models[0];
+    // Precondition: model has no softmax node.
+    let has_softmax = model.nodes.iter().any(|n| {
+        matches!(
+            n.kind,
+            compiler::NodeKind::Op {
+                op: compiler::StdOp::Softmax,
+                ..
+            }
+        )
+    });
+    assert!(
+        !has_softmax,
+        "fixture must not contain softmax for this test to be meaningful"
+    );
+    let regs = compute_callee_saved(model);
+    assert!(
+        regs.callee_saved_int,
+        "matmul-only model must trigger callee-saved register save (has_matmul branch)"
+    );
 }

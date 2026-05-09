@@ -5,6 +5,7 @@
 //! Lowers a [`compiler::Uir`] to x86_64 Linux ELF assembly text via
 //! [`X86_64Profile`]. Scalar SSE2 only — no SIMD/AVX. AT&T syntax.
 
+mod abi;
 mod asm;
 mod buffer;
 mod codegen;

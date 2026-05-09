@@ -2,7 +2,7 @@
 
 //! Low-level x86_64 assembly building blocks (AT&T syntax).
 
-use crate::buffer::{BufferLoc, RegSet};
+use crate::buffer::RegSet;
 use profile_api::FnSig;
 
 /// SysV AMD64 stack frame size, including the alignment correction
@@ -26,35 +26,6 @@ pub fn compute_frame_size(raw_buffer_size: u32, num_pushes: usize) -> u32 {
 /// no movz/movk dance required (contrast arm64::asm::emit_imm32).
 pub fn emit_imm32_to_r10(value: u32) -> String {
     format!("    movl    ${}, %r10d\n", value)
-}
-
-/// Materialise a [`BufferLoc`] into the named register.
-///
-/// FFI signature contract (matches arm64): arg 0 = input (%rdi),
-/// arg 1 = params (%rsi), arg 2 = output (%rdx).
-///
-/// Stack-resident buffers live at `[%rsp + offset]`. x86_64 `lea`
-/// accepts any 32-bit signed displacement directly — no size cliffs.
-pub fn materialise_ptr(reg: &str, loc: BufferLoc) -> String {
-    match loc {
-        BufferLoc::InputReg => format!("    movq    %rdi, {}\n", reg),
-        BufferLoc::OutputReg => format!("    movq    %rdx, {}\n", reg),
-        BufferLoc::StackOffset(off) => {
-            assert!(
-                off <= i32::MAX as usize,
-                "stack offset > 2 GiB unsupported (got {} bytes)",
-                off
-            );
-            if off == 0 {
-                format!("    movq    %rsp, {}\n", reg)
-            } else {
-                format!("    leaq    {}(%rsp), {}\n", off, reg)
-            }
-        }
-        BufferLoc::Alias(_) => {
-            unreachable!("materialise_ptr should never see Alias — resolve_loc must run first")
-        }
-    }
 }
 
 /// Number of pushes the prologue emits, given the callee-saved set.

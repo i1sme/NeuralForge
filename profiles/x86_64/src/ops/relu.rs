@@ -2,7 +2,8 @@
 
 //! Relu (elementwise max with zero) codegen — x86_64 SSE2.
 
-use crate::asm::{emit_imm32_to_r10, materialise_ptr};
+use crate::abi::AbiContext;
+use crate::asm::emit_imm32_to_r10;
 use crate::buffer::BufferLoc;
 
 /// Emit x86_64 asm for an elementwise ReLU.
@@ -12,13 +13,14 @@ use crate::buffer::BufferLoc;
 /// `pipeline_styles.nfl` would otherwise collide on `.Lrelu_0` etc.).
 ///
 /// Register usage:
-///   %r8  (= src pointer)
+///   %rax (= src pointer)
 ///   %r11 (= dst pointer)
 ///   %r10d (= total_floats — written via emit_imm32_to_r10)
 ///   %rcx (= loop counter)
 ///   %xmm0 (= scratch float — element)
 ///   %xmm1 (= scratch float — zero)
 pub fn emit_relu(
+    abi: &AbiContext,
     total_floats: u64,
     model_idx: usize,
     relu_idx: usize,
@@ -30,15 +32,15 @@ pub fn emit_relu(
     s.push_str(&format!(
         "    # relu: copy-clamp src→dst ({total_floats} elements)\n"
     ));
-    s.push_str(&materialise_ptr("%r8", src_loc));
-    s.push_str(&materialise_ptr("%r11", dst_loc));
+    abi.materialise_ptr(src_loc, "%rax", &mut s);
+    abi.materialise_ptr(dst_loc, "%r11", &mut s);
     s.push_str("    xorps   %xmm1, %xmm1\n");
     s.push_str(&emit_imm32_to_r10(total_floats as u32));
     s.push_str("    xorq    %rcx, %rcx\n");
     s.push_str(&format!(".Lrelu_{rid}:\n"));
     s.push_str("    cmpq    %r10, %rcx\n");
     s.push_str(&format!("    jge     .Lrelu_end_{rid}\n"));
-    s.push_str("    movss   (%r8, %rcx, 4), %xmm0\n");
+    s.push_str("    movss   (%rax, %rcx, 4), %xmm0\n");
     s.push_str("    maxss   %xmm1, %xmm0\n");
     s.push_str("    movss   %xmm0, (%r11, %rcx, 4)\n");
     s.push_str("    incq    %rcx\n");

@@ -13,9 +13,9 @@
 //! buffer, since alias-redirection no longer applies. `emit_dropout_copy`
 //! emits the float-by-float copy loop for that path.
 
+use crate::abi::AbiContext;
 use crate::asm::emit_imm32;
 use crate::buffer::BufferLoc;
-use crate::ops::linear::materialise_ptr;
 
 /// Emit AArch64 asm for a dropout-as-output copy loop.
 ///
@@ -23,6 +23,7 @@ use crate::ops::linear::materialise_ptr;
 /// element-wise load → store, no transformation. Used only when a
 /// `Dropout` node is the model's output (see module-level doc).
 pub fn emit_dropout_copy(
+    abi: &AbiContext,
     total_floats: u64,
     model_idx: usize,
     dropout_idx: usize,
@@ -38,8 +39,8 @@ pub fn emit_dropout_copy(
     s.push_str(&format!(
         "    ; dropout-as-output: copy operand→output ({total_floats} elements)\n"
     ));
-    s.push_str(&materialise_ptr("x11", src_loc));
-    s.push_str(&materialise_ptr("x12", dst_loc));
+    abi.materialise_ptr(src_loc, "x11", &mut s);
+    abi.materialise_ptr(dst_loc, "x12", &mut s);
     s.push_str(&emit_imm32("x10", total_floats as usize));
     s.push_str("    mov     x9, #0\n");
     s.push_str(&format!(".Ldropout_{did}:\n"));

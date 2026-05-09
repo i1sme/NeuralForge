@@ -2,6 +2,7 @@
 
 //! Linear (matmul + optional bias-add) codegen.
 
+use crate::abi::AbiContext;
 use crate::asm::emit_imm32;
 use crate::buffer::BufferLoc;
 use compiler::ast::Span;
@@ -17,6 +18,7 @@ use profile_api::LowerError;
 /// M6 added `node_span` and `fused_post_ops` and wired the `PostOp::SoftmaxRow` dispatch (see `arm64.md` §4.10).
 #[allow(clippy::too_many_arguments)]
 pub fn emit_linear(
+    abi: &AbiContext,
     b: u64,
     k: u64,
     n: u64,
@@ -48,20 +50,21 @@ pub fn emit_linear(
         s.push_str("    fmov    s4, wzr\n");
     }
 
-    s.push_str(&materialise_ptr("x11", src_loc));
-    s.push_str(&materialise_ptr("x12", dst_loc));
+    abi.materialise_ptr(src_loc, "x11", &mut s);
+    abi.materialise_ptr(dst_loc, "x12", &mut s);
+    let params_reg = abi.params_reg();
     if weight_offset == 0 {
-        s.push_str("    mov     x13, x1\n");
+        s.push_str(&format!("    mov     x13, {}\n", params_reg));
     } else {
         s.push_str(&emit_imm32("x9", weight_offset));
-        s.push_str("    add     x13, x1, x9, lsl #2\n");
+        s.push_str(&format!("    add     x13, {}, x9, lsl #2\n", params_reg));
     }
     if let Some(boff) = bias_offset {
         if boff == 0 {
-            s.push_str("    mov     x14, x1\n");
+            s.push_str(&format!("    mov     x14, {}\n", params_reg));
         } else {
             s.push_str(&emit_imm32("x9", boff));
-            s.push_str("    add     x14, x1, x9, lsl #2\n");
+            s.push_str(&format!("    add     x14, {}, x9, lsl #2\n", params_reg));
         }
     }
 
@@ -238,37 +241,4 @@ pub fn emit_linear(
     }
 
     Ok(s)
-}
-
-/// Materialise a `BufferLoc` into a GPR (e.g. x11, x12). pub(crate) so relu.rs uses it too.
-pub(crate) fn materialise_ptr(reg: &str, loc: BufferLoc) -> String {
-    match loc {
-        BufferLoc::InputReg => format!("    mov     {}, x0\n", reg),
-        BufferLoc::OutputReg => format!("    mov     {}, x2\n", reg),
-        BufferLoc::StackOffset(off) => {
-            assert!(
-                off <= u32::MAX as usize,
-                "stack offset > 4 GiB unsupported in M4b (got {} bytes)",
-                off
-            );
-            if off == 0 {
-                format!("    mov     {}, sp\n", reg)
-            } else if off <= 4095 {
-                format!("    add     {}, sp, #{}\n", reg, off)
-            } else if off <= 16_773_120 && off.is_multiple_of(4096) {
-                format!("    add     {}, sp, #{}, lsl #12\n", reg, off / 4096)
-            } else {
-                let lo = (off & 0xFFFF) as u16;
-                let hi = ((off >> 16) & 0xFFFF) as u16;
-                let mut s = String::new();
-                s.push_str(&format!("    movz    w10, #0x{:04x}\n", lo));
-                if hi != 0 {
-                    s.push_str(&format!("    movk    w10, #0x{:04x}, lsl #16\n", hi));
-                }
-                s.push_str(&format!("    add     {}, sp, x10\n", reg));
-                s
-            }
-        }
-        BufferLoc::Alias(_) => unreachable!("alias must be resolved by caller"),
-    }
 }

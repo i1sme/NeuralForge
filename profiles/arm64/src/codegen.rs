@@ -4,6 +4,7 @@
 //!
 //! Per-op emitters land here as Tasks 3-5 progress.
 
+use crate::abi::{AbiContext, INPUT_REGS};
 use compiler::{NodeId, NodeKind, StdOp, Uir, UirModel};
 use profile_api::{Asm, FnSig, LowerError, ParamKind, ParamSlot};
 
@@ -37,11 +38,31 @@ fn walk_model(
         }
     }
 
-    // 2. Compute layout, ABI sizes (kept from Task 1).
-    let input_id = *model.inputs.first().ok_or(LowerError::ShapeNotConcrete {
-        span: model.source_span,
-    })?;
-    let input_floats: usize = model.nodes[input_id].ty.shape.0.iter().product::<u64>() as usize;
+    // 1b. Arity check (M12 spec §5.3): N + 2 ≤ INPUT_REGS.len(). The
+    // current cap is N=4 (INPUT_REGS = x0..x5). Larger N would require
+    // stack-spill on the input side, deferred to a future milestone.
+    let n_inputs = model.inputs.len();
+    if n_inputs + 2 > INPUT_REGS.len() {
+        return Err(LowerError::TooManyInputs {
+            n: n_inputs,
+            max: INPUT_REGS.len() - 2,
+            span: model.source_span,
+        });
+    }
+    let abi = AbiContext { n_inputs };
+
+    // 2. Compute layout, ABI sizes. inputs_floats is now a per-input
+    // vec (M12 multi-input ABI); for N=1 this is just `vec![input_0]`.
+    if model.inputs.is_empty() {
+        return Err(LowerError::ShapeNotConcrete {
+            span: model.source_span,
+        });
+    }
+    let inputs_floats: Vec<usize> = model
+        .inputs
+        .iter()
+        .map(|&id| model.nodes[id].ty.shape.0.iter().product::<u64>() as usize)
+        .collect();
     let output_floats: usize =
         model.nodes[model.output].ty.shape.0.iter().product::<u64>() as usize;
 
@@ -86,7 +107,7 @@ fn walk_model(
     let sig = FnSig {
         name: format!("nfl_forward_{}", model.name),
         model: model.name.clone(),
-        input_floats,
+        inputs_floats,
         output_floats,
         params_floats,
         params_layout,
@@ -148,6 +169,7 @@ fn walk_model(
                     };
 
                     body.push_str(&crate::ops::emit_linear(
+                        &abi,
                         b,
                         k,
                         n,
@@ -169,7 +191,7 @@ fn walk_model(
                     let src_loc = resolve_loc(&assignment.locs, operands[0]);
                     let dst_loc = resolve_loc(&assignment.locs, node_idx);
                     body.push_str(&crate::ops::emit_relu(
-                        total, model_idx, relu_idx, src_loc, dst_loc,
+                        &abi, total, model_idx, relu_idx, src_loc, dst_loc,
                     ));
                     relu_idx += 1;
                 }
@@ -182,6 +204,7 @@ fn walk_model(
                         // node IS the output. See `ops/dropout.rs` module doc.
                         let total: u64 = node.ty.shape.0.iter().product();
                         body.push_str(&crate::ops::emit_dropout_copy(
+                            &abi,
                             total,
                             model_idx,
                             dropout_idx,
@@ -205,6 +228,7 @@ fn walk_model(
                     let src_loc = resolve_loc(&assignment.locs, operands[0]);
                     let dst_loc = resolve_loc(&assignment.locs, node_idx);
                     body.push_str(&crate::ops::emit_softmax(
+                        &abi,
                         b,
                         k,
                         model_idx,
@@ -244,6 +268,7 @@ fn walk_model(
                     let b_loc = resolve_loc(&assignment.locs, b_id);
                     let dst_loc = resolve_loc(&assignment.locs, node_idx);
                     body.push_str(&crate::ops::emit_matmul(
+                        &abi,
                         leading_count,
                         m,
                         k,
@@ -279,6 +304,7 @@ fn walk_model(
                     let src_loc = resolve_loc(&assignment.locs, operands[0]);
                     let dst_loc = resolve_loc(&assignment.locs, node_idx);
                     body.push_str(&crate::ops::emit_mulscalar(
+                        &abi,
                         total,
                         scalar_bits,
                         model_idx,

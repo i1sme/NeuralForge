@@ -14,13 +14,14 @@
 //! f64-to-f32 truncation happens in the dispatcher (codegen.rs) — the
 //! emitter receives `scalar_bits: u32` already in f32 form. See spec §6.5.
 
+use crate::abi::AbiContext;
 use crate::asm::emit_imm32;
 use crate::buffer::BufferLoc;
-use crate::ops::linear::materialise_ptr;
 
 /// Emit AArch64 asm for `dst[i] = src[i] * scalar` over `total_elements`.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_mulscalar(
+    abi: &AbiContext,
     total_elements: u64,
     scalar_bits: u32,
     model_idx: usize,
@@ -45,8 +46,8 @@ pub fn emit_mulscalar(
     s.push_str("    fmov    s4, w9\n");
 
     // Materialise base pointers. With Alias, both resolve to the same.
-    s.push_str(&materialise_ptr("x11", src_loc));
-    s.push_str(&materialise_ptr("x12", dst_loc));
+    abi.materialise_ptr(src_loc, "x11", &mut s);
+    abi.materialise_ptr(dst_loc, "x12", &mut s);
 
     // Flat loop: x3 = i.
     s.push_str("    mov     x3, #0\n");

@@ -186,7 +186,7 @@ fn m4a_no_softmax_still_runs() {
     assert_eq!(asm.functions.len(), 1);
     let sig = &asm.functions[0];
     assert_eq!(sig.name, "nfl_forward_M4Demo");
-    assert_eq!(sig.input_floats, 32);
+    assert_eq!(sig.inputs_floats, vec![32]);
     assert_eq!(sig.params_floats, 8);
     assert_eq!(sig.output_floats, 16);
 
@@ -471,7 +471,7 @@ fn comments_runs_correctly() {
     let forward: libloading::Symbol<unsafe extern "C" fn(*const f32, *const f32, *mut f32)> =
         unsafe { lib.get(b"nfl_forward_Commented") }.unwrap();
 
-    let mut input = vec![0.0f32; sig.input_floats];
+    let mut input = vec![0.0f32; sig.inputs_floats[0]];
     for (i, v) in input.iter_mut().enumerate() {
         *v = (i as f32) * 0.1 - 1.0;
     }
@@ -658,17 +658,17 @@ fn fused_vs_unfused_softmax_match_numerically() {
             "{fixture_path}: fused/unfused param layout mismatch"
         );
 
-        let input_floats = fused_asm.functions[0].input_floats;
+        let input_floats = fused_asm.functions[0].inputs_floats[0];
         let output_floats = fused_asm.functions[0].output_floats;
         assert_eq!(input_floats, batch * input_dim,
-            "{fixture_path}: FnSig.input_floats={input_floats} disagrees with hardcoded batch*input_dim={}",
+            "{fixture_path}: FnSig.inputs_floats[0]={input_floats} disagrees with hardcoded batch*input_dim={}",
             batch * input_dim);
         assert_eq!(output_floats, batch * output_dim,
             "{fixture_path}: FnSig.output_floats={output_floats} disagrees with hardcoded batch*output_dim={}",
             batch * output_dim);
         assert_eq!(
-            input_floats, unfused_asm.functions[0].input_floats,
-            "{fixture_path}: fused/unfused input_floats mismatch"
+            input_floats, unfused_asm.functions[0].inputs_floats[0],
+            "{fixture_path}: fused/unfused inputs_floats[0] mismatch"
         );
         assert_eq!(
             output_floats, unfused_asm.functions[0].output_floats,
@@ -1011,7 +1011,7 @@ fn fused_softmax_xmm_spill_x86_64() {
         unsafe { lib.get(b"nfl_forward_SoftmaxWithBias") }.unwrap();
 
     let sig = &asm.functions[0];
-    let input_floats = sig.input_floats;
+    let input_floats = sig.inputs_floats[0];
     let params_len = sig.params_floats;
     let output_floats = sig.output_floats;
 
@@ -1082,7 +1082,7 @@ fn self_attention_ffi_matches_reference() {
 
     let asm = profiles_x86_64::lower(&uir).expect("lower");
     let sig = &asm.functions[0];
-    assert_eq!(sig.input_floats, TOTAL);
+    assert_eq!(sig.inputs_floats, vec![TOTAL]);
     assert_eq!(sig.output_floats, TOTAL);
     assert_eq!(sig.params_floats, 0);
 
@@ -1105,4 +1105,227 @@ fn self_attention_ffi_matches_reference() {
         output, reference,
         "SelfAttention FFI output must match x86_64 reference bit-exactly"
     );
+}
+
+// ---------------------------------------------------------------------------
+// M12 acceptance: multi-input fixtures (x86_64 mirror of arm64 D.4/D.5/D.6).
+//
+// D.7: two_input_matmul — N=2 sanity, bit-exact vs Rust reference matmul.
+// D.8: multi_input_attention — N=3 acceptance, exercises post-FFI register
+//      survival for v-pointer (%rdx) across `call expf@PLT`.
+// D.9: too_many_inputs — N=5 negative, expects LowerError::TooManyInputs.
+//
+// These tests are gated to x86_64 Linux via the module-level cfg attribute.
+// ---------------------------------------------------------------------------
+
+/// Pure-Rust reference attention for x86_64: Q @ K, scale by 0.25,
+/// softmax(last-axis), then attn @ V. Uses separate mul + add (no FMA) to
+/// match x86_64 emit_matmul's deliberate non-FMA design (mulss + addss).
+/// Shapes: Q=[B,H,S,D], K=[B,H,D,S] (transposed), V=[B,H,S,D] → out=[B,H,S,D].
+fn reference_attention_x86_64(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    b: usize,
+    h: usize,
+    s: usize,
+    d: usize,
+) -> Vec<f32> {
+    let mut scores = vec![0.0f32; b * h * s * s];
+    let mut out = vec![0.0f32; b * h * s * d];
+
+    for bi in 0..b {
+        for hi in 0..h {
+            // scores[bi,hi,i,j] = sum_kk Q[bi,hi,i,kk] * K[bi,hi,kk,j] * 0.25
+            let q_off = (bi * h + hi) * s * d;
+            let k_off = (bi * h + hi) * d * s;
+            let sc_off = (bi * h + hi) * s * s;
+            for i in 0..s {
+                for j in 0..s {
+                    let mut acc = 0.0f32;
+                    for kk in 0..d {
+                        // separate mul + add (NOT FMA) to match x86_64 emit_matmul.
+                        acc += q[q_off + i * d + kk] * k[k_off + kk * s + j];
+                    }
+                    scores[sc_off + i * s + j] = acc * 0.25;
+                }
+            }
+            // softmax row-wise (stable, matching 3-pass emit_softmax).
+            for i in 0..s {
+                let row = &mut scores[sc_off + i * s..sc_off + (i + 1) * s];
+                let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                for x in row.iter_mut() {
+                    *x = (*x - max).exp();
+                }
+                let sum: f32 = row.iter().sum();
+                for x in row.iter_mut() {
+                    *x /= sum;
+                }
+            }
+            // out[bi,hi,i,j] = sum_kk scores[bi,hi,i,kk] * V[bi,hi,kk,j]
+            let v_off = (bi * h + hi) * s * d;
+            let o_off = (bi * h + hi) * s * d;
+            for i in 0..s {
+                for j in 0..d {
+                    let mut acc = 0.0f32;
+                    for kk in 0..s {
+                        acc += scores[sc_off + i * s + kk] * v[v_off + kk * d + j];
+                    }
+                    out[o_off + i * d + j] = acc;
+                }
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn two_input_matmul_match_numerically() {
+    if !common::cc_available() {
+        eprintln!("skip: integration test requires `cc` on PATH");
+        return;
+    }
+
+    let src = std::fs::read_to_string("../../tests/fixtures/two_input_matmul.nfl")
+        .expect("fixture readable");
+    let nfl = compiler::parse(&src).expect("parse");
+    let uir = compiler::ir::build(&nfl).expect("ir::build");
+    let asm = profiles_x86_64::lower(&uir).expect("lower");
+
+    let sig = &asm.functions[0];
+    assert_eq!(sig.inputs_floats.len(), 2, "two_input_matmul has arity 2");
+    assert_eq!(sig.inputs_floats[0], 4 * 8, "a is [4,8]=32 floats");
+    assert_eq!(sig.inputs_floats[1], 8 * 4, "b is [8,4]=32 floats");
+
+    let so_path = common::compile_to_so(&asm.source, "two_input_matmul");
+    let lib = unsafe { libloading::Library::new(&so_path) }.expect("dlopen");
+
+    // SysV ABI: a (%rdi), b (%rsi), params (%rdx, empty), out (%rcx).
+    type ForwardFn = unsafe extern "C" fn(*const f32, *const f32, *const f32, *mut f32);
+    let forward: libloading::Symbol<ForwardFn> =
+        unsafe { lib.get(b"nfl_forward_TwoInputMatmul") }.expect("dlsym");
+
+    let m = 4usize;
+    let k = 8usize;
+    let n = 4usize;
+    let a: Vec<f32> = (0..m * k).map(|i| (i as f32) * 0.1).collect();
+    let b: Vec<f32> = (0..k * n).map(|i| (i as f32) * 0.07).collect();
+    let params: Vec<f32> = vec![]; // matmul has no params
+    let mut out = vec![0.0f32; m * n];
+
+    unsafe {
+        forward(a.as_ptr(), b.as_ptr(), params.as_ptr(), out.as_mut_ptr());
+    }
+
+    // Reference: a @ b using separate mul + add (matching x86_64 emit_matmul).
+    let mut expected = vec![0.0f32; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            let mut sum = 0.0f32;
+            for kk in 0..k {
+                sum += a[i * k + kk] * b[kk * n + j];
+            }
+            expected[i * n + j] = sum;
+        }
+    }
+
+    for (i, (got, want)) in out.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            got.to_bits() == want.to_bits(),
+            "mismatch at index {i}: got {got} ({:#010x}), want {want} ({:#010x})",
+            got.to_bits(),
+            want.to_bits()
+        );
+    }
+
+    drop(lib);
+}
+
+#[test]
+fn multi_input_attention_match_numerically() {
+    if !common::cc_available() {
+        eprintln!("skip: integration test requires `cc` on PATH");
+        return;
+    }
+
+    let src = std::fs::read_to_string("../../tests/fixtures/multi_input_attention.nfl")
+        .expect("fixture readable");
+    let nfl = compiler::parse(&src).expect("parse");
+    let uir = compiler::ir::build(&nfl).expect("ir::build");
+    let asm = profiles_x86_64::lower(&uir).expect("lower");
+
+    let sig = &asm.functions[0];
+    assert_eq!(
+        sig.inputs_floats.len(),
+        3,
+        "multi_input_attention has arity 3"
+    );
+
+    // Shape: batch=2, heads=4, seq=16, head_dim=16.
+    const BATCH: usize = 2;
+    const HEADS: usize = 4;
+    const SEQ: usize = 16;
+    const HEAD_DIM: usize = 16;
+    const TOTAL: usize = BATCH * HEADS * SEQ * HEAD_DIM; // 2048
+
+    assert_eq!(sig.inputs_floats[0], TOTAL, "q is [2,4,16,16]=2048 floats");
+    assert_eq!(sig.inputs_floats[1], TOTAL, "k is [2,4,16,16]=2048 floats");
+    assert_eq!(sig.inputs_floats[2], TOTAL, "v is [2,4,16,16]=2048 floats");
+    assert_eq!(sig.output_floats, TOTAL);
+    assert_eq!(sig.params_floats, 0, "no learnable params");
+
+    let so_path = common::compile_to_so(&asm.source, "multi_input_attention");
+    let lib = unsafe { libloading::Library::new(&so_path) }.expect("dlopen");
+
+    // SysV ABI: q (%rdi), k (%rsi), v (%rdx), params (%rcx, empty), out (%r8).
+    type ForwardFn = unsafe extern "C" fn(*const f32, *const f32, *const f32, *const f32, *mut f32);
+    let forward: libloading::Symbol<ForwardFn> =
+        unsafe { lib.get(b"nfl_forward_SelfAttention") }.expect("dlsym");
+
+    let q: Vec<f32> = (0..TOTAL).map(|i| (i as f32) * 1e-3).collect();
+    let k: Vec<f32> = (0..TOTAL).map(|i| (i as f32) * 1.5e-3).collect();
+    let v: Vec<f32> = (0..TOTAL).map(|i| (i as f32) * 0.7e-3).collect();
+    let params: Vec<f32> = vec![];
+    let mut out = vec![0.0f32; TOTAL];
+
+    unsafe {
+        forward(
+            q.as_ptr(),
+            k.as_ptr(),
+            v.as_ptr(),
+            params.as_ptr(),
+            out.as_mut_ptr(),
+        );
+    }
+
+    let expected = reference_attention_x86_64(&q, &k, &v, BATCH, HEADS, SEQ, HEAD_DIM);
+
+    // Bit-exact: x86_64 mulss+addss in both asm and reference (no FMA).
+    for (i, (got, want)) in out.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            got.to_bits() == want.to_bits(),
+            "mismatch at index {i}: got {got} ({:#010x}), want {want} ({:#010x})",
+            got.to_bits(),
+            want.to_bits()
+        );
+    }
+
+    drop(lib);
+}
+
+#[test]
+fn too_many_inputs_returns_too_many_inputs_error() {
+    use profile_api::{LowerError, Profile};
+    let src = std::fs::read_to_string("../../tests/fixtures/profile-negative/too_many_inputs.nfl")
+        .expect("fixture readable");
+    let nfl = compiler::parse(&src).expect("parse");
+    let uir = compiler::ir::build(&nfl).expect("ir::build");
+    match profiles_x86_64::X86_64Profile.lower(&uir) {
+        Err(LowerError::TooManyInputs { n, max, .. }) => {
+            assert_eq!(n, 5, "expected n=5 inputs");
+            assert_eq!(max, 4, "expected max=4");
+        }
+        Err(other) => panic!("expected TooManyInputs, got {other:?}"),
+        Ok(_) => panic!("expected Err, got Ok"),
+    }
 }

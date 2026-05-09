@@ -2,15 +2,16 @@
 
 //! Relu (elementwise max with zero) codegen.
 
+use crate::abi::AbiContext;
 use crate::asm::emit_imm32;
 use crate::buffer::BufferLoc;
-use crate::ops::linear::materialise_ptr;
 
 /// Emit AArch64 asm for an elementwise ReLU.
 ///
 /// `model_idx` + `relu_idx` together uniquely name every label across all
 /// models emitted into a single assembly file.
 pub fn emit_relu(
+    abi: &AbiContext,
     total_floats: u64,
     model_idx: usize,
     relu_idx: usize,
@@ -22,8 +23,8 @@ pub fn emit_relu(
     s.push_str(&format!(
         "    ; relu: copy-clamp from src to dst ({total_floats} elements)\n"
     ));
-    s.push_str(&materialise_ptr("x11", src_loc));
-    s.push_str(&materialise_ptr("x12", dst_loc));
+    abi.materialise_ptr(src_loc, "x11", &mut s);
+    abi.materialise_ptr(dst_loc, "x12", &mut s);
     s.push_str("    fmov    s4, wzr\n");
     s.push_str(&emit_imm32("x10", total_floats as usize));
     s.push_str("    mov     x9, #0\n");

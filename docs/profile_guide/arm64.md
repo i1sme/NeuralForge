@@ -1,6 +1,6 @@
 # `arm64` Profile — AArch64 Scalar Codegen
 
-> **Status:** M10 complete (NFL v0.2). Lowers `linear` (with or without
+> **Status:** M12 complete (multi-input ABI). Lowers `linear` (with or without
 > `bias=true`), `relu`, `dropout` (no-op pass-through at inference, or
 > explicit copy-loop when dropout IS model output — see §M8),
 > `softmax` (numerically stable 3-pass via libm `expf`, generalised to
@@ -820,3 +820,111 @@ that emits `bl`.
   `compute_is_leaf` predicates — all unchanged. M10 added two new ops
   and one dispatcher generalisation; the surrounding scaffolding is
   the same.
+
+---
+
+## Multi-Input ABI (M12)
+
+M12 adds per-profile `AbiContext` that extends the calling convention to N∈{1..4}
+inputs, enabling models that take separate `q`/`k`/`v` tensors (or any other
+multi-input pattern) as distinct ABI arguments without packing them into a single
+buffer.
+
+### Register layout (AAPCS64)
+
+Under AAPCS64, pointer arguments are passed in `x0..x5` in order. The M12
+convention assigns registers as follows for N inputs:
+
+| N | x0  | x1  | x2  | x3  | x4     | x5  |
+|---|-----|-----|-----|-----|--------|-----|
+| 1 | in₀ | params | out | — | — | — |
+| 2 | in₀ | in₁ | params | out | — | — |
+| 3 | in₀ | in₁ | in₂ | params | out | — |
+| 4 | in₀ | in₁ | in₂ | in₃ | params | out |
+
+`params` is always the last input-class register; `out` follows immediately after.
+N=1 is the legacy single-input layout and is fully backward-compatible with all
+pre-M12 fixtures.
+
+The C prototype for N=3 looks like:
+
+```c
+void nfl_forward_<ModelName>(
+    const float* in0,
+    const float* in1,
+    const float* in2,
+    const float* params,
+    float*       output
+);
+```
+
+### `AbiContext` — per-arity accessor struct
+
+`profiles/arm64/src/abi.rs` exports `AbiContext { n_inputs: usize }` with the
+following arity-aware accessors:
+
+- `input_reg(i: usize) -> &'static str` — returns `"x0"` through `"x3"` for
+  `i` in `0..n_inputs`. Panics if `i >= n_inputs`.
+- `params_reg() -> &'static str` — returns `"x1"` through `"x4"` (= `x[n_inputs]`).
+- `output_reg() -> &'static str` — returns `"x2"` through `"x5"` (= `x[n_inputs+1]`).
+- `ffi_save_set() -> &[&'static str]` — returns the slice of registers that
+  must be preserved across a multi-emitter body (all ABI regs that `emit_matmul`
+  might clobber when reusing them as per-iteration slice pointers).
+- `materialise_ptr(b: &mut String, dst: &'static str, loc: &BufferLoc, ...)` —
+  emits the materialise-pointer sequence appropriate for the given `BufferLoc`
+  variant (`InputReg(i)` loads from `input_reg(i)`; `ParamsReg` loads from
+  `params_reg()`; `OutputReg` loads from `output_reg()`).
+
+`walk_model` constructs exactly one `AbiContext { n_inputs: model.inputs.len() }`
+and threads `&abi` through every op-emitter call. Models with more than 4 inputs
+return `Err(LowerError::TooManyInputs { n: model.inputs.len() })`.
+
+### `BufferLoc::InputReg(usize)` — input index as buffer location
+
+`BufferLoc::InputReg` now carries an index (instead of being a unit variant).
+`assign_buffers` maps `model.inputs[i]` → `BufferLoc::InputReg(i)`. The index
+is forwarded to `abi.materialise_ptr(...)` so each input gets the correct ABI
+register without any per-emitter hardcoding.
+
+### Stack alignment for FFI calls
+
+When `ffi_save_set()` is non-empty, `emit_ffi_save` spills each register in
+the set using `stp` pairs. If the set has an **odd** cardinality (so pairing
+would leave one register without a partner), an extra `str xzr, [sp, #-8]!`
+padding store is prepended to maintain the 16-byte aligned SP invariant. The
+SP delta across the entire save/restore block is always a multiple of 16.
+
+`emit_ffi_restore` reverses `emit_ffi_save` in strict **LIFO** order: the
+last pair saved is the first pair restored via `ldp`, mirroring the descending-
+stack `stp x, y, [sp, #-16]!` / ascending `ldp x, y, [sp], #16` idiom.
+
+### `emit_matmul` scratch register layout (M12 rework)
+
+In M10, `emit_matmul` reused `x1`/`x2`/`x4` (FFI ABI registers) as per-outer-
+iteration slice pointers, then spilled them via `stp x1, x2 / stp x4, xzr` at
+function-body entry. This spill block is **removed** in M12.
+
+M12 moves the per-outer-iteration slice pointers to scratch registers that are
+always outside the ABI window regardless of N:
+
+| Register | Role in `emit_matmul` |
+|----------|-----------------------|
+| `x9`     | A-base pointer (materialised once before outer loop) |
+| `x10`    | B-base pointer (materialised once before outer loop) |
+| `x11`    | DST-base pointer (materialised once before outer loop) |
+| `x12`    | A_slice pointer (per outer-iteration) |
+| `x13`    | B_slice pointer (per outer-iteration) |
+| `x14`    | DST_slice pointer (per outer-iteration) |
+| `x15`    | outer loop index |
+| `x16`    | leading_count immediate |
+| `x17`    | inner loop indices / scratch |
+
+Because `x9`–`x17` are all caller-saved under AAPCS64 and none of them overlap
+with the ABI argument window (`x0`–`x5`), no save/restore block is needed around
+the outer loop. The materialise-ptr-first ordering rule (applied at `walk_model`
+call-site level) ensures base pointers are loaded before any slice arithmetic
+clobbers scratch registers.
+
+The old `stp x1, x2, [sp, #-16]!` / `ldp x1, x2, [sp], #16` outer-loop spill
+block from M10 is fully eliminated. Any model containing `emit_matmul` now emits
+fewer instructions per matmul op.

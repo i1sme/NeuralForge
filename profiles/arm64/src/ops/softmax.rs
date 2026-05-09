@@ -2,9 +2,9 @@
 
 //! Softmax (per-row stable, libm expf) codegen.
 
+use crate::abi::AbiContext;
 use crate::asm::emit_imm32;
 use crate::buffer::BufferLoc;
-use crate::ops::linear::materialise_ptr;
 
 /// Emit AArch64 asm for softmax over `[b, k]` shape (per-row normalize).
 ///
@@ -26,16 +26,21 @@ use crate::ops::linear::materialise_ptr;
 /// function-level prologue via `compute_callee_saved` / `d8_d9` in RegSet.
 /// The function-level prologue also saves x19-x23 when `x19_x23` is set.
 ///
-/// FFI register preservation (M10): `bl _expf` is a function call which
+/// FFI register preservation (M12): `bl _expf` is a function call which
 /// per AAPCS64 clobbers caller-saved regs x0-x18. Any downstream emitter
-/// reading x0 (input ptr), x1 (params ptr), or x2 (output ptr) via
-/// `materialise_ptr` would see garbage. Spec §[register preservation]:
-/// any emitter that clobbers an FFI register that a follow-up emitter
-/// reads must save/restore. Self-attention exercises this: matmul → soft
-/// → matmul where the second matmul reads x0 (input) and x2 (output) for
-/// `materialise_ptr`. Spill x0/x1/x2 onto the stack at entry and restore
-/// at exit so the AArch64 FFI register state survives.
+/// reading from an ABI argument register (input/params/output) via
+/// `abi.materialise_ptr` would see garbage. Spec §5.4 + §6: any emitter
+/// that clobbers an ABI register that a follow-up emitter reads must
+/// save/restore. Self-attention exercises this: matmul → softmax →
+/// matmul where the second matmul reads input(s) and output via
+/// `abi.materialise_ptr`. We use `abi.emit_ffi_save` / `emit_ffi_restore`
+/// to spill the entire `ffi_save_set()` (= INPUT_REGS[..N+2]) onto the
+/// stack so the full AArch64 ABI register state survives. For N=1 this
+/// emits the same `stp x0, x1` + `stp x2, xzr` pair the M11 hand-written
+/// block produced (bit-identical).
+#[allow(clippy::too_many_arguments)]
 pub fn emit_softmax(
+    abi: &AbiContext,
     b: u64,
     k: u64,
     model_idx: usize,
@@ -54,14 +59,12 @@ pub fn emit_softmax(
     // MUST happen before the FFI-reg spill below: `materialise_ptr` for any
     // `BufferLoc::StackOffset(off)` emits `add x22, sp, #off` against the
     // current sp. Spilling first would shift sp and corrupt the offset.
-    s.push_str(&materialise_ptr("x22", src_loc));
-    s.push_str(&materialise_ptr("x23", dst_loc));
+    abi.materialise_ptr(src_loc, "x22", &mut s);
+    abi.materialise_ptr(dst_loc, "x23", &mut s);
 
-    // Spill FFI input regs x0 (input ptr), x1 (params ptr), x2 (output ptr)
-    // so they survive bl _expf. Restored at function exit before any
-    // downstream emitter (e.g. emit_matmul reading x0/x2 via materialise_ptr).
-    s.push_str("    stp     x0, x1, [sp, #-16]!\n");
-    s.push_str("    stp     x2, xzr, [sp, #-16]!\n");
+    // Spill the full ABI argument set (inputs + params + output) so they
+    // survive bl _expf. Arity-aware via AbiContext (spec §5.4, §6.1).
+    abi.emit_ffi_save(&mut s);
 
     // Outer per-row loop: x19 = i.
     s.push_str("    mov     x19, #0\n");
@@ -130,10 +133,11 @@ pub fn emit_softmax(
     s.push_str(&format!("    b       .Lsm_i_{sid}\n"));
     s.push_str(&format!(".Lsm_i_end_{sid}:\n"));
 
-    // Restore FFI input regs x0/x1/x2 — must match the `stp` pair above.
-    // Order is reversed (LIFO): x2/xzr first (top of stack), then x0/x1.
-    s.push_str("    ldp     x2, xzr, [sp], #16\n");
-    s.push_str("    ldp     x0, x1, [sp], #16\n");
+    // Restore the ABI argument set — strict LIFO order to match
+    // `abi.emit_ffi_save` above. For N=1 this emits the same
+    // `ldp x2, xzr` + `ldp x0, x1` pair the M11 hand-written block
+    // produced (bit-identical).
+    abi.emit_ffi_restore(&mut s);
 
     s
 }

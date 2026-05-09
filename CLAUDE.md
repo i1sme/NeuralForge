@@ -62,22 +62,25 @@ NeuralForge/
 │   │   │   ├── lib.rs      ← `pub fn lower(&Uir) -> Result<Asm, LowerError>`
 │   │   │   ├── types.rs    ← Asm, FnSig, ParamSlot, ParamKind, LowerError
 │   │   │   ├── asm.rs      ← prologue/epilogue + emit_sp_* + emit_imm32 helpers
+│   │   │   ├── abi.rs      ← AbiContext (n_inputs, input_reg/params_reg/output_reg, ffi_save/restore, M12)
 │   │   │   ├── buffer.rs   ← BufferLoc, assign_buffers, compute_is_leaf, compute_callee_saved
 │   │   │   ├── codegen.rs  ← walk_uir/walk_model dispatcher + classify_op
 │   │   │   ├── ops/
 │   │   │   │   ├── mod.rs        ← per-op submodule entry + re-exports
 │   │   │   │   ├── linear.rs     ← emit_linear (matmul ± bias) + materialise_ptr
-│   │   │   │   ├── matmul.rs     ← emit_matmul (rank ≥ 2, optional transpose_b, M10)
+│   │   │   │   ├── matmul.rs     ← emit_matmul (rank ≥ 2, optional transpose_b, M10; scratch rework M12)
 │   │   │   │   ├── mulscalar.rs  ← emit_mulscalar (scalar pre-load + flat loop, M10)
 │   │   │   │   ├── relu.rs       ← emit_relu (elementwise copy-clamp)
 │   │   │   │   ├── softmax.rs    ← emit_softmax (3-pass + bl _expf)
 │   │   │   │   └── dropout.rs    ← marker (no emitter — aliasing only)
 │   │   │   └── tests.rs    ← unit tests on asm shape + analyzers
 │   │   └── tests/
-│   │       ├── integration.rs    ← end-to-end FFI tests for all 5 M3 fixtures + M4a + M10 self_attention
+│   │       ├── integration.rs    ← end-to-end FFI tests for all 5 M3 fixtures + M4a + M10 self_attention + M12 multi-input
 │   │       └── common/mod.rs     ← cc + tempdir helpers
 │   └── x86_64/             ← Linux ELF scalar SSE2 codegen profile, M9
-│       └── src/ops/        ← linear.rs, matmul.rs (M10), mulscalar.rs (M10), relu.rs, softmax.rs, dropout.rs
+│       └── src/
+│           ├── abi.rs      ← AbiContext (SysV AMD64 variant, M12)
+│           └── ops/        ← linear.rs, matmul.rs (M10; callee-saved scratch rework M12), mulscalar.rs (M10), relu.rs, softmax.rs, dropout.rs
 │
 ├── language/
 │   ├── grammar.ebnf        ← formal NFL grammar
@@ -170,25 +173,25 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-**Milestone 11 complete. 344 tests passing on macOS arm64 (~360 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean
+**Milestone 12 complete. 390 tests passing on macOS arm64 (~398 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean
 (`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo fmt --all -- --check`, `cargo test --workspace`).
 
-M10 closed the first leg of Axis 2: NFL grammar v0.2 (`named_pipeline_stmt` +
-tensor-typed positional args) + new `StdOp::Matmul` / `StdOp::MulScalar` +
-rank-≥-2 softmax dispatch lower a complete self-attention pattern (Q/Kᵀ
-matmul, scale, softmax, attn·V matmul) end-to-end on both profiles, bit-exact
-per-profile.
+M12 closed A1 (multi-input ABI, first follow-up to Axis 2): per-profile `AbiContext`
+maps N=1..4 typed inputs to distinct ABI registers on both profiles. New
+`profiles/{arm64,x86_64}/src/abi.rs`; reworked `emit_matmul` with scratch register
+reassignment eliminating M10 outer-loop spill blocks. Three new fixtures:
+`two_input_matmul.nfl`, `multi_input_attention.nfl`,
+`tests/fixtures/profile-negative/too_many_inputs.nfl`. Bench gains per-arity
+dispatch + seed cascade.
 
-M11 closed OQ-BENCH (informational scalar-baseline bench harness) as a separate trigger-driven cleanup milestone. The harness lives in the new `bench/` workspace crate; CI integration via `bench.yml` writes per-profile Job Summaries on the existing 2-leg matrix without inter-leg artifact sharing.
-
-Strategic direction: see `PROJECT_SPEC.md` §"Strategic Roadmap" — three open
-axes (codegen breadth, modelling depth, deployment reach) presented as a
-dependency graph. The next milestone is decided by selecting one axis to
-advance via fresh brainstorming, not by picking from a flat list. Trigger-driven
-cleanup items (OQ-7, OQ-8, OQ-9, M5c OQ-4) live in `PROJECT_SPEC.md`
+Strategic direction: see `PROJECT_SPEC.md` §"Strategic Roadmap" — A1 closed in M12;
+A2 (transformer block) and A3 (viewer annotations) remain open along Axis 2.
+Trigger-driven cleanup items (OQ-7, OQ-8, OQ-9, M5c OQ-4) live in `PROJECT_SPEC.md`
 §"Open Questions" / "Trigger-driven cleanup" and stay dormant until their
 trigger fires. OQ-NEW closed in M9 (commit `a08fd24`). OQ-BENCH closed in M11 (commit `e7c29b8`).
+**Known M12 follow-up:** x86_64 `emit_matmul` rejects N=4+matmul (j-counter %r9
+collision); deferred to M13+.
 
 ---
 
