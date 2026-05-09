@@ -1321,3 +1321,68 @@ fn emit_matmul_body_contains_zero_stp() {
         "emit_matmul body must contain zero stp instructions per §9.1; got {stp_count}\n{result}"
     );
 }
+
+// ---- M13 Group C: emit_add arm64 -----------------------------------------
+
+#[test]
+fn emit_add_arm64_emits_three_pointer_loads_and_fadd() {
+    use crate::abi::AbiContext;
+    use crate::buffer::BufferLoc;
+    let abi = AbiContext { n_inputs: 2 };
+    let asm = crate::ops::add::emit_add(
+        &abi,
+        /* total_elements */ 8,
+        /* model_idx */ 0,
+        /* op_idx */ 0,
+        /* a_loc */ BufferLoc::InputReg(0),
+        /* other_loc */ BufferLoc::InputReg(1),
+        /* dst_loc */ BufferLoc::OutputReg,
+    );
+    // Three pointers materialised.
+    assert!(
+        asm.contains("ldr     s0,"),
+        "expected ldr s0 (a load); got:\n{asm}"
+    );
+    assert!(
+        asm.contains("ldr     s1,"),
+        "expected ldr s1 (other load); got:\n{asm}"
+    );
+    assert!(
+        asm.contains("fadd    s2, s0, s1"),
+        "expected fadd s2, s0, s1; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("str     s2,"),
+        "expected str s2 (dst store); got:\n{asm}"
+    );
+}
+
+#[test]
+fn emit_add_arm64_no_callee_saved_or_ffi_save() {
+    use crate::abi::AbiContext;
+    use crate::buffer::BufferLoc;
+    let abi = AbiContext { n_inputs: 2 };
+    let asm = crate::ops::add::emit_add(
+        &abi,
+        16,
+        0,
+        0,
+        BufferLoc::InputReg(0),
+        BufferLoc::InputReg(1),
+        BufferLoc::OutputReg,
+    );
+    // No callee-saved register pushes (x19-x28 / d8-d15).
+    for reg in &[
+        "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27", "x28",
+    ] {
+        assert!(
+            !asm.contains(&format!("str     {reg}")),
+            "emit_add must not push callee-saved {reg}; got:\n{asm}"
+        );
+    }
+    // No bl _expf (no FFI save needed).
+    assert!(
+        !asm.contains("bl      _expf"),
+        "emit_add must not call _expf; got:\n{asm}"
+    );
+}
