@@ -1371,13 +1371,22 @@ fn emit_add_arm64_no_callee_saved_or_ffi_save() {
         BufferLoc::InputReg(1),
         BufferLoc::OutputReg,
     );
-    // No callee-saved register pushes (x19-x28 / d8-d15).
+    // No callee-saved GPR pushes (x19-x28).
     for reg in &[
         "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27", "x28",
     ] {
         assert!(
             !asm.contains(&format!("str     {reg}")),
             "emit_add must not push callee-saved {reg}; got:\n{asm}"
+        );
+    }
+    // No callee-saved FP pushes (d8-d15). emit_add uses s0/s1/s2 = d0/d1/d2
+    // (caller-saved); a regression spilling into d8-d15 would silently violate
+    // the doc-comment claim "No callee-saved register usage".
+    for reg in &["d8", "d9", "d10", "d11", "d12", "d13", "d14", "d15"] {
+        assert!(
+            !asm.contains(&format!("str     {reg}")),
+            "emit_add must not push callee-saved FP {reg}; got:\n{asm}"
         );
     }
     // No bl _expf (no FFI save needed).

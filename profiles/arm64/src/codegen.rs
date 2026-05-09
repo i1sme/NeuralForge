@@ -384,7 +384,7 @@ fn classify_op(
         StdOp::Softmax => Ok(()),
         StdOp::Matmul => Ok(()),
         StdOp::MulScalar => Ok(()),
-        StdOp::Add => Ok(()), // M13 placeholder: walk_model returns UnsupportedOp until Task 3 lands emit_add (intentional classify→walk gap during the multi-task rollout)
+        StdOp::Add => Ok(()),
         // M5c: #[non_exhaustive] on StdOp requires a wildcard arm.
         // Future ops are rejected here until codegen learns them.
         #[allow(unreachable_patterns)]
