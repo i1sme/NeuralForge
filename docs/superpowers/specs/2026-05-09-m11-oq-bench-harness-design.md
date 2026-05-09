@@ -349,7 +349,7 @@ in metadata source (CI env vars vs `uname`/`sw_vers`):
 
 | Fixture              | Median (µs) | p95 (µs) | Purpose                          |
 |----------------------|-------------|----------|----------------------------------|
-| classifier           |    2845.3   |  3104.7  | matmul-mass (3-layer MLP)        |
+| classifier           |        2845 |     3105 | matmul-mass (3-layer MLP)        |
 | large_classifier_k   |      48.7   |    52.1  | large-K inner-loop accumulator   |
 | self_attention       |     108.4   |   119.5  | expf/softmax dispatch overhead   |
 ```
@@ -369,7 +369,7 @@ Commit: <git rev-parse HEAD>
 
 | Fixture              | arm64 median | arm64 p95 | x86_64 median | x86_64 p95 | arm64 / x86_64 |
 |----------------------|--------------|-----------|---------------|------------|----------------|
-| classifier           |   2845 µs    |  3104 µs  |   4013 µs     |  4567 µs   |     0.71×      |
+| classifier           |   2845 µs    |  3105 µs  |   4013 µs     |  4567 µs   |     0.71×      |
 | large_classifier_k   |     49 µs    |    52 µs  |     71 µs     |    78 µs   |     0.69×      |
 | self_attention       |    108 µs    |   120 µs  |    136 µs     |   142 µs   |     0.80×      |
 

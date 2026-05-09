@@ -31,7 +31,13 @@ NeuralForge/
 ├── CLAUDE.md               ← you are here
 ├── PROJECT_SPEC.md         ← full design specification
 │
-├── Cargo.toml              ← workspace manifest (members = ["compiler", "nflc", "profile-api", "profiles/arm64", "profiles/x86_64"])
+├── Cargo.toml              ← workspace manifest (members = ["bench", "compiler", "nflc", "profile-api", "profiles/arm64", "profiles/x86_64"])
+│
+├── bench/                  ← `bench` crate (bin only) — OQ-BENCH harness
+│   ├── Cargo.toml
+│   ├── src/main.rs         ← single-file harness
+│   └── results/            ← committed cross-profile reports
+│       └── <YYYY-MM-DD>.md ← lands as a post-merge follow-up commit
 │
 ├── compiler/               ← `compiler` crate (lib only)
 │   ├── Cargo.toml
@@ -164,7 +170,7 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-**Milestone 10 complete. 331 tests passing on macOS arm64 (~347 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean
+**Milestone 11 complete. 344 tests passing on macOS arm64 (~360 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean
 (`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo fmt --all -- --check`, `cargo test --workspace`).
 
@@ -174,13 +180,15 @@ rank-≥-2 softmax dispatch lower a complete self-attention pattern (Q/Kᵀ
 matmul, scale, softmax, attn·V matmul) end-to-end on both profiles, bit-exact
 per-profile.
 
+M11 closed OQ-BENCH (informational scalar-baseline bench harness) as a separate trigger-driven cleanup milestone. The harness lives in the new `bench/` workspace crate; CI integration via `bench.yml` writes per-profile Job Summaries on the existing 2-leg matrix without inter-leg artifact sharing.
+
 Strategic direction: see `PROJECT_SPEC.md` §"Strategic Roadmap" — three open
 axes (codegen breadth, modelling depth, deployment reach) presented as a
 dependency graph. The next milestone is decided by selecting one axis to
 advance via fresh brainstorming, not by picking from a flat list. Trigger-driven
-cleanup items (OQ-BENCH, OQ-7, OQ-8, OQ-9, M5c OQ-4) live in `PROJECT_SPEC.md`
+cleanup items (OQ-7, OQ-8, OQ-9, M5c OQ-4) live in `PROJECT_SPEC.md`
 §"Open Questions" / "Trigger-driven cleanup" and stay dormant until their
-trigger fires. OQ-NEW closed in M9 (commit `a08fd24`).
+trigger fires. OQ-NEW closed in M9 (commit `a08fd24`). OQ-BENCH closed in M11 (commit `<TBD>`).
 
 ---
 
