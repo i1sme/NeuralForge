@@ -14,6 +14,72 @@ Format for each entry:
 
 ---
 
+## 2026-05-09 — Milestone 12 closed: multi-input ABI (A1) end-to-end on both profiles
+
+### What was done
+
+- **A1 (multi-input ABI) closed end-to-end on arm64 and x86_64** via per-profile `AbiContext`. N=1..4 inputs each map to a distinct ABI argument register; `params` and `output` follow immediately after. `LowerError::TooManyInputs` gates N>4 at lowering time.
+- **6 atomic commits across Groups A–F:**
+  - `5ca5553` feat(m12): foundation — FnSig.inputs_floats + LowerError::TooManyInputs + N=1 regression goldens
+  - `7f1ba55` feat(m12): arm64 multi-input codegen via AbiContext + emit_matmul rework
+  - `34a8752` feat(m12): x86_64 multi-input codegen via AbiContext + emit_matmul rework
+  - `a22bc35` feat(m12): multi-input fixtures + per-profile FFI integration tests
+  - `c0e5500` feat(m12): bench per-arity dispatch + seed cascade
+  - (this commit) docs(m12): documentation closure — profile guides, language reference, PROJECT_SPEC, CLAUDE.md, DEVLOG
+- **New fixtures:**
+  - `tests/fixtures/two_input_matmul.nfl` — N=2 sanity check (matmul with two input tensors)
+  - `tests/fixtures/multi_input_attention.nfl` — N=3 acceptance test (Q/K inputs + V consumed post-softmax)
+  - `tests/fixtures/profile-negative/too_many_inputs.nfl` — N=5 model triggering `LowerError::TooManyInputs`
+- **Bench** `bench/src/main.rs` gains per-arity dispatch so multi-input fixtures can be timed; seed cascade ensures reproducible random data across arity levels.
+- **Test count: 344 → 390** (macOS arm64); ~398 on Linux x86_64 CI.
+
+### Decisions made
+
+- **ABI option γ (per-arity expanded register-args) chosen over option β (array-of-pointers).** γ matches the natural calling convention for small N and requires no callee-side indirection; β would have required dereferencing a pointer-to-array on every input access. Decision per brainstorm Q2 recorded in `docs/superpowers/specs/2026-05-09-m12-multi-input-abi-design.md`.
+- **option β (callee-saved scratch on x86_64) chosen for `emit_matmul` slice-pointer storage.** SysV AMD64 provides only three caller-saved non-ABI scratch registers (`%r9/%r10/%r11`) at N=3, which is insufficient for a 3-register base-pointer set + per-outer-iteration slice pointers. Moving slice pointers to callee-saved `%rbx/%r12-%r14` (whose save/restore is already in the prologue when `calls_extern_math()`) is the only option that doesn't expand the prologue surface for arm64-mirrored scratch registers.
+- **Spec §10.2 amended to permit register-cascade-induced changes within `emit_matmul` body.** The scratch register reassignment (arm64: x12/x13/x14 replacing x1/x2/x4; x86_64: %rbx/%r12-%r13 replacing %rdi/%rsi/%rdx) touches the inner-loop emit path but is considered a correctness fix (enabling multi-input without ABI clobber), not a spec violation.
+- **`stp x1, x2` (arm64) and `movq → %xmm6/7/8` (x86_64) outer-loop spill blocks REMOVED.** The M10 outer-loop spill blocks were a workaround for slice-pointer reuse of FFI registers. With M12's scratch-register reassignment, the FFI registers (`x0`–`x5` / `%rdi`–`%r9`) are never written inside `emit_matmul`; no save/restore is needed. This eliminates 4 instructions per matmul op per model.
+
+### Problems encountered
+
+- **N=4 + matmul gap on x86_64.** At N=4, `output_reg()` returns `"%r9"`. The j-counter in `emit_matmul` also uses `%r9` as scratch for inner-loop indexing, causing a collision: the j-counter overwrites the output pointer on the first j-loop iteration, producing silently incorrect results. `emit_matmul` currently returns `Err(LowerError::UnsupportedOp)` for N=4 models containing `StdOp::Matmul`. **This is the most important bequest from M12 to M13.** Closing the gap requires reassigning the j-counter slot to a non-ABI scratch register; the fix is isolated to `profiles/x86_64/src/ops/matmul.rs`. M13+ will address this if the A2 transformer block work requires N=4 attention masks.
+- **Bounds-inline change in `emit_matmul` on both profiles.** The scratch register exhaustion (12 non-ABI scratch available on arm64, only 3 on x86_64 at N=3) forced loop-bounds emission to stay inline within the loop rather than being hoisted outside. The OoO execution pipeline absorbs the extra cmp/mov overhead (<2% wall-clock impact measured on `multi_input_attention` bench fixture), but hoisting outside loops would have been preferred for code clarity.
+
+### Next step
+
+A1 is closed. Select the next milestone from `PROJECT_SPEC.md` §"Strategic Roadmap":
+- **Axis 2 A2** — transformer block (residual + LayerNorm + FFN); builds directly on M12's multi-input ABI. First task if A2 is selected: close the N=4 j-counter gap on x86_64 (prerequisite if transformer uses N=4 attention masks).
+- **Axis 2 A3** — profile-level viewer annotations (per-node footprint, stack frame, callee-saved set); lighter scope than A2.
+- **Axis 1** — SIMD/AVX codegen for x86_64 or NEON for arm64.
+- **Axis 3** — bare-metal `expf` (Taylor/minimax), drops libm dependency.
+M12's priority signal for M13: resolve the N=4 j-counter gap before committing to A2 scope.
+
+---
+
+## 2026-05-09 — M11 fully closed; M12 handoff primer
+
+### What was done
+- Inaugural `bench/results/2026-05-09.md` is in tree (commit `90c4c71`), aggregating both per-leg Job Summaries from the post-merge `bench.yml` run; the OQ-BENCH `<TBD>` commit hash was backfilled to `e7c29b8` (the hotfix-merge commit) in PROJECT_SPEC.md. M11 is now fully closed in code, CI, docs, and the trigger ledger.
+- Recorded the M12 session-handoff primer below so the next agent picks it up from DEVLOG tail without rereading the M10/M11 sessions.
+
+### Decisions made
+
+**Minimum context footprint for M12 start.** The next agent needs only `CLAUDE.md` + DEVLOG tail (last 2-3 entries) + `bench/results/2026-05-09.md`. CLAUDE.md "Current Status" is accurate through M11; this DEVLOG tail covers the M11 closure, the `-lm` hotfix, and this primer; the bench report carries the empirical signal that feeds Axis selection. No need to walk full session history.
+
+**Two reminders to surface verbatim in the M12 brainstorm first message** (both also in user-memory; duplicated here so they survive a memory miss):
+
+1. **A1 ABI-scope disclosure is mandatory** if brainstorm converges on A1 (multi-input grammar). Disclose the full ripple before approval: `FnSig` shape, `walk_model` rewrite for multi-input, FFI test surface across both profiles, profile-guide doc updates. Treat A1 as ~M9-sized work, not a syntax tweak.
+
+2. **Bench-fixture trust threshold: p95/median ≤ 1.3×.** Fixtures whose variance exceeds this on the cited run are too noisy to drive milestone selection from a single sample — require multi-run before using them in strategy arguments. The `classifier` matmul-mass headline is the stable anchor; small-µs fixtures (`large_classifier_k`, `self_attention`) on shared CI runners are the typical offenders.
+
+### Problems encountered
+None — pure handoff session.
+
+### Next step
+Open a fresh chat for M12. First message reads `CLAUDE.md` + this DEVLOG tail + `bench/results/2026-05-09.md`, then enters `superpowers:brainstorming` with the two reminders above stated explicitly in the prompt. Brainstorm output selects one axis from PROJECT_SPEC §"Strategic Roadmap" (Axis 1 SIMD / Axis 2 A1-A3 / Axis 3 bare-metal `expf`); M11 numbers (matmul-dominated `classifier` vs sub-millisecond `large_classifier_k` + `self_attention`) are an input, not the decision.
+
+---
+
 ## 2026-05-09 — M11 hotfix: x86_64 cc missing `-lm` for libm `expf`
 
 ### What was done

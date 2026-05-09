@@ -436,3 +436,42 @@ model Classifier [batch=32, input=784, output=10]:
 The implicit output is the value produced by `softmax` — an unknown-shape tensor whose
 true shape is determined by semantic analysis (which would resolve `output` to `10` and
 therefore type the output as `Tensor[batch, 10]`).
+
+---
+
+## 10. Multi-Input Convention (M12)
+
+NFL grammar permits any number of `variable_decl` statements in a `model_body`; each
+becomes an input node in `UirModel.inputs` in the order it was declared.
+
+**Lexical declaration order = ABI register order.** The first `variable_decl` in
+`model_body` corresponds to ABI register 0 (`x0`/`%rdi`), the second to register 1,
+and so on. This is a semantic commitment, not a grammatical one — the grammar accepts
+any ordering, but the UIR builder preserves the source order in `UirModel.inputs`.
+
+**Convention: place all `variable_decl` at the top of `model_body`, before any
+`pipeline_stmt` or `named_pipeline_stmt`.** The grammar does NOT enforce this;
+interleaved declarations (a `variable_decl` appearing after a `pipeline_stmt`) are
+valid syntax and will be treated as additional ABI inputs in the order they appear.
+However, interleaving is discouraged as it obscures the model's input signature.
+
+```nfl
+# Recommended: all declarations first
+model TwoInput [batch=4, dim=8]:
+    q: Tensor[batch, dim]
+    k: Tensor[batch, dim]
+
+    scores: Tensor[batch, batch] = q -> matmul[k, transpose_b=true]
+    scores -> softmax
+```
+
+**N>4 fails at lowering.** If a model body contains more than 4 `variable_decl`
+statements, the grammar accepts the source but `lower()` on both profiles returns
+`Err(LowerError::TooManyInputs { n })`. The cap is a calling-convention constraint
+(only 4 ABI input registers are reserved); it is not enforced at parse time.
+
+**Note on x86_64.** On x86_64, models with exactly N=4 inputs that also contain
+`StdOp::Matmul` additionally fail at lowering with `Err(LowerError::UnsupportedOp)`
+due to a j-counter register collision (`%r9` is both `output_reg()` at N=4 and the
+matmul j-counter). This is a known M12 limitation; see
+[`docs/profile_guide/x86_64.md`](../profile_guide/x86_64.md) §11.5 for details.

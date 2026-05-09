@@ -254,7 +254,40 @@ The dedicated viewer tool, when it ships, will consume the same
 
 ---
 
-## 8. What v0.1 doesn't have
+## 8. Multi-Input Models (M12)
+
+M12 extended codegen on both profiles to consume the full `UirModel.inputs: Vec<NodeId>`
+vector. Prior to M12, only `inputs.first()` was honored (the single-input convention);
+all other entries were ignored.
+
+**ABI register assignment by position.** Each entry in `model.inputs` maps to an ABI
+input register in the order it appears in the vector:
+
+- `inputs[0]` → ABI register 0 (`x0` on arm64, `%rdi` on x86_64)
+- `inputs[1]` → ABI register 1 (`x1` on arm64, `%rsi` on x86_64)
+- `inputs[2]` → ABI register 2 (`x2` on arm64, `%rdx` on x86_64)
+- `inputs[3]` → ABI register 3 (`x3` on arm64, `%rcx` on x86_64)
+
+`params` and `output` follow immediately after the last input register. The
+position of each `NodeId` in `model.inputs` fully determines its ABI register —
+there is no name-based or type-based assignment.
+
+**N cap at 4.** Both profiles cap the number of inputs at 4. A `UirModel` with
+`inputs.len() > 4` will cause `lower()` to return
+`Err(LowerError::TooManyInputs { n })`. The cap is a hardware ABI constraint
+(only 6 integer argument registers per calling convention; 2 are consumed by
+`params` and `output`), not a UIR-level rule — the UIR itself places no bound
+on `inputs.len()`.
+
+**`BufferLoc::InputReg(usize)`.** The `BufferLoc` enum variant for input tensors
+now carries the input index. `assign_buffers` maps `model.inputs[i]` to
+`BufferLoc::InputReg(i)` for all `i`. Downstream code (`materialise_ptr`,
+`resolve_loc`, etc.) threads the index through to the ABI accessor without
+any per-op hardcoding of register names.
+
+---
+
+## 9. What v0.1 doesn't have
 
 Listed here so contributors don't accidentally rely on absent features:
 
