@@ -32,11 +32,13 @@
 //!   prologue when `compute_callee_saved` returns true (= `model.calls_extern_math() OR has_matmul(model)`,
 //!   per `buffer.rs`).
 //!
-//! At N=3 the non-ABI caller-saved scratch is `%rax`, `%r10`, `%r11`
-//! — three registers. (`%r9` is non-ABI at N=3 but is short-lived in
-//! the body, used only inside arithmetic sequences that immediately
-//! consume it.) Three caller-saved registers are insufficient for the
-//! 9 long-lived register-roles a matmul kernel needs (3 base ptrs,
+//! At N=3 the non-ABI caller-saved scratch is `%rax`, `%r10`, `%r11`,
+//! and `%r9` — four registers, but only the first three are usable
+//! for long-lived role storage. `%r9` is consumed only inside transient
+//! arithmetic sequences (e.g. `emit_imm32_to_r10`) that immediately
+//! spend it, so it cannot hold a value across loop iterations. Three
+//! long-lived caller-saved registers are insufficient for the 9
+//! long-lived register-roles a matmul kernel needs (3 base ptrs,
 //! 3 slice ptrs, 3 counters held across the full inner-loop lifetime).
 //! The rework therefore uses **callee-saved registers** as long-lived
 //! scratch (option β per the spec §10.2 amendment's "register-cascade-
