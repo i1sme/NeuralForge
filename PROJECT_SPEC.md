@@ -171,7 +171,7 @@ NeuralForge is designed so that LLMs can write, read, and reason about NFL code 
 
 M11 closed OQ-BENCH (informational scalar-baseline bench harness) as a separate trigger-driven cleanup milestone. The harness lives in the new `bench/` workspace crate; CI integration via `bench.yml` writes per-profile Job Summaries on the existing 2-leg matrix without inter-leg artifact sharing.
 
-Strategic direction: see §"Strategic Roadmap" below — three open axes (codegen breadth, modelling depth, deployment reach) presented as a dependency graph. The next milestone is decided by selecting one axis to advance via fresh brainstorming, not by picking from a flat list. Trigger-driven cleanup items (OQ-7, OQ-8, OQ-9, M5c OQ-4) live in §"Open Questions" / "Trigger-driven cleanup" and stay dormant until their trigger fires. OQ-NEW closed in M9 (commit `a08fd24`). OQ-BENCH closed in M11 (commit `<TBD>`).
+Strategic direction: see §"Strategic Roadmap" below — three open axes (codegen breadth, modelling depth, deployment reach) presented as a dependency graph. The next milestone is decided by selecting one axis to advance via fresh brainstorming, not by picking from a flat list. Trigger-driven cleanup items (OQ-7, OQ-8, OQ-9, M5c OQ-4) live in §"Open Questions" / "Trigger-driven cleanup" and stay dormant until their trigger fires. OQ-NEW closed in M9 (commit `a08fd24`). OQ-BENCH closed in M11 (commit `e7c29b8`).
 
 ---
 
@@ -224,7 +224,7 @@ activate when their trigger condition fires.
 - **OQ-8** (M7) — `compiler/src/passes/rewriter.rs` could lift to `compiler/src/ir/`. *Trigger: a non-pass UIR-rewrite consumer appears.*
 - **OQ-9** (M7) — `producer_post_ops: Vec<PostOp>` could generalise to `enum NodeMutation`. *Trigger: a fourth pass needs non-PostOp producer mutation.*
 - **M5c OQ-4** — `BuildError::span()` + `Diagnostic` trait for richer error reporting. *Trigger: error-reporting ergonomics become a real pain point in a downstream milestone.*
-- **OQ-BENCH** — **Closed in M11 (commit `<TBD>`).** Bench harness shipped as the `bench/` workspace crate; CI workflow `.github/workflows/bench.yml` writes per-profile Job Summaries on `macos-14` (arm64) and `ubuntu-latest` (x86_64). Cross-profile comparison is composed manually into `bench/results/<date>.md` after each run (no aggregator job — preserves M10 §11.2 rule). Three fixtures (`classifier` / `large_classifier_k` / `self_attention`) chosen for orthogonal signals (matmul-mass / large-K inner-loop accumulator / expf-dominated dispatch overhead). Methodology: 10 warmup + 100 measurement, median + p95.
+- **OQ-BENCH** — **Closed in M11 (commit `e7c29b8`).** Bench harness shipped as the `bench/` workspace crate; CI workflow `.github/workflows/bench.yml` writes per-profile Job Summaries on `macos-14` (arm64) and `ubuntu-latest` (x86_64). Cross-profile comparison is composed manually into `bench/results/<date>.md` after each run (no aggregator job — preserves M10 §11.2 rule). Three fixtures (`classifier` / `large_classifier_k` / `self_attention`) chosen for orthogonal signals (matmul-mass / large-K inner-loop accumulator / expf-dominated dispatch overhead). Methodology: 10 warmup + 100 measurement, median + p95.
 
 ## Decisions (formerly open, now resolved)
 

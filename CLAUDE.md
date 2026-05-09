@@ -188,7 +188,7 @@ dependency graph. The next milestone is decided by selecting one axis to
 advance via fresh brainstorming, not by picking from a flat list. Trigger-driven
 cleanup items (OQ-7, OQ-8, OQ-9, M5c OQ-4) live in `PROJECT_SPEC.md`
 §"Open Questions" / "Trigger-driven cleanup" and stay dormant until their
-trigger fires. OQ-NEW closed in M9 (commit `a08fd24`). OQ-BENCH closed in M11 (commit `<TBD>`).
+trigger fires. OQ-NEW closed in M9 (commit `a08fd24`). OQ-BENCH closed in M11 (commit `e7c29b8`).
 
 ---
 
