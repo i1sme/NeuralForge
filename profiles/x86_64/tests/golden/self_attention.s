@@ -86,15 +86,15 @@ nfl_forward_SelfAttention:
     movd    %r10d, %xmm4
     leaq    16(%rsp), %rax
     leaq    16(%rsp), %r11
-    movq    $0, %rcx
+    movq    $0, %rbp
 .Lms_0_0:
     movl    $2048, %r10d
-    cmpq    %r10, %rcx
+    cmpq    %r10, %rbp
     jge     .Lms_end_0_0
-    movss   (%rax, %rcx, 4), %xmm0
+    movss   (%rax, %rbp, 4), %xmm0
     mulss   %xmm4, %xmm0
-    movss   %xmm0, (%r11, %rcx, 4)
-    addq    $1, %rcx
+    movss   %xmm0, (%r11, %rbp, 4)
+    addq    $1, %rbp
     jmp     .Lms_0_0
 .Lms_end_0_0:
     # softmax (3-pass): input [128,16] -> output [128,16]

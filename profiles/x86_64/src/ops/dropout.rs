@@ -36,13 +36,13 @@ pub fn emit_dropout_copy(
     abi.materialise_ptr(src_loc, "%rax", &mut s);
     abi.materialise_ptr(dst_loc, "%r11", &mut s);
     s.push_str(&emit_imm32_to_r10(total_floats as u32));
-    s.push_str("    xorq    %rcx, %rcx\n");
+    s.push_str("    xorq    %rbp, %rbp\n");
     s.push_str(&format!(".Ldropout_{did}:\n"));
-    s.push_str("    cmpq    %r10, %rcx\n");
+    s.push_str("    cmpq    %r10, %rbp\n");
     s.push_str(&format!("    jge     .Ldropout_end_{did}\n"));
-    s.push_str("    movss   (%rax, %rcx, 4), %xmm0\n");
-    s.push_str("    movss   %xmm0, (%r11, %rcx, 4)\n");
-    s.push_str("    incq    %rcx\n");
+    s.push_str("    movss   (%rax, %rbp, 4), %xmm0\n");
+    s.push_str("    movss   %xmm0, (%r11, %rbp, 4)\n");
+    s.push_str("    incq    %rbp\n");
     s.push_str(&format!("    jmp     .Ldropout_{did}\n"));
     s.push_str(&format!(".Ldropout_end_{did}:\n"));
     s

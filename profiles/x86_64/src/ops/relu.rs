@@ -16,7 +16,7 @@ use crate::buffer::BufferLoc;
 ///   %rax (= src pointer)
 ///   %r11 (= dst pointer)
 ///   %r10d (= total_floats — written via emit_imm32_to_r10)
-///   %rcx (= loop counter)
+///   %rbp (= loop counter)
 ///   %xmm0 (= scratch float — element)
 ///   %xmm1 (= scratch float — zero)
 pub fn emit_relu(
@@ -36,14 +36,14 @@ pub fn emit_relu(
     abi.materialise_ptr(dst_loc, "%r11", &mut s);
     s.push_str("    xorps   %xmm1, %xmm1\n");
     s.push_str(&emit_imm32_to_r10(total_floats as u32));
-    s.push_str("    xorq    %rcx, %rcx\n");
+    s.push_str("    xorq    %rbp, %rbp\n");
     s.push_str(&format!(".Lrelu_{rid}:\n"));
-    s.push_str("    cmpq    %r10, %rcx\n");
+    s.push_str("    cmpq    %r10, %rbp\n");
     s.push_str(&format!("    jge     .Lrelu_end_{rid}\n"));
-    s.push_str("    movss   (%rax, %rcx, 4), %xmm0\n");
+    s.push_str("    movss   (%rax, %rbp, 4), %xmm0\n");
     s.push_str("    maxss   %xmm1, %xmm0\n");
-    s.push_str("    movss   %xmm0, (%r11, %rcx, 4)\n");
-    s.push_str("    incq    %rcx\n");
+    s.push_str("    movss   %xmm0, (%r11, %rbp, 4)\n");
+    s.push_str("    incq    %rbp\n");
     s.push_str(&format!("    jmp     .Lrelu_{rid}\n"));
     s.push_str(&format!(".Lrelu_end_{rid}:\n"));
     s

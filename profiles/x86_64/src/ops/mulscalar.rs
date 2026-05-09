@@ -6,9 +6,9 @@
 //!   movl $<scalar_bits>, %r10d
 //!   movd %r10d, %xmm4
 //! Inner loop:
-//!   movss (%rax, %rcx, 4), %xmm0
+//!   movss (%rax, %rbp, 4), %xmm0
 //!   mulss %xmm4, %xmm0
-//!   movss %xmm0, (%r11, %rcx, 4)
+//!   movss %xmm0, (%r11, %rbp, 4)
 //!
 //! With `BufferLoc::Alias`, `src_loc == dst_loc` → in-place transformation
 //! (the materialise_ptr resolution gives both registers the same value).
@@ -45,18 +45,18 @@ pub fn emit_mulscalar(
     abi.materialise_ptr(src_loc, "%rax", &mut s);
     abi.materialise_ptr(dst_loc, "%r11", &mut s);
 
-    // Flat loop, %rcx = i.
-    s.push_str("    movq    $0, %rcx\n");
+    // Flat loop, %rbp = i.
+    s.push_str("    movq    $0, %rbp\n");
     s.push_str(&format!(".Lms_{mid}:\n"));
     s.push_str(&emit_imm32_to_r10(total_elements as u32));
-    s.push_str("    cmpq    %r10, %rcx\n");
+    s.push_str("    cmpq    %r10, %rbp\n");
     s.push_str(&format!("    jge     .Lms_end_{mid}\n"));
 
-    s.push_str("    movss   (%rax, %rcx, 4), %xmm0\n");
+    s.push_str("    movss   (%rax, %rbp, 4), %xmm0\n");
     s.push_str("    mulss   %xmm4, %xmm0\n");
-    s.push_str("    movss   %xmm0, (%r11, %rcx, 4)\n");
+    s.push_str("    movss   %xmm0, (%r11, %rbp, 4)\n");
 
-    s.push_str("    addq    $1, %rcx\n");
+    s.push_str("    addq    $1, %rbp\n");
     s.push_str(&format!("    jmp     .Lms_{mid}\n"));
     s.push_str(&format!(".Lms_end_{mid}:\n"));
 
