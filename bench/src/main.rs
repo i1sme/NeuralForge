@@ -233,10 +233,17 @@ fn compile_to_dylib_for_host(
     };
     cc_args.push("-o");
 
-    let status = std::process::Command::new("cc")
-        .args(&cc_args)
-        .arg(&lib_path)
-        .arg(&s_path)
+    let mut cmd = std::process::Command::new("cc");
+    cmd.args(&cc_args).arg(&lib_path).arg(&s_path);
+    if requested_profile == "x86_64" {
+        // Linux needs explicit libm linkage for `expf` (softmax codegen
+        // emits `call expf@PLT`). macOS arm64 gets it implicitly via
+        // libsystem. Order matters: `-lm` must follow `<src>.s` because
+        // Linux ld resolves symbols left-to-right (library after the
+        // object that uses it).
+        cmd.arg("-lm");
+    }
+    let status = cmd
         .status()
         .map_err(|e| format!("cc invocation failed to spawn: {e}"))?;
     if !status.success() {

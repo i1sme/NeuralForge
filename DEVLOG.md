@@ -14,6 +14,25 @@ Format for each entry:
 
 ---
 
+## 2026-05-09 — M11 hotfix: x86_64 cc missing `-lm` for libm `expf`
+
+### What was done
+- One-line fix in `bench/src/main.rs::compile_to_dylib_for_host`: append `-lm` to the x86_64 `cc` invocation, AFTER the `.s` source file (Linux ld resolves symbols left-to-right). arm64 path unchanged (libm is implicitly linked via libsystem on macOS).
+
+### Decisions made
+
+**Conditional flag, not unconditional.** `-lm` is added only for `requested_profile == "x86_64"`. macOS arm64 doesn't need it; adding it unconditionally would work on both but obscures the asymmetry.
+
+**Hotfix lands via PR, not direct push to `main`.** Post-merge bug found by inaugural CI run #25597048932 (x86_64 leg failed with `undefined symbol: expf`). Even though the fix is one line, the project's M9/M10 convention is PR-with-review for any change to codegen-adjacent code. PR provides audit trail and DEVLOG entry preserves institutional knowledge.
+
+### Problems encountered
+1. **Bug escaped four reviewers + three plan-defect findings.** The plan §B5.1 had `vec!["-shared", "-fPIC"]` as the x86_64 cc args without `-lm`. Spec compliance reviewer matched code-against-plan (both wrong, same way). Code quality reviewer didn't have cross-arch linker hygiene in checklist. Whole-branch reviewer focused on FFI lifetime / artifact sharing / spec invariants — also didn't catch it. Local smoke ran on macos-14 arm64 only (where libsystem implicitly satisfies `expf`). The bug surfaced on the very first CI run on Linux, which is exactly what CI is for. Lesson for future plan synthesis: cross-arch linker flags belong in spec acceptance criteria explicitly. Existing `profiles/x86_64/tests/common/mod.rs` correctly uses `-lm` — the bench should have inherited that pattern via shared helper rather than re-implementing it (spec §5.4 deferred extraction; this hotfix doesn't extract either, but the trigger for OQ-style cleanup is now firing for that decision).
+
+### Next step
+Open PR for this fix. After merge, the next bench.yml run on main produces both Job Summaries; G1 (combined report `bench/results/2026-05-09.md` + backfill `<TBD>` placeholders) follows.
+
+---
+
 ## 2026-05-09 — Milestone 11 closed: OQ-BENCH harness — closes M9-merge trigger
 
 ### What was done
