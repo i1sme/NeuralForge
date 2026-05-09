@@ -75,6 +75,33 @@ pub fn emit_linear(
     s.push_str(&emit_imm32("x15", n as usize));
     s.push_str(&emit_imm32("x16", k as usize));
 
+    // M13 ABI-register save: emit_linear uses x3/x4/x5 as i/j/k loop
+    // counters. For N≥2, x3..x5 overlap with ABI argument registers
+    // (INPUT_REGS[3..5] hold ABI slots used by downstream emitters).
+    // Save any conflicting registers in the ABI range with push/pop pairs
+    // that are balanced within this emitter (sp is correctly restored
+    // before the emitter returns). For N=1, no overlap — no save needed.
+    //
+    // Overlap rule: INPUT_REGS = [x0..x5]; ABI uses INPUT_REGS[..n+2].
+    //   x3 (INPUT_REGS[3]) conflicts when n_inputs >= 2.
+    //   x4 (INPUT_REGS[4]) conflicts when n_inputs >= 3.
+    //   x5 (INPUT_REGS[5]) conflicts when n_inputs >= 4.
+    //
+    // We push pairs (aligned to 16 bytes); a single conflicting register
+    // is padded with xzr. Save order: x3, then x4, then x5 (from outer
+    // loop to inner); restore in LIFO order.
+    let save_x3 = abi.n_inputs >= 2;
+    let save_x4 = abi.n_inputs >= 3;
+    let save_x5 = abi.n_inputs >= 4;
+    if save_x3 && save_x4 {
+        s.push_str("    stp     x3, x4, [sp, #-16]!\n");
+    } else if save_x3 {
+        s.push_str("    stp     x3, xzr, [sp, #-16]!\n");
+    }
+    if save_x5 {
+        s.push_str("    stp     x5, xzr, [sp, #-16]!\n");
+    }
+
     s.push_str("    mov     x3, #0\n");
     s.push_str(&format!(".Lmm_i_{lid}:\n"));
     s.push_str("    cmp     x3, x10\n");
@@ -146,6 +173,16 @@ pub fn emit_linear(
     s.push_str("    add     x3, x3, #1\n");
     s.push_str(&format!("    b       .Lmm_i_{lid}\n"));
     s.push_str(&format!(".Lmm_i_end_{lid}:\n"));
+
+    // M13 ABI-register restore (LIFO mirror of the save block above).
+    if save_x5 {
+        s.push_str("    ldp     x5, xzr, [sp], #16\n");
+    }
+    if save_x3 && save_x4 {
+        s.push_str("    ldp     x3, x4, [sp], #16\n");
+    } else if save_x3 {
+        s.push_str("    ldp     x3, xzr, [sp], #16\n");
+    }
 
     // Row-wise post-ops run after the full matmul loop completes. These
     // require the entire output row to be written before they can proceed.

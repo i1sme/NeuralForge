@@ -1395,3 +1395,40 @@ fn emit_add_arm64_no_callee_saved_or_ffi_save() {
         "emit_add must not call _expf; got:\n{asm}"
     );
 }
+
+// ---- M13 Task 5 dependency: emit_linear ABI register save at N≥2 --------
+
+#[test]
+fn emit_linear_arm64_saves_x3_at_n2_to_avoid_output_clobber() {
+    // M13: at N=2 on arm64, x3 = output_reg(). emit_linear uses x3 as
+    // its i-counter, which would silently clobber the output pointer.
+    // emit_linear must save x3 around its body so downstream ops can
+    // re-read OutputReg via materialise_ptr.
+    use compiler::ast::Span;
+    use compiler::PostOp;
+    let abi = AbiContext { n_inputs: 2 };
+    let post: Vec<PostOp> = vec![];
+    let asm = crate::ops::linear::emit_linear(
+        &abi,
+        /* b */ 2,
+        /* k */ 4,
+        /* n */ 4,
+        /* model_idx */ 0,
+        /* linear_idx */ 0,
+        /* src_loc */ BufferLoc::InputReg(0),
+        /* dst_loc */ BufferLoc::OutputReg,
+        /* weight_offset */ 0,
+        /* bias_offset */ None,
+        /* node_span */ Span::new(1, 1),
+        /* fused_post_ops */ &post,
+        /* sym_prefix */ "",
+    )
+    .expect("emit_linear must succeed at N=2");
+    // x3 saved and restored — pair must balance.
+    let stp_count = asm.matches("stp     x3,").count();
+    let ldp_count = asm.matches("ldp     x3,").count();
+    assert!(
+        stp_count >= 1 && stp_count == ldp_count,
+        "emit_linear must save+restore x3 in balanced pairs at N=2; got stp={stp_count} ldp={ldp_count}\n{asm}"
+    );
+}
