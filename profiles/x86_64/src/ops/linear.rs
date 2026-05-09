@@ -1,8 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Linear (matmul + optional bias + fused PostOps) codegen — x86_64 SSE2.
+//!
+//! M12 multi-input ABI migration: data-flow accesses to the params and
+//! output registers are routed through `AbiContext::params_reg()` /
+//! `AbiContext::output_reg()`. For N=1 these resolve to `%rsi` / `%rdx`
+//! — bit-identical to M3-M11. For N≥2 they shift (e.g. params → `%rdx`,
+//! output → `%rcx` for N=2).
+//!
+//! Note: the inner k/j-loop scratch use of `%rsi` for offset arithmetic
+//! is a single-input-only correctness concession. For N≥2 the scratch
+//! pattern would corrupt one of the ABI input registers; M12's
+//! fixture set never invokes `emit_linear` inside a multi-input model
+//! (no multi-input fixture contains a `linear` op), so the hazard is
+//! real but never exercised. Future milestones that add multi-input
+//! linear models must move the inner scratch to a non-ABI register.
 
-use crate::asm::{emit_imm32_to_r10, materialise_ptr};
+use crate::abi::AbiContext;
+use crate::asm::emit_imm32_to_r10;
 use crate::buffer::BufferLoc;
 use compiler::ast::Span;
 use compiler::PostOp;
@@ -10,6 +25,7 @@ use profile_api::LowerError;
 
 #[allow(clippy::too_many_arguments)]
 pub fn emit_linear(
+    abi: &AbiContext,
     b: u64,
     k: u64,
     n: u64,
@@ -35,61 +51,74 @@ pub fn emit_linear(
         },
     ));
 
-    // 1. Pointer setup.
-    s.push_str(&materialise_ptr("%r8", src_loc)); // src ptr
-    s.push_str(&materialise_ptr("%r11", dst_loc)); // dst ptr
+    let params_reg = abi.params_reg();
+    let output_reg = abi.output_reg();
 
-    // weight base = %rsi + weight_offset*4
+    // 1. Pointer setup.
+    abi.materialise_ptr(src_loc, "%r8", &mut s); // src ptr
+    abi.materialise_ptr(dst_loc, "%r11", &mut s); // dst ptr
+
+    // weight base = params_reg + weight_offset*4
     if weight_offset == 0 {
-        s.push_str("    movq    %rsi, %r9\n");
+        s.push_str(&format!("    movq    {}, %r9\n", params_reg));
     } else {
-        s.push_str(&format!("    leaq    {}(%rsi), %r9\n", weight_offset * 4));
+        s.push_str(&format!(
+            "    leaq    {}({}), %r9\n",
+            weight_offset * 4,
+            params_reg
+        ));
     }
     let needs_zero_xmm4 = fused_post_ops.iter().any(|p| matches!(p, PostOp::Relu));
     if needs_zero_xmm4 {
         s.push_str("    xorps   %xmm4, %xmm4\n");
     }
-    // Save the FFI output pointer (%rdx) into %xmm7 BEFORE the bias-base
-    // setup overwrites it. A subsequent op in the same function (e.g.
-    // standalone emit_softmax following an unfused linear-with-bias)
-    // calls materialise_ptr("%r12", OutputReg) which reads %rdx; if we
-    // don't restore it, %r12 would point at the bias buffer instead of
-    // the caller's output buffer, and the standalone-softmax writes
-    // would land in the wrong place (manifesting as zeroed output —
-    // exactly what `fused_vs_unfused_softmax_match_numerically` caught).
+    // Save the FFI output pointer (output_reg) into %xmm7 BEFORE the
+    // bias-base setup overwrites it. A subsequent op in the same function
+    // (e.g. standalone emit_softmax following an unfused linear-with-bias)
+    // calls abi.materialise_ptr(OutputReg, ...) which reads output_reg;
+    // if we don't restore it, the destination would point at the bias
+    // buffer instead of the caller's output buffer, and the standalone-
+    // softmax writes would land in the wrong place (manifesting as zeroed
+    // output — exactly what `fused_vs_unfused_softmax_match_numerically`
+    // caught).
     //
     // Skip when SoftmaxRow is fused — that's the LAST op in the model,
-    // and no follow-up consumer needs %rdx. Saving across `call expf@PLT`
-    // is also pointless (xmm7 is caller-saved under SysV).
+    // and no follow-up consumer needs output_reg. Saving across
+    // `call expf@PLT` is also pointless (xmm7 is caller-saved under SysV).
     let has_softmax_row = fused_post_ops
         .iter()
         .any(|p| matches!(p, PostOp::SoftmaxRow));
     let preserve_output_ptr = bias_offset.is_some() && !has_softmax_row;
     if preserve_output_ptr {
-        s.push_str("    movq    %rdx, %xmm7\n");
+        s.push_str(&format!("    movq    {}, %xmm7\n", output_reg));
     }
     if let Some(boff) = bias_offset {
         if boff == 0 {
-            s.push_str("    movq    %rsi, %rdx\n");
+            s.push_str(&format!("    movq    {}, {}\n", params_reg, output_reg));
         } else {
-            s.push_str(&format!("    leaq    {}(%rsi), %rdx\n", boff * 4));
+            s.push_str(&format!(
+                "    leaq    {}({}), {}\n",
+                boff * 4,
+                params_reg,
+                output_reg
+            ));
         }
     }
 
-    // Save params ptr (%rsi) into %xmm6 BEFORE the matmul body clobbers
-    // %rsi as offset scratch. The next linear in the same function (e.g.
-    // linear[1] → linear[2] in a multi-layer model) reads %rsi at the
-    // top of its own emit_linear (`leaq weight_offset(%rsi), %r9`); if
-    // we don't preserve it, that read produces a wild pointer and
-    // SIGSEGVs on the first weight load.
+    // Save params ptr (params_reg) into %xmm6 BEFORE the matmul body
+    // clobbers it as offset scratch. The next linear in the same function
+    // (e.g. linear[1] → linear[2] in a multi-layer model) reads
+    // params_reg at the top of its own emit_linear (`leaq weight_offset
+    // (params_reg), %r9`); if we don't preserve it, that read produces a
+    // wild pointer and SIGSEGVs on the first weight load.
     //
     // Skip the save when SoftmaxRow is fused — that's the LAST linear in
     // the model (softmax is always terminal), so no follow-up emit_linear
-    // needs %rsi. Saving across the `call expf@PLT` is also pointless
+    // needs params_reg. Saving across the `call expf@PLT` is also pointless
     // because xmm6 is caller-saved under SysV; the call would clobber it.
     let preserve_params_ptr = !has_softmax_row;
     if preserve_params_ptr {
-        s.push_str("    movq    %rsi, %xmm6\n");
+        s.push_str(&format!("    movq    {}, %xmm6\n", params_reg));
     }
 
     // 2. Outer i-loop: %rax = i, compared against b.
@@ -136,9 +165,11 @@ pub fn emit_linear(
     s.push_str(&format!("    jmp     .Lmm_k_{lid}\n"));
     s.push_str(&format!(".Lmm_k_end_{lid}:\n"));
 
-    // 5. Bias-add (if present): xmm0 += bias[j].
+    // 5. Bias-add (if present): xmm0 += bias[j]. Bias base lives in
+    // output_reg (re-purposed as scratch for the duration of the body —
+    // restored from %xmm7 below).
     if bias_offset.is_some() {
-        s.push_str("    movss   (%rdx, %rcx, 4), %xmm5\n");
+        s.push_str(&format!("    movss   ({}, %rcx, 4), %xmm5\n", output_reg));
         s.push_str("    addss   %xmm5, %xmm0\n");
     }
 
@@ -191,20 +222,20 @@ pub fn emit_linear(
         }
     }
 
-    // 9. Restore params ptr (%rsi) from %xmm6 so the next emit_linear in
-    //    the same function (in multi-layer models) reads the correct
+    // 9. Restore params ptr (params_reg) from %xmm6 so the next emit_linear
+    //    in the same function (in multi-layer models) reads the correct
     //    pointer at the top of its weight-base setup. No-op if we didn't
     //    save above (SoftmaxRow case — this is the last linear).
     if preserve_params_ptr {
-        s.push_str("    movq    %xmm6, %rsi\n");
+        s.push_str(&format!("    movq    %xmm6, {}\n", params_reg));
     }
 
-    // 10. Restore output ptr (%rdx) from %xmm7 so a subsequent op (e.g.
-    //     standalone emit_softmax following unfused linear-with-bias)
-    //     can re-materialise OutputReg via `movq %rdx, ...`. No-op if we
-    //     didn't save above (no bias OR SoftmaxRow fused).
+    // 10. Restore output ptr (output_reg) from %xmm7 so a subsequent op
+    //     (e.g. standalone emit_softmax following unfused linear-with-bias)
+    //     can re-materialise OutputReg via `movq output_reg, ...`. No-op if
+    //     we didn't save above (no bias OR SoftmaxRow fused).
     if preserve_output_ptr {
-        s.push_str("    movq    %xmm7, %rdx\n");
+        s.push_str(&format!("    movq    %xmm7, {}\n", output_reg));
     }
 
     Ok(s)

@@ -8,7 +8,8 @@
 //! dropout is the model output, `walk_model` calls `emit_dropout_copy`
 //! to copy the operand buffer into the caller's output buffer.
 
-use crate::asm::{emit_imm32_to_r10, materialise_ptr};
+use crate::abi::AbiContext;
+use crate::asm::emit_imm32_to_r10;
 use crate::buffer::BufferLoc;
 
 /// Emit x86_64 asm for a dropout-as-output copy loop.
@@ -16,6 +17,7 @@ use crate::buffer::BufferLoc;
 /// Mirror of `emit_relu`'s structure minus the zero-init and `maxss`:
 /// element-wise load → store, no transformation.
 pub fn emit_dropout_copy(
+    abi: &AbiContext,
     total_floats: u64,
     model_idx: usize,
     dropout_idx: usize,
@@ -31,8 +33,8 @@ pub fn emit_dropout_copy(
     s.push_str(&format!(
         "    # dropout-as-output: copy operand→output ({total_floats} elements)\n"
     ));
-    s.push_str(&materialise_ptr("%r8", src_loc));
-    s.push_str(&materialise_ptr("%r11", dst_loc));
+    abi.materialise_ptr(src_loc, "%r8", &mut s);
+    abi.materialise_ptr(dst_loc, "%r11", &mut s);
     s.push_str(&emit_imm32_to_r10(total_floats as u32));
     s.push_str("    xorq    %rcx, %rcx\n");
     s.push_str(&format!(".Ldropout_{did}:\n"));

@@ -10,79 +10,77 @@ nfl_forward_SelfAttention:
     pushq   %r15
     subq    $16408, %rsp
     # matmul (leading_count=8): [16,16] x [16,16] -> [16,16], transpose_b=true
-    movq    %rdi, %xmm8
-    movq    %rsi, %xmm6
-    movq    %rdx, %xmm7
-    movq    %rdi, %r8
-    movq    %rdi, %r9
-    leaq    16(%rsp), %r11
-    movq    $0, %rcx
+    movq    %rdi, %rax
+    movq    %rax, %xmm8
+    movq    %rdi, %rax
+    movq    %rax, %xmm6
+    leaq    16(%rsp), %rax
+    movq    %rax, %xmm7
+    movq    $0, %r15
 .Lmm4d_outer_0_0:
     movl    $8, %r10d
-    cmpq    %r10, %rcx
+    cmpq    %r10, %r15
     jge     .Lmm4d_outer_end_0_0
     movl    $256, %r10d
-    movq    %rcx, %rax
+    movq    %r15, %rax
     imulq   %r10, %rax
-    leaq    (%r8, %rax, 4), %rdi
+    movq    %xmm8, %r12
+    leaq    (%r12, %rax, 4), %r12
     movl    $256, %r10d
-    movq    %rcx, %rax
+    movq    %r15, %rax
     imulq   %r10, %rax
-    leaq    (%r9, %rax, 4), %rsi
+    movq    %xmm6, %r13
+    leaq    (%r13, %rax, 4), %r13
     movl    $256, %r10d
-    movq    %rcx, %rax
+    movq    %r15, %rax
     imulq   %r10, %rax
-    leaq    (%r11, %rax, 4), %rdx
-    pushq   %rcx
-    movq    $0, %rax
+    movq    %xmm7, %r14
+    leaq    (%r14, %rax, 4), %r14
+    movq    $0, %rbx
 .Lmm4d_i_0_0:
     movl    $16, %r10d
-    cmpq    %r10, %rax
+    cmpq    %r10, %rbx
     jge     .Lmm4d_i_end_0_0
-    movq    $0, %rcx
+    movq    $0, %r9
 .Lmm4d_j_0_0:
     movl    $16, %r10d
-    cmpq    %r10, %rcx
+    cmpq    %r10, %r9
     jge     .Lmm4d_j_end_0_0
     xorps   %xmm0, %xmm0
-    movq    $0, %r10
+    movq    $0, %r11
 .Lmm4d_k_0_0:
-    cmpq    $16, %r10
+    movl    $16, %r10d
+    cmpq    %r10, %r11
     jge     .Lmm4d_k_end_0_0
-    pushq   %r11
-    movq    %rax, %r11
-    imulq   $16, %r11
-    addq    %r10, %r11
-    movss   (%rdi, %r11, 4), %xmm1
-    movq    %rcx, %r11
-    imulq   $16, %r11
-    addq    %r10, %r11
-    movss   (%rsi, %r11, 4), %xmm2
+    movl    $16, %r10d
+    movq    %rbx, %rax
+    imulq   %r10, %rax
+    addq    %r11, %rax
+    movss   (%r12, %rax, 4), %xmm1
+    movl    $16, %r10d
+    movq    %r9, %rax
+    imulq   %r10, %rax
+    addq    %r11, %rax
+    movss   (%r13, %rax, 4), %xmm2
     mulss   %xmm2, %xmm1
     addss   %xmm1, %xmm0
-    popq    %r11
-    addq    $1, %r10
+    addq    $1, %r11
     jmp     .Lmm4d_k_0_0
 .Lmm4d_k_end_0_0:
-    pushq   %r11
-    movq    %rax, %r11
-    imulq   $16, %r11
-    addq    %rcx, %r11
-    movss   %xmm0, (%rdx, %r11, 4)
-    popq    %r11
-    addq    $1, %rcx
+    movl    $16, %r10d
+    movq    %rbx, %rax
+    imulq   %r10, %rax
+    addq    %r9, %rax
+    movss   %xmm0, (%r14, %rax, 4)
+    addq    $1, %r9
     jmp     .Lmm4d_j_0_0
 .Lmm4d_j_end_0_0:
-    addq    $1, %rax
+    addq    $1, %rbx
     jmp     .Lmm4d_i_0_0
 .Lmm4d_i_end_0_0:
-    popq    %rcx
-    addq    $1, %rcx
+    addq    $1, %r15
     jmp     .Lmm4d_outer_0_0
 .Lmm4d_outer_end_0_0:
-    movq    %xmm8, %rdi
-    movq    %xmm6, %rsi
-    movq    %xmm7, %rdx
     # mul_scalar: total_elements=2048, scalar_bits=0x3e800000
     movl    $0x3e800000, %r10d
     movd    %r10d, %xmm4
@@ -105,7 +103,7 @@ nfl_forward_SelfAttention:
     pushq   %rdi
     pushq   %rsi
     pushq   %rdx
-    pushq   %rax
+    pushq   %rax              # 16-byte alignment padding
     xorq    %r13, %r13
 .Lsm_i_0_0:
     movl    $128, %r10d
@@ -165,84 +163,82 @@ nfl_forward_SelfAttention:
     incq    %r13
     jmp     .Lsm_i_0_0
 .Lsm_i_end_0_0:
-    popq    %rax
+    popq    %rax              # discard alignment padding
     popq    %rdx
     popq    %rsi
     popq    %rdi
     # matmul (leading_count=8): [16,16] x [16,16] -> [16,16], transpose_b=false
-    movq    %rdi, %xmm8
-    movq    %rsi, %xmm6
-    movq    %rdx, %xmm7
-    leaq    8208(%rsp), %r8
-    movq    %rdi, %r9
-    movq    %rdx, %r11
-    movq    $0, %rcx
+    leaq    8208(%rsp), %rax
+    movq    %rax, %xmm8
+    movq    %rdi, %rax
+    movq    %rax, %xmm6
+    movq    %rdx, %rax
+    movq    %rax, %xmm7
+    movq    $0, %r15
 .Lmm4d_outer_0_1:
     movl    $8, %r10d
-    cmpq    %r10, %rcx
+    cmpq    %r10, %r15
     jge     .Lmm4d_outer_end_0_1
     movl    $256, %r10d
-    movq    %rcx, %rax
+    movq    %r15, %rax
     imulq   %r10, %rax
-    leaq    (%r8, %rax, 4), %rdi
+    movq    %xmm8, %r12
+    leaq    (%r12, %rax, 4), %r12
     movl    $256, %r10d
-    movq    %rcx, %rax
+    movq    %r15, %rax
     imulq   %r10, %rax
-    leaq    (%r9, %rax, 4), %rsi
+    movq    %xmm6, %r13
+    leaq    (%r13, %rax, 4), %r13
     movl    $256, %r10d
-    movq    %rcx, %rax
+    movq    %r15, %rax
     imulq   %r10, %rax
-    leaq    (%r11, %rax, 4), %rdx
-    pushq   %rcx
-    movq    $0, %rax
+    movq    %xmm7, %r14
+    leaq    (%r14, %rax, 4), %r14
+    movq    $0, %rbx
 .Lmm4d_i_0_1:
     movl    $16, %r10d
-    cmpq    %r10, %rax
+    cmpq    %r10, %rbx
     jge     .Lmm4d_i_end_0_1
-    movq    $0, %rcx
+    movq    $0, %r9
 .Lmm4d_j_0_1:
     movl    $16, %r10d
-    cmpq    %r10, %rcx
+    cmpq    %r10, %r9
     jge     .Lmm4d_j_end_0_1
     xorps   %xmm0, %xmm0
-    movq    $0, %r10
+    movq    $0, %r11
 .Lmm4d_k_0_1:
-    cmpq    $16, %r10
+    movl    $16, %r10d
+    cmpq    %r10, %r11
     jge     .Lmm4d_k_end_0_1
-    pushq   %r11
-    movq    %rax, %r11
-    imulq   $16, %r11
-    addq    %r10, %r11
-    movss   (%rdi, %r11, 4), %xmm1
-    movq    %r10, %r11
-    imulq   $16, %r11
-    addq    %rcx, %r11
-    movss   (%rsi, %r11, 4), %xmm2
+    movl    $16, %r10d
+    movq    %rbx, %rax
+    imulq   %r10, %rax
+    addq    %r11, %rax
+    movss   (%r12, %rax, 4), %xmm1
+    movl    $16, %r10d
+    movq    %r11, %rax
+    imulq   %r10, %rax
+    addq    %r9, %rax
+    movss   (%r13, %rax, 4), %xmm2
     mulss   %xmm2, %xmm1
     addss   %xmm1, %xmm0
-    popq    %r11
-    addq    $1, %r10
+    addq    $1, %r11
     jmp     .Lmm4d_k_0_1
 .Lmm4d_k_end_0_1:
-    pushq   %r11
-    movq    %rax, %r11
-    imulq   $16, %r11
-    addq    %rcx, %r11
-    movss   %xmm0, (%rdx, %r11, 4)
-    popq    %r11
-    addq    $1, %rcx
+    movl    $16, %r10d
+    movq    %rbx, %rax
+    imulq   %r10, %rax
+    addq    %r9, %rax
+    movss   %xmm0, (%r14, %rax, 4)
+    addq    $1, %r9
     jmp     .Lmm4d_j_0_1
 .Lmm4d_j_end_0_1:
-    addq    $1, %rax
+    addq    $1, %rbx
     jmp     .Lmm4d_i_0_1
 .Lmm4d_i_end_0_1:
-    popq    %rcx
-    addq    $1, %rcx
+    addq    $1, %r15
     jmp     .Lmm4d_outer_0_1
 .Lmm4d_outer_end_0_1:
-    movq    %xmm8, %rdi
-    movq    %xmm6, %rsi
-    movq    %xmm7, %rdx
     addq    $16408, %rsp
     popq    %r15
     popq    %r14

@@ -16,12 +16,14 @@
 //! f64-to-f32 truncation happens in the dispatcher (codegen.rs) — the
 //! emitter receives `scalar_bits: u32` already in f32 form. See spec §6.5.
 
-use crate::asm::{emit_imm32_to_r10, materialise_ptr};
+use crate::abi::AbiContext;
+use crate::asm::emit_imm32_to_r10;
 use crate::buffer::BufferLoc;
 
 /// Emit AT&T x86_64 asm for `dst[i] = src[i] * scalar`.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_mulscalar(
+    abi: &AbiContext,
     total_elements: u64,
     scalar_bits: u32,
     model_idx: usize,
@@ -40,8 +42,8 @@ pub fn emit_mulscalar(
     s.push_str(&format!("    movl    $0x{:x}, %r10d\n", scalar_bits));
     s.push_str("    movd    %r10d, %xmm4\n");
 
-    s.push_str(&materialise_ptr("%r8", src_loc));
-    s.push_str(&materialise_ptr("%r11", dst_loc));
+    abi.materialise_ptr(src_loc, "%r8", &mut s);
+    abi.materialise_ptr(dst_loc, "%r11", &mut s);
 
     // Flat loop, %rcx = i.
     s.push_str("    movq    $0, %rcx\n");
