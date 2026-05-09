@@ -169,7 +169,7 @@ NeuralForge is designed so that LLMs can write, read, and reason about NFL code 
 
 ## Current Status
 
-**Milestone 13 complete. ~400 tests passing on macOS arm64 (~404 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean (`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, `cargo test --workspace`).
+**Milestone 13 complete. 400 tests passing on macOS arm64 (~404 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean (`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, `cargo test --workspace`).
 
 M13 closed the M12→M13 priority signal (x86_64 `emit_matmul` rejected N=4 + matmul) and shipped the first A2 brick (`StdOp::Add`). The unifying insight of the milestone is the **higher-N ABI register-conflict pattern**: at higher N, `INPUT_REGS[n_inputs+1]` (the output pointer register) creeps into what was previously safe scratch space. Task 1 surfaced it on x86_64 matmul (%r9 collision at N=4); Task 5's `residual_add.nfl` testing surfaced the analogous arm64 emit_linear bug (x3/x4/x5 collide at N=2/3/4). Both fixes preserve the M12 §9.1 invariant ("op-emitter body must NOT touch any ABI argument register") but with different resolution strategies — `%rbp` register relocation on x86_64 (callee-saved by prologue, unread by op bodies), stp/ldp save/restore on arm64 (chosen over relocate-to-x9-x15 because emit_linear's complex secondary dispatch already saturates that scratch range). New fixtures: `tests/fixtures/{residual_add,four_input_matmul}.nfl` and `tests/fixtures/negative/add_shape_mismatch.nfl`.
 

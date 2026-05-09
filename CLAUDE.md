@@ -174,7 +174,7 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-**Milestone 13 complete. ~400 tests passing on macOS arm64 (~404 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean
+**Milestone 13 complete. 400 tests passing on macOS arm64 (~404 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean
 (`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo fmt --all -- --check`, `cargo test --workspace`).
 
