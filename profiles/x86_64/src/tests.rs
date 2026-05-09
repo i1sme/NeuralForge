@@ -1493,6 +1493,80 @@ fn emit_add_x86_64_no_callee_saved_or_ffi_save() {
     }
 }
 
+// ---- M13 PR-fix: emit_linear x86_64 ABI register save at N≥2 -----------
+
+#[test]
+fn emit_linear_x86_64_save_block_balances_at_all_n() {
+    // M13 (PR follow-up): x86_64 emit_linear's body clobbers %rdi/%rsi/%rcx
+    // (k-counter, offset scratch, j-counter). At N=1 these are non-ABI; at
+    // N≥2 they overlap with input(0)/input(1)/output_reg respectively
+    // (and shift further at N=3, N=4). The fix: pushq save at body entry,
+    // popq restore at body exit, conditional on n_inputs ≥ 2.
+    //
+    // This test verifies push/pop balance at every N ∈ [1, 4] and pins
+    // the exact register set for N≥2:
+    //   N=1 → 0 pushq/popq pairs (no save needed).
+    //   N=2..4 → 3 pushq + 3 popq, in LIFO order (push %rdi, %rsi, %rcx;
+    //            pop %rcx, %rsi, %rdi).
+    use crate::abi::AbiContext;
+    use crate::buffer::BufferLoc;
+    use compiler::ast::Span;
+    use compiler::PostOp;
+    let cases = [(1usize, 0usize), (2, 3), (3, 3), (4, 3)];
+    for &(n_inputs, expected_pushes) in &cases {
+        let abi = AbiContext { n_inputs };
+        let post: Vec<PostOp> = vec![];
+        let asm = crate::ops::emit_linear(
+            &abi,
+            /* b */ 2,
+            /* k */ 4,
+            /* n */ 4,
+            /* model_idx */ 0,
+            /* linear_idx */ 0,
+            /* src_loc */ BufferLoc::InputReg(0),
+            /* dst_loc */ BufferLoc::OutputReg,
+            /* weight_offset */ 0,
+            /* bias_offset */ None,
+            /* node_span */ Span::new(1, 1),
+            /* fused_post_ops */ &post,
+            /* sym_prefix */ "",
+        )
+        .expect("emit_linear must succeed");
+        let pushq_count = asm.matches("    pushq   ").count();
+        let popq_count = asm.matches("    popq    ").count();
+        assert_eq!(
+            pushq_count, expected_pushes,
+            "N={n_inputs}: expected {expected_pushes} pushq; got {pushq_count}\n{asm}"
+        );
+        assert_eq!(
+            popq_count, expected_pushes,
+            "N={n_inputs}: expected {expected_pushes} popq; got {popq_count}\n{asm}"
+        );
+        if n_inputs >= 2 {
+            // Specific register set + LIFO ordering.
+            for reg in &["%rdi", "%rsi", "%rcx"] {
+                assert!(
+                    asm.contains(&format!("    pushq   {reg}\n")),
+                    "N={n_inputs}: expected `pushq {reg}`; got:\n{asm}"
+                );
+                assert!(
+                    asm.contains(&format!("    popq    {reg}\n")),
+                    "N={n_inputs}: expected `popq {reg}`; got:\n{asm}"
+                );
+            }
+            // LIFO check: pop order must be %rcx, %rsi, %rdi (reverse of
+            // push order %rdi, %rsi, %rcx). Verify by relative position.
+            let pop_rcx = asm.find("    popq    %rcx\n").expect("popq %rcx");
+            let pop_rsi = asm.find("    popq    %rsi\n").expect("popq %rsi");
+            let pop_rdi = asm.find("    popq    %rdi\n").expect("popq %rdi");
+            assert!(
+                pop_rcx < pop_rsi && pop_rsi < pop_rdi,
+                "N={n_inputs}: popq order must be LIFO (%rcx < %rsi < %rdi); got {pop_rcx}/{pop_rsi}/{pop_rdi}\n{asm}"
+            );
+        }
+    }
+}
+
 // ---- Group A (M13): N=4 + matmul fix via %rbp j-counter --------------------
 
 #[test]
