@@ -1012,8 +1012,7 @@ model M [batch=2]:
 }
 
 /// N=1 regression invariant: every existing fixture must compile to
-/// the EXACT same assembly under M12 codegen as the M11 baseline
-/// (committed in profiles/arm64/tests/golden/<fixture>.s).
+/// the EXACT same assembly as the committed goldens in tests/golden/
 ///
 /// This test loops over a list of fixtures and asserts byte-exact
 /// equality with the corresponding golden file. Spec §10.2 gate #4.

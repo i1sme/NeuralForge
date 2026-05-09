@@ -86,7 +86,7 @@ fn walk_model(
     let sig = FnSig {
         name: format!("nfl_forward_{}", model.name),
         model: model.name.clone(),
-        inputs_floats: vec![input_floats], // arity-1 in this commit; arity-N in Group B
+        inputs_floats: vec![input_floats],
         output_floats,
         params_floats,
         params_layout,

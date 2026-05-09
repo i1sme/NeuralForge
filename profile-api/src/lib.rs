@@ -69,9 +69,9 @@ pub enum LowerError {
     ShapeNotConcrete { span: Span },
     /// Defensive: post-op variant not supported by this profile.
     UnsupportedPostOp { op: String, span: Span },
-    /// Model declared more inputs than the profile's ABI register window
-    /// can hold without stack-spilling. M12 caps both profiles at N=4
-    /// (max=4 in the variant).
+    /// Model declared more inputs than this profile's ABI register window
+    /// can hold without stack-spilling. The `max` field carries the
+    /// profile-specific cap.
     TooManyInputs { n: usize, max: usize, span: Span },
 }
 
@@ -217,9 +217,6 @@ mod tests {
         let msg = format!("{}", e);
         assert!(msg.contains("5"), "got: {msg}");
         assert!(msg.contains("4"), "got: {msg}");
-        assert!(
-            msg.contains("not supported") || msg.contains("maximum"),
-            "msg should explain the limit; got: {msg}"
-        );
+        assert!(msg.contains("maximum of"), "got: {msg}");
     }
 }
