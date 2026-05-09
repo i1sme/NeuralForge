@@ -1391,10 +1391,17 @@ fn residual_add_match_numerically() {
     // Linear weights: dim×dim row-major (no bias).
     let weights: Vec<f32> = (0..dim * dim).map(|i| (i as f32) * 0.05).collect();
     let mut out = vec![0.0f32; batch * dim];
-    eprintln!("DEBUG: 11 — buffers prepared (x={}, skip={}, w={}, out={})",
-        x.len(), skip.len(), weights.len(), out.len());
-    eprintln!("DEBUG: 11b — first asm bytes:\n{}",
-        asm.source.lines().take(5).collect::<Vec<_>>().join("\n"));
+    eprintln!(
+        "DEBUG: 11 — buffers prepared (x={}, skip={}, w={}, out={})",
+        x.len(),
+        skip.len(),
+        weights.len(),
+        out.len()
+    );
+    eprintln!(
+        "DEBUG: 11b — first asm bytes:\n{}",
+        asm.source.lines().take(5).collect::<Vec<_>>().join("\n")
+    );
 
     eprintln!("DEBUG: 12 — about to call forward");
     unsafe {
