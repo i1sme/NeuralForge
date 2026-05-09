@@ -1087,7 +1087,16 @@ EOF
 - Modify: `profiles/arm64/tests/integration.rs` (add `residual_add_match_numerically`)
 - Modify: `profiles/x86_64/tests/integration.rs` (add `residual_add_match_numerically` + `four_input_matmul_match_numerically`)
 
-- [ ] **Step 5.1: Write `tests/fixtures/residual_add.nfl`**
+- [ ] **Step 5.1a: Verify linear bias default before writing fixture / reference**
+
+Run: `grep -n "params_floats\|bias" profiles/arm64/tests/integration.rs | head -20`
+Run: `grep -A3 'StdOp::Linear =>' compiler/src/ir/stdlib.rs | head -15`
+
+Expected: confirm whether `linear[dim]` (no `bias=true` named arg) emits with bias OFF (default) or ON. As of M12: `linear[dim]` defaults to `bias=false` (per `stdlib.rs::signature`'s Linear arm — `bias` is `Symbol`, optional, `required: false`; `linear_has_bias` reads `bias=true` explicitly). So `params_floats == dim * dim` for the residual_add fixture (16 floats for dim=4), and the reference is `relu(x @ W) + skip` with NO bias term.
+
+If grep reveals the default has changed (e.g. some prior milestone made `bias=true` the default), adjust the fixture's `linear[dim]` to `linear[dim, bias=false]`, the assertion to `assert_eq!(sig.params_floats, dim * dim, "...")`, and the reference to NOT include bias. Conversely, if the fixture intentionally uses bias, write `linear[dim, bias=true]`, assert `dim * dim + dim`, and add `+ b[j]` in the reference.
+
+- [ ] **Step 5.1b: Write `tests/fixtures/residual_add.nfl`**
 
 ```
 model ResidualBlock [batch=2, dim=4]:
