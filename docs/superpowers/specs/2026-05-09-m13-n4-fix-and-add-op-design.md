@@ -39,8 +39,13 @@ Ship a single PR with **6 atomic commits** (option **P** from brainstorm Q5):
 1. **Group A — N=4 + matmul fix on x86_64.** Reassign j-counter in `profiles/x86_64/src/ops/matmul.rs::emit_matmul` to a scratch register that is non-ABI at N=4. Remove the early `Err(LowerError::UnsupportedOp)` guard (`matmul.rs:134-139`). Flip `profiles/x86_64/src/tests.rs:1381` (`Group C Q11: N=4 rejection`) into a positive emit test. Update the module doc-comment table (`matmul.rs:42-58`) to reflect the new j-counter slot. Update `profiles/x86_64/src/ops/matmul.rs:23,26` "M12 caps N at 4" / "%r9 also caller-saved but transitions into ABI at N=4" wording to match the new reality.
 2. **Group B — `add` op foundation.** `compiler/src/ir/stdlib.rs`: new `StdOp::Add` variant, `Signature` slot mirroring `Matmul` (positional `ArgSlot { name: "other", ty: Tensor, required: true }`, no named args), `infer_output_shape` arm doing strict shape equality + new `ShapeError::AddShapeMismatch { expected: Shape, got: Shape }`, `validate_attrs` no-op arm, `resolve("add") => Some(StdOp::Add)`, `Display for StdOp` "add" arm. Plus parser/builder unit tests pinning `a -> add[skip]` round-trip and the negative shape-mismatch case. **No emit_add yet — `walk_model` returns `Err(LowerError::UnsupportedOp)` for `StdOp::Add` until Group C/D land.**
 3. **Group C — arm64 `emit_add`.** New `profiles/arm64/src/ops/add.rs::emit_add`. Flat elementwise loop: materialise `a_loc` and `other_loc` pointers, materialise `dst_loc`, loop over `total_elements = product(shape)` with `ldr s0, [a_ptr], #4` / `ldr s1, [other_ptr], #4` / `fadd s2, s0, s1` / `str s2, [dst_ptr], #4`. `walk_model` dispatch: shape inference passed from UIR, no FFI save/restore (no `bl _expf`), no scratch budget pressure. Unit test on emitted asm shape (analyser-style, like existing `emit_relu_emits_loop` tests).
-4. **Group D — x86_64 `emit_add`.** Mirror of Group C for SysV. `profiles/x86_64/src/ops/add.rs::emit_add`. AT&T elementwise loop: `movss (%rdi_or_other_input), %xmm0` / `movss (%other_ptr), %xmm1` / `addss %xmm1, %xmm0` / `movss %xmm0, (%dst_ptr)`. Same structure as `emit_mulscalar` (M10) which is the closest existing template — flat scalar loop, no scratch pressure. Unit test analogous to Group C.
-5. **Group E — integration fixture + per-profile FFI tests.** New `tests/fixtures/residual_add.nfl` (form: `model Block: x: Tensor[batch, dim], skip: Tensor[batch, dim]; x -> linear[dim] -> relu -> add[skip]`). Per-profile FFI integration test in `profiles/{arm64,x86_64}/tests/integration.rs`: compile via cc + dlopen, call with random `x` / `skip` / `params`, compare bit-exact against reference Rust impl. Plus negative fixture `tests/fixtures/profile-negative/add_shape_mismatch.nfl` exercising `ShapeError::AddShapeMismatch`.
+4. **Group D — x86_64 `emit_add`.** Mirror of Group C for SysV. `profiles/x86_64/src/ops/add.rs::emit_add`. AT&T elementwise loop: `movss (a_ptr_reg), %xmm0` / `movss (other_ptr_reg), %xmm1` / `addss %xmm1, %xmm0` / `movss %xmm0, (dst_ptr_reg)`, where `a_ptr_reg` / `other_ptr_reg` / `dst_ptr_reg` are the materialised pointer registers from `{%rax, %r10, %r11}` per §5.4. Same structure as `emit_mulscalar` (M10) which is the closest existing template — flat scalar loop, no scratch pressure. Unit test analogous to Group C.
+5. **Group E — integration fixtures + per-profile FFI tests.** Three fixtures:
+   - **(i)** `tests/fixtures/residual_add.nfl` (form: `model Block: x: Tensor[batch, dim], skip: Tensor[batch, dim]; x -> linear[dim] -> relu -> add[skip]`) — positive `add` op end-to-end on both profiles.
+   - **(ii)** N=4 + matmul fixture (name TBD by plan synthesis per §6.2) — closes Group A's N=4 fix end-to-end on x86_64. Optional regression sanity on arm64 since arm64 already supported N=4 + matmul at M12.
+   - **(iii)** `tests/fixtures/profile-negative/add_shape_mismatch.nfl` — exercises `ShapeError::AddShapeMismatch`.
+
+   Per-profile FFI integration tests in `profiles/{arm64,x86_64}/tests/integration.rs`: compile via cc + dlopen, call with random inputs / params, compare bit-exact against reference Rust impl.
 6. **Group F — closure docs.** PROJECT_SPEC.md (M13 row in milestones table + Current Status bumped + Strategic Roadmap A2 annotation: "M13 closed N=4 gap + shipped first A2 brick `add`; A2 LayerNorm + FFN remain in M14+"), CLAUDE.md (Repository Structure tree gains `profiles/{arm64,x86_64}/src/ops/add.rs`, Current Status to M13), `docs/language_reference/grammar.md` (new `add` op in stdlib reference), `docs/profile_guide/{arm64,x86_64}.md` ("M13 ops" section + x86_64 N=4 fix note in matmul section), `docs/language_reference/uir.md` (new fixture in pretty-print examples if applicable), DEVLOG entry.
 
 ---
@@ -70,9 +75,11 @@ Plan synthesis chooses one of these (or proposes another satisfying §3.2):
 
 Plan synthesis picks one, defends it under §3.2 constraints, and writes the chosen asm in the plan body. Brainstorm leaves this open — the choice is a performance/clarity trade-off best made with the surrounding emit code in front of you.
 
-### 3.4 Test transition
+### 3.4 Test transition (Group A — unit-test-only)
 
-`profiles/x86_64/src/tests.rs:1381` (`Group C Q11: N=4 rejection`) currently asserts `Err(LowerError::UnsupportedOp)` with a message containing "N=4" or "4 inputs". Group A flips this to a positive `Ok(asm)` test that pins the new j-counter slot in the emitted asm (e.g. `assert!(asm.contains("<chosen_j_register>"))` and `assert!(!asm.contains("%r9, %r9"))` to prove %r9 is no longer self-clobbered). Plus a new FFI integration test in `profiles/x86_64/tests/integration.rs` exercising N=4 + matmul end-to-end (e.g. extending `multi_input_attention.nfl` to N=4 or adding `tests/fixtures/four_input_matmul.nfl`).
+`profiles/x86_64/src/tests.rs:1381` (`Group C Q11: N=4 rejection`) currently asserts `Err(LowerError::UnsupportedOp)` with a message containing "N=4" or "4 inputs". Group A flips this to a positive `Ok(asm)` test that pins the new j-counter slot in the emitted asm (e.g. `assert!(asm.contains("<chosen_j_register>"))` and `assert!(!asm.contains("%r9, %r9"))` to prove %r9 is no longer self-clobbered).
+
+**FFI end-to-end coverage of N=4 + matmul lives in Group E §6.2**, not in Group A. This matches the M9/M10/M12 pattern: codegen-touching groups ship unit tests on emitted asm shape; integration fixtures + cc+dlopen+bit-exact tests are bundled in the dedicated integration group. Group A stays surgical — one file edit, one test flip.
 
 ---
 
@@ -188,8 +195,18 @@ Both `emit_add` are flat elementwise loops over `total_elements = shape.0.iter()
 
 ### 5.4 x86_64 `emit_add` register budget
 
-- `%rax, %r10, %r11` (caller-saved non-ABI): pointers to `a` / `other` / `dst` after materialise. (At N=4, `%r9` is taken by output; %rax/%r10/%r11 are still free.)
-- `%rcx` is also free at N≤3 but at N=4 it's an ABI input — use a stack slot or another scratch for the loop counter at N=4. **Constraint for plan synthesis: `emit_add` must work at all N ∈ [1, 4]**, so register choices must be N-aware via `AbiContext` or unconditionally use registers that are non-ABI at N=4.
+- `%rax, %r10, %r11` (caller-saved non-ABI): pointers to `a` / `other` / `dst` after materialise. These three are free at all N ∈ [1, 4].
+- **Loop counter must be non-ABI at all N ∈ [1, 4].** The full ABI footprint by arity (per `INPUT_REGS = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"]` at `profiles/x86_64/src/abi.rs:27`):
+
+  | N | inputs | params | output | free non-ABI scratch |
+  |---|--------|--------|--------|----------------------|
+  | 1 | %rdi | %rsi | %rdx | %rcx, %r8, %r9, %rax, %r10, %r11 |
+  | 2 | %rdi, %rsi | %rdx | %rcx | %r8, %r9, %rax, %r10, %r11 |
+  | 3 | %rdi, %rsi, %rdx | %rcx | %r8 | %r9, %rax, %r10, %r11 |
+  | 4 | %rdi, %rsi, %rdx, %rcx | %r8 | %r9 | %rax, %r10, %r11 |
+
+  `%rcx` becomes ABI at N=2 (output) and stays ABI through N=4 — it is free **only** at N=1, never use it as `emit_add` scratch. The intersection of free non-ABI scratch across all N is `{%rax, %r10, %r11}` — three GP registers, exactly the materialised pointer set, leaving zero spare GPR for the loop counter.
+- **Loop counter strategy** is plan-synthesis Q (§9 item 2). Three options: (a) stack slot allocated in prologue (cheapest, mirrors §3.3 Option A.1 for matmul); (b) collapse loop counter into pointer arithmetic (compare `dst_ptr` against `dst_end_ptr` precomputed from `total_elements`); (c) thread `AbiContext` and pick a register N-aware (ugly — emit_add becomes N-conditional). Brainstorm recommendation is (b) — pointer-bound comparison eliminates the counter entirely and is idiomatic for flat elementwise loops.
 - `%xmm0, %xmm1` (caller-saved): load-load-addss-store cycle.
 - No callee-saved touched. No FFI save/restore.
 
@@ -218,9 +235,11 @@ model ResidualBlock [batch=2, dim=4]:
 
 Small dims for fast FFI execution. `batch=2, dim=4` is enough to exercise the loop multiple times without wall-clock cost.
 
-### 6.2 N=4 + matmul positive fixture (Group A bequest)
+### 6.2 N=4 + matmul positive fixture (closes Group A end-to-end)
 
-Either extend `multi_input_attention.nfl` to a 4-input variant or add `tests/fixtures/four_input_matmul.nfl`. Plan synthesis decides; the constraint is that the fixture must exercise both N=4 input ABI mapping AND a matmul op (the bug surface).
+**Owned by Group E** (this group), not Group A. Group A is unit-test-only (§3.4); end-to-end FFI coverage of the N=4 + matmul fix lands here alongside `residual_add` and the negative fixture so the full integration surface ships in one reviewable group.
+
+Either extend `multi_input_attention.nfl` to a 4-input variant or add `tests/fixtures/four_input_matmul.nfl`. Plan synthesis decides; the constraint is that the fixture must exercise both N=4 input ABI mapping AND a matmul op (the bug surface). Per-profile FFI test added on x86_64 (where Group A's fix lives); arm64 regression sanity is optional — arm64 already supported N=4 + matmul at M12 and has no Group A change to validate.
 
 ### 6.3 Negative fixture: `add_shape_mismatch.nfl`
 
@@ -292,7 +311,7 @@ Per-profile in `profiles/{arm64,x86_64}/tests/integration.rs`. Pattern matches e
 ## 9. Open questions deferred to plan synthesis
 
 - **N=4 j-counter register choice** (§3.3) — A.1 stack slot vs A.2 `%xmm9` vs A.3 j-loop restructure. Plan picks under §3.2 constraints.
-- **`emit_add` x86_64 loop counter at N=4** (§5.4) — `%rcx` is ABI input at N=4; pick a non-ABI scratch unconditionally OR thread `AbiContext` to choose.
+- **`emit_add` x86_64 loop counter strategy** (§5.4) — intersection of free non-ABI scratch across N ∈ [1,4] is `{%rax, %r10, %r11}` and is fully consumed by the three materialised pointers, leaving zero spare GPR for a counter. Pick: (a) stack slot, (b) pointer-bound comparison eliminating the counter (brainstorm-recommended), or (c) N-aware register pick via `AbiContext`.
 - **N=4 + matmul fixture name** (§6.2) — extend `multi_input_attention.nfl` or new `four_input_matmul.nfl`.
 - **Test count target** (§7.1) — plan synthesis confirms after counting per-group test additions.
 
