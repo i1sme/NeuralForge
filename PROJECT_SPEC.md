@@ -216,6 +216,18 @@ bare-metal expf → drop libm dependency
 - How profiles handle quantisation (INT8, FP16, BF16)?
 - Distribution format for compiled binaries
 
+### Known Latent Hazards
+
+Bugs that exist in the codebase but are not triggered by any current fixture.
+Each entry must be resolved in the milestone whose fixture first exercises it.
+Leaving an entry here longer than one milestone is a process failure.
+
+| # | Location | Condition | Symptom | Opened |
+|---|----------|-----------|---------|--------|
+| LH-1 | profiles/x86_64/src/ops/linear.rs | N=2 + linear with bias | bias-add reads j-counter as base address, wrong output (not SIGSEGV) | M13 |
+| LH-2 | profiles/x86_64/src/ops/linear.rs | N=3, src ptr scratch %r8 == output_reg | src reads from wrong address | M13 |
+| LH-3 | profiles/x86_64/src/ops/linear.rs | N=4, weight ptr scratch %r9 == output_reg | weight reads from wrong address | M13 |
+
 ### Trigger-driven cleanup
 Items raised during a milestone that intentionally do not get scheduled — they
 activate when their trigger condition fires.

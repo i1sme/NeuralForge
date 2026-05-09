@@ -143,6 +143,8 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Development Workflow
 
+> **Before starting brainstorm for any milestone, review `PROJECT_SPEC.md` §"Known Latent Hazards" — if the milestone's fixtures could trigger any entry, resolving it is mandatory scope, not optional.**
+
 ### Before any commit (zero-warnings culture):
 1. `cargo fmt --all` — keep formatting in canonical form. CI gates on `--check`,
    so drift accumulates into noisy "style:" commits if not done per-session.
