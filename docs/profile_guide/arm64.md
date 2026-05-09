@@ -928,11 +928,3 @@ clobbers scratch registers.
 The old `stp x1, x2, [sp, #-16]!` / `ldp x1, x2, [sp], #16` outer-loop spill
 block from M10 is fully eliminated. Any model containing `emit_matmul` now emits
 fewer instructions per matmul op.
-
-### Known limitation: N=4 not supported
-
-N=4 is not currently supported on arm64 due to the output register (`output_reg()`)
-at N=4 being `x5`, and the j-counter in `emit_matmul` using `x5` as scratch,
-causing a collision. This constraint is flagged in `LowerError::TooManyInputs`
-when N=4 is attempted with a model containing matmul. M13+ will close this gap
-by reassigning the j-counter to a non-ABI scratch slot.
