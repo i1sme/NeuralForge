@@ -260,36 +260,25 @@ fn compile_to_dylib_for_host(
 // Timing loop
 // ---------------------------------------------------------------------------
 
-/// Type alias for the bench's FFI calling convention. Matches
-/// `nfl_forward_<Model>(input, params, output)` exported by both
-/// profiles since M3.
-type ForwardFn = unsafe extern "C" fn(*const f32, *const f32, *mut f32);
-
-/// Run warmup × 10 + measurement × 100 calls of `forward`, return
+/// Run warmup × 10 + measurement × 100 calls of `call`, return
 /// per-iteration measurement nanoseconds. Spec §6.4 warmup rationale
 /// (dyld/PLT lazy binding, cache warm-up).
 ///
-/// # Safety
-/// Caller must guarantee `input` and `params` point to valid buffers
-/// of the FFI-required lengths and that `output` is writable for its
-/// length.
-unsafe fn time_forward(
-    forward: ForwardFn,
-    input: *const f32,
-    params: *const f32,
-    output: *mut f32,
-) -> Vec<u64> {
+/// `call` is a closure that performs one forward pass. The `_i` argument
+/// is the iteration index (unused by callers; present to satisfy the
+/// closure signature uniformly).
+fn time_forward_closure<F: FnMut(usize)>(mut call: F) -> Vec<u64> {
     const WARMUP: usize = 10;
     const MEASURE: usize = 100;
 
-    for _ in 0..WARMUP {
-        forward(input, params, output);
+    for i in 0..WARMUP {
+        call(i);
     }
 
     let mut samples = Vec::with_capacity(MEASURE);
-    for _ in 0..MEASURE {
+    for i in 0..MEASURE {
         let t0 = Instant::now();
-        forward(input, params, output);
+        call(i);
         let dt = t0.elapsed().as_nanos() as u64;
         samples.push(dt);
     }
@@ -299,6 +288,30 @@ unsafe fn time_forward(
 // ---------------------------------------------------------------------------
 // Per-fixture bench function
 // ---------------------------------------------------------------------------
+
+/// Build per-input buffers and params buffer for a fixture using the seed
+/// cascade (spec §9.6). Returns `(input_bufs, params, output)`.
+///
+/// Each input buffer `i` is filled with `fill_random(buf, seed + i)`.
+/// The params buffer is filled with `fill_random(params, seed + n_inputs)`.
+/// For N=1 this produces `inputs[0]` filled with `seed` and `params` filled
+/// with `seed + 1` — bit-identical to M11 behaviour.
+fn build_buffers_for_sig(
+    sig: &profile_api::FnSig,
+    seed: u64,
+) -> (Vec<Vec<f32>>, Vec<f32>, Vec<f32>) {
+    let n_inputs = sig.inputs_floats.len();
+    let mut input_bufs: Vec<Vec<f32>> = Vec::with_capacity(n_inputs);
+    for (i, &n_floats) in sig.inputs_floats.iter().enumerate() {
+        let mut buf = vec![0f32; n_floats];
+        fill_random(&mut buf, seed.wrapping_add(i as u64));
+        input_bufs.push(buf);
+    }
+    let mut params = vec![0f32; sig.params_floats];
+    fill_random(&mut params, seed.wrapping_add(n_inputs as u64));
+    let output = vec![0f32; sig.output_floats];
+    (input_bufs, params, output)
+}
 
 /// Compile + load + time one fixture, return its measurement summary.
 ///
@@ -344,59 +357,80 @@ fn bench_one_fixture(
         .first()
         .ok_or_else(|| format!("no functions in Asm for {fixture_name}"))?;
 
-    // 6. Allocate FFI buffers from FnSig (spec §5.5 step 4).
-    assert_eq!(
-        sig.inputs_floats.len(),
-        1,
-        "bench in Group A only handles N=1; per-arity dispatch lands in Group E"
-    );
-    let mut input: Vec<f32> = vec![0.0; sig.inputs_floats[0]];
-    let mut params: Vec<f32> = vec![0.0; sig.params_floats];
-    let mut output: Vec<f32> = vec![0.0; sig.output_floats];
+    // 6. Allocate and fill FFI buffers via seed cascade (spec §9.6).
+    // For N=1 fixtures this is bit-identical to M11: inputs[0] gets `seed`,
+    // params get `seed + 1`.
+    let (input_bufs, params, mut output) = build_buffers_for_sig(sig, seed);
 
-    // 7. Fill input then params from seed (spec §6.5).
-    // Order matters for cross-host determinism: input first, then params,
-    // each from a fresh PRNG re-seed (so params doesn't depend on input
-    // length).
-    fill_random(&mut input, seed);
-    fill_random(&mut params, seed.wrapping_add(1));
-
-    // 8. Compile to dylib.
+    // 7. Compile to dylib.
     let lib_path = compile_to_dylib_for_host(&asm.source, fixture_name, profile_label)?;
 
-    // 9. dlopen + dlsym. Note: `libloading` + Mach-O `dlsym` strip
+    // 8. dlopen + dlsym. Note: `libloading` + Mach-O `dlsym` strip
     // the leading `_` automatically, so we pass `sig.name` verbatim
     // (verified at plan synthesis time against the M3-M10 integration
     // test pattern: `lib.get(b"nfl_forward_M4Demo")` works on macos-14).
+    //
+    // Note: `params.as_ptr()` is non-null aligned for `params_floats == 0`
+    // (Vec::as_ptr returns NonNull::dangling for empty vecs, which is
+    // f32-aligned; the codegen never dereferences a zero-param buffer —
+    // established by M10 self_attention contract).
     let lib = unsafe { libloading::Library::new(&lib_path) }
         .map_err(|e| format!("dlopen {}: {e}", lib_path.display()))?;
-    let forward: libloading::Symbol<ForwardFn> = unsafe {
-        lib.get(sig.name.as_bytes())
-            .map_err(|e| format!("dlsym {}: {e}", sig.name))?
-    };
 
-    // 10. Time. Note: `params.as_ptr()` is non-null aligned for
-    // `params_floats == 0` (Vec::as_ptr returns NonNull::dangling for
-    // empty vecs, which is f32-aligned; the codegen never dereferences
-    // a zero-param buffer — established by M10 self_attention contract).
-    // 10-11. Time in a block so `forward` (Symbol) is implicitly dropped
-    // before `lib` (which does implement Drop and unloads the dylib).
-    let mut samples = {
-        // SAFETY: buffers are correctly sized per FnSig; forward is valid
-        // for the lifetime of `lib` which outlives this block.
-        unsafe {
-            time_forward(
-                *forward,
-                input.as_ptr(),
-                params.as_ptr(),
-                output.as_mut_ptr(),
-            )
+    // 9. Per-arity FFI dispatch + timing (spec §9.6). Each arm loads the
+    // concrete extern "C" fn type, then runs warmup + measurement.
+    // The Symbol borrow on `lib` ends when `mut samples` is bound (NLL).
+    let n_inputs = input_bufs.len();
+    let mut samples = match n_inputs {
+        1 => {
+            type Fn1 = unsafe extern "C" fn(*const f32, *const f32, *mut f32);
+            let f: libloading::Symbol<Fn1> = unsafe {
+                lib.get(sig.name.as_bytes())
+                    .map_err(|e| format!("dlsym {}: {e}", sig.name))?
+            };
+            let f = *f;
+            let in0 = input_bufs[0].as_ptr();
+            let par = params.as_ptr();
+            let out = output.as_mut_ptr();
+            // SAFETY: buffers correctly sized per FnSig; f valid for lifetime of lib.
+            time_forward_closure(|_| unsafe { f(in0, par, out) })
         }
+        2 => {
+            type Fn2 = unsafe extern "C" fn(*const f32, *const f32, *const f32, *mut f32);
+            let f: libloading::Symbol<Fn2> = unsafe {
+                lib.get(sig.name.as_bytes())
+                    .map_err(|e| format!("dlsym {}: {e}", sig.name))?
+            };
+            let f = *f;
+            let in0 = input_bufs[0].as_ptr();
+            let in1 = input_bufs[1].as_ptr();
+            let par = params.as_ptr();
+            let out = output.as_mut_ptr();
+            // SAFETY: buffers correctly sized per FnSig; f valid for lifetime of lib.
+            time_forward_closure(|_| unsafe { f(in0, in1, par, out) })
+        }
+        3 => {
+            type Fn3 =
+                unsafe extern "C" fn(*const f32, *const f32, *const f32, *const f32, *mut f32);
+            let f: libloading::Symbol<Fn3> = unsafe {
+                lib.get(sig.name.as_bytes())
+                    .map_err(|e| format!("dlsym {}: {e}", sig.name))?
+            };
+            let f = *f;
+            let in0 = input_bufs[0].as_ptr();
+            let in1 = input_bufs[1].as_ptr();
+            let in2 = input_bufs[2].as_ptr();
+            let par = params.as_ptr();
+            let out = output.as_mut_ptr();
+            // SAFETY: buffers correctly sized per FnSig; f valid for lifetime of lib.
+            time_forward_closure(|_| unsafe { f(in0, in1, in2, par, out) })
+        }
+        n => unimplemented!(
+            "bench: arity {n} not supported (M12 caps at N=4; current bench fixtures all N=1)"
+        ),
     };
-    // forward's borrow on lib ends after its last use above (NLL); the
-    // explicit drop(lib) below is the dlclose. forward itself is a
-    // no-op drop (Symbol borrows but does not own).
-    drop(lib); // explicit: unload dylib before returning.
+    // lib is explicitly dropped after all Symbol uses end (NLL).
+    drop(lib);
 
     Ok(FixtureResult {
         name: fixture_name,
@@ -682,5 +716,46 @@ mod tests {
         ];
         let err = parse_args(&args).unwrap_err();
         assert!(err.contains("unknown --format"), "got: {err}");
+    }
+
+    // --- E1: Seed cascade ---
+
+    #[test]
+    fn seed_cascade_three_inputs_is_deterministic_and_independent() {
+        // Synthetic FnSig with 3 inputs (spec §9.6 verification).
+        let sig = profile_api::FnSig {
+            name: "test_cascade".to_string(),
+            model: "TestCascade".to_string(),
+            inputs_floats: vec![10, 20, 30],
+            params_floats: 5,
+            output_floats: 4,
+            params_layout: vec![],
+        };
+        let seed: u64 = 42;
+
+        // Build buffers via cascade.
+        let (input_bufs, params, _output) = build_buffers_for_sig(&sig, seed);
+
+        // Three input buffers produced.
+        assert_eq!(input_bufs.len(), 3);
+        assert_eq!(input_bufs[0].len(), 10);
+        assert_eq!(input_bufs[1].len(), 20);
+        assert_eq!(input_bufs[2].len(), 30);
+        assert_eq!(params.len(), 5);
+
+        // Recompute independently with the same seeds — must match exactly.
+        let mut ref0 = vec![0f32; 10];
+        fill_random(&mut ref0, 42);
+        let mut ref1 = vec![0f32; 20];
+        fill_random(&mut ref1, 43);
+        let mut ref2 = vec![0f32; 30];
+        fill_random(&mut ref2, 44);
+        let mut refp = vec![0f32; 5];
+        fill_random(&mut refp, 45);
+
+        assert_eq!(input_bufs[0], ref0, "input[0] must match seed 42");
+        assert_eq!(input_bufs[1], ref1, "input[1] must match seed 43");
+        assert_eq!(input_bufs[2], ref2, "input[2] must match seed 44");
+        assert_eq!(params, refp, "params must match seed 45 (n_inputs=3)");
     }
 }
