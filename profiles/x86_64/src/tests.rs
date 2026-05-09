@@ -1649,3 +1649,183 @@ model MatmulOnly [batch=2]:
         "matmul-only model must trigger callee-saved register save (has_matmul branch)"
     );
 }
+
+// ─── M13 PR follow-up: ABI-clean invariant for x86_64 simple-loop emitters ──
+//
+// PR #28 closed a systemic class of bug: emit_relu/dropout/mulscalar/linear
+// all used %rcx as a loop counter, which is the output_reg at N=2 (and shifts
+// to other ABI roles at N=3, N=4). The bug was invisible until residual_add
+// (N=2 with linear+relu+add) surfaced it via SIGSEGV on Linux x86_64.
+//
+// To prevent recurrence, every simple-loop emitter gets a parametric "no ABI
+// clobber" test for each n_inputs ∈ {1, 2, 3, 4}. The test calls the emitter,
+// then asserts no ABI argument register (from `abi.ffi_save_set()` =
+// INPUT_REGS[..n_inputs+2] = inputs ∪ {params, output}) appears as a write
+// destination in the emitted asm. The pattern `, %<reg>\n` matches AT&T
+// destination operands (`movq <src>, <dst>` and `xorq <reg>, <reg>` forms).
+//
+// Single-operand instructions (`incq %reg`, `pushq %reg`) are not pattern-
+// matched, but they only matter as a source-of-clobber if a prior `movq` or
+// `xorq` already wrote to the register — which the pattern catches. So the
+// `, %<reg>\n` check is a sufficient first-write detector.
+
+#[cfg(test)]
+fn assert_emit_abi_clean(emitter: &str, asm: &str, abi: &crate::abi::AbiContext) {
+    for reg in abi.ffi_save_set() {
+        assert!(
+            !asm.contains(&format!(", {reg}\n")),
+            "{emitter} at N={n} writes to ABI register {reg}; got:\n{asm}",
+            n = abi.n_inputs,
+        );
+    }
+}
+
+// ── emit_relu ───────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+fn emit_relu_at(n_inputs: usize) -> String {
+    use crate::abi::AbiContext;
+    let abi = AbiContext { n_inputs };
+    crate::ops::emit_relu(
+        &abi,
+        /* total_floats */ 8,
+        /* model_idx */ 0,
+        /* relu_idx */ 0,
+        /* src_loc */ BufferLoc::StackOffset(0),
+        /* dst_loc */ BufferLoc::OutputReg,
+    )
+}
+
+#[test]
+fn emit_relu_abi_clean_at_n1() {
+    let abi = crate::abi::AbiContext { n_inputs: 1 };
+    assert_emit_abi_clean("emit_relu", &emit_relu_at(1), &abi);
+}
+#[test]
+fn emit_relu_abi_clean_at_n2() {
+    let abi = crate::abi::AbiContext { n_inputs: 2 };
+    assert_emit_abi_clean("emit_relu", &emit_relu_at(2), &abi);
+}
+#[test]
+fn emit_relu_abi_clean_at_n3() {
+    let abi = crate::abi::AbiContext { n_inputs: 3 };
+    assert_emit_abi_clean("emit_relu", &emit_relu_at(3), &abi);
+}
+#[test]
+fn emit_relu_abi_clean_at_n4() {
+    let abi = crate::abi::AbiContext { n_inputs: 4 };
+    assert_emit_abi_clean("emit_relu", &emit_relu_at(4), &abi);
+}
+
+// ── emit_dropout_copy ───────────────────────────────────────────────────────
+
+#[cfg(test)]
+fn emit_dropout_copy_at(n_inputs: usize) -> String {
+    use crate::abi::AbiContext;
+    let abi = AbiContext { n_inputs };
+    crate::ops::dropout::emit_dropout_copy(
+        &abi,
+        /* total_floats */ 8,
+        /* model_idx */ 0,
+        /* dropout_idx */ 0,
+        /* src_loc */ BufferLoc::StackOffset(0),
+        /* dst_loc */ BufferLoc::OutputReg,
+    )
+}
+
+#[test]
+fn emit_dropout_copy_abi_clean_at_n1() {
+    let abi = crate::abi::AbiContext { n_inputs: 1 };
+    assert_emit_abi_clean("emit_dropout_copy", &emit_dropout_copy_at(1), &abi);
+}
+#[test]
+fn emit_dropout_copy_abi_clean_at_n2() {
+    let abi = crate::abi::AbiContext { n_inputs: 2 };
+    assert_emit_abi_clean("emit_dropout_copy", &emit_dropout_copy_at(2), &abi);
+}
+#[test]
+fn emit_dropout_copy_abi_clean_at_n3() {
+    let abi = crate::abi::AbiContext { n_inputs: 3 };
+    assert_emit_abi_clean("emit_dropout_copy", &emit_dropout_copy_at(3), &abi);
+}
+#[test]
+fn emit_dropout_copy_abi_clean_at_n4() {
+    let abi = crate::abi::AbiContext { n_inputs: 4 };
+    assert_emit_abi_clean("emit_dropout_copy", &emit_dropout_copy_at(4), &abi);
+}
+
+// ── emit_mulscalar ──────────────────────────────────────────────────────────
+
+#[cfg(test)]
+fn emit_mulscalar_at(n_inputs: usize) -> String {
+    use crate::abi::AbiContext;
+    let abi = AbiContext { n_inputs };
+    crate::ops::emit_mulscalar(
+        &abi,
+        /* total_elements */ 8,
+        /* scalar_bits */ 0,
+        /* model_idx */ 0,
+        /* op_idx */ 0,
+        /* src_loc */ BufferLoc::StackOffset(0),
+        /* dst_loc */ BufferLoc::OutputReg,
+    )
+}
+
+#[test]
+fn emit_mulscalar_abi_clean_at_n1() {
+    let abi = crate::abi::AbiContext { n_inputs: 1 };
+    assert_emit_abi_clean("emit_mulscalar", &emit_mulscalar_at(1), &abi);
+}
+#[test]
+fn emit_mulscalar_abi_clean_at_n2() {
+    let abi = crate::abi::AbiContext { n_inputs: 2 };
+    assert_emit_abi_clean("emit_mulscalar", &emit_mulscalar_at(2), &abi);
+}
+#[test]
+fn emit_mulscalar_abi_clean_at_n3() {
+    let abi = crate::abi::AbiContext { n_inputs: 3 };
+    assert_emit_abi_clean("emit_mulscalar", &emit_mulscalar_at(3), &abi);
+}
+#[test]
+fn emit_mulscalar_abi_clean_at_n4() {
+    let abi = crate::abi::AbiContext { n_inputs: 4 };
+    assert_emit_abi_clean("emit_mulscalar", &emit_mulscalar_at(4), &abi);
+}
+
+// ── emit_add ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+fn emit_add_at(n_inputs: usize) -> String {
+    use crate::abi::AbiContext;
+    let abi = AbiContext { n_inputs };
+    crate::ops::emit_add(
+        &abi,
+        /* total_elements */ 8,
+        /* model_idx */ 0,
+        /* op_idx */ 0,
+        /* a_loc */ BufferLoc::StackOffset(0),
+        /* other_loc */ BufferLoc::InputReg(0),
+        /* dst_loc */ BufferLoc::OutputReg,
+    )
+}
+
+#[test]
+fn emit_add_abi_clean_at_n1() {
+    let abi = crate::abi::AbiContext { n_inputs: 1 };
+    assert_emit_abi_clean("emit_add", &emit_add_at(1), &abi);
+}
+#[test]
+fn emit_add_abi_clean_at_n2() {
+    let abi = crate::abi::AbiContext { n_inputs: 2 };
+    assert_emit_abi_clean("emit_add", &emit_add_at(2), &abi);
+}
+#[test]
+fn emit_add_abi_clean_at_n3() {
+    let abi = crate::abi::AbiContext { n_inputs: 3 };
+    assert_emit_abi_clean("emit_add", &emit_add_at(3), &abi);
+}
+#[test]
+fn emit_add_abi_clean_at_n4() {
+    let abi = crate::abi::AbiContext { n_inputs: 4 };
+    assert_emit_abi_clean("emit_add", &emit_add_at(4), &abi);
+}
