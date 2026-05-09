@@ -16,6 +16,11 @@ use profile_api::LowerError;
 /// source (e.g. pipeline_styles.nfl with 3 model definitions).
 ///
 /// M6 added `node_span` and `fused_post_ops` and wired the `PostOp::SoftmaxRow` dispatch (see `arm64.md` §4.10).
+/// M13 added ABI register save/restore around the i/j/k loop counters
+/// for N≥2 (see inline comment block before the i-loop). Same class of
+/// bug as Task 1's x86_64 emit_matmul %r9 fix; resolved here via stp/ldp
+/// rather than register relocation because emit_linear's bias paths and
+/// fused post-op dispatch make a counter-rename refactor much higher-risk.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_linear(
     abi: &AbiContext,
@@ -88,8 +93,17 @@ pub fn emit_linear(
     //   x5 (INPUT_REGS[5]) conflicts when n_inputs >= 4.
     //
     // We push pairs (aligned to 16 bytes); a single conflicting register
-    // is padded with xzr. Save order: x3, then x4, then x5 (from outer
-    // loop to inner); restore in LIFO order.
+    // is padded with xzr. Save order: (x3, x4) as one stp pair, then x5
+    // as a second stp pair if needed; restore in LIFO order.
+    //
+    // Cross-reference: Task 1's x86_64 emit_matmul fix relocated the
+    // j-counter from %r9 to %rbp (callee-saved scratch). The arm64
+    // analog (relocate counters to x9-x15) was rejected here because
+    // emit_linear's bias paths and fused PostOp::SoftmaxRow dispatch
+    // already touch x9-x16 extensively — a counter rename would cascade
+    // through too many sites. Save/restore is a smaller, lower-risk
+    // diff at the cost of 2-4 extra instructions per linear op for
+    // multi-input models.
     let save_x3 = abi.n_inputs >= 2;
     let save_x4 = abi.n_inputs >= 3;
     let save_x5 = abi.n_inputs >= 4;

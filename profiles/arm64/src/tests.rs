@@ -1432,3 +1432,103 @@ fn emit_linear_arm64_saves_x3_at_n2_to_avoid_output_clobber() {
         "emit_linear must save+restore x3 in balanced pairs at N=2; got stp={stp_count} ldp={ldp_count}\n{asm}"
     );
 }
+
+#[test]
+fn emit_linear_arm64_save_block_balances_at_all_n() {
+    // M13: parametric coverage of the save/restore block across N ∈ [1, 4].
+    // At each arity, count stp-into-sp pushes vs ldp-from-sp pops emitted by
+    // the M13 save/restore block specifically (the inner loop body uses
+    // x3/x4/x5 as plain registers, not stack ops). Counts must balance and
+    // match the expected number of conflicting registers (output_reg =
+    // INPUT_REGS[n_inputs+1]):
+    //   N=1 → 0 conflicts (x3..x5 are non-ABI), 0 pairs.
+    //   N=2 → x3 conflicts, 1 pair (stp x3, xzr).
+    //   N=3 → x3+x4 conflict, 1 pair (stp x3, x4).
+    //   N=4 → x3+x4+x5 conflict, 2 pairs (stp x3, x4 + stp x5, xzr).
+    use compiler::ast::Span;
+    use compiler::PostOp;
+    let cases = [(1usize, 0), (2, 1), (3, 1), (4, 2)];
+    for &(n_inputs, expected_pairs) in &cases {
+        let abi = AbiContext { n_inputs };
+        let post: Vec<PostOp> = vec![];
+        let asm = crate::ops::linear::emit_linear(
+            &abi,
+            /* b */ 2,
+            /* k */ 4,
+            /* n */ 4,
+            /* model_idx */ 0,
+            /* linear_idx */ 0,
+            /* src_loc */ BufferLoc::InputReg(0),
+            /* dst_loc */ BufferLoc::OutputReg,
+            /* weight_offset */ 0,
+            /* bias_offset */ None,
+            /* node_span */ Span::new(1, 1),
+            /* fused_post_ops */ &post,
+            /* sym_prefix */ "",
+        )
+        .expect("emit_linear must succeed");
+        // Count save/restore pairs. The save block uses
+        // `stp ..., [sp, #-16]!`; the restore block uses `ldp ..., [sp], #16`.
+        let stp_pairs = asm.matches("[sp, #-16]!").count();
+        let ldp_pairs = asm.matches("[sp], #16").count();
+        assert_eq!(
+            stp_pairs, expected_pairs,
+            "N={n_inputs}: expected {expected_pairs} stp-into-sp pair(s); got {stp_pairs}\n{asm}"
+        );
+        assert_eq!(
+            ldp_pairs, expected_pairs,
+            "N={n_inputs}: expected {expected_pairs} ldp-from-sp pair(s); got {ldp_pairs}\n{asm}"
+        );
+        // Specific register-pair shapes per arity.
+        match n_inputs {
+            1 => {
+                assert!(
+                    !asm.contains("stp     x3,"),
+                    "N=1: no x3 save needed; got:\n{asm}"
+                );
+            }
+            2 => {
+                // Single x3+xzr pair.
+                assert!(
+                    asm.contains("stp     x3, xzr, [sp, #-16]!"),
+                    "N=2: expected `stp x3, xzr`; got:\n{asm}"
+                );
+                assert!(
+                    asm.contains("ldp     x3, xzr, [sp], #16"),
+                    "N=2: expected matching `ldp x3, xzr`; got:\n{asm}"
+                );
+            }
+            3 => {
+                // Single x3+x4 pair.
+                assert!(
+                    asm.contains("stp     x3, x4, [sp, #-16]!"),
+                    "N=3: expected `stp x3, x4`; got:\n{asm}"
+                );
+                assert!(
+                    asm.contains("ldp     x3, x4, [sp], #16"),
+                    "N=3: expected matching `ldp x3, x4`; got:\n{asm}"
+                );
+            }
+            4 => {
+                // Two pairs: outer (x3, x4) then inner (x5, xzr). LIFO restore.
+                assert!(
+                    asm.contains("stp     x3, x4, [sp, #-16]!"),
+                    "N=4: expected `stp x3, x4` (first push); got:\n{asm}"
+                );
+                assert!(
+                    asm.contains("stp     x5, xzr, [sp, #-16]!"),
+                    "N=4: expected `stp x5, xzr` (second push); got:\n{asm}"
+                );
+                assert!(
+                    asm.contains("ldp     x5, xzr, [sp], #16"),
+                    "N=4: expected `ldp x5, xzr` (LIFO first pop); got:\n{asm}"
+                );
+                assert!(
+                    asm.contains("ldp     x3, x4, [sp], #16"),
+                    "N=4: expected `ldp x3, x4` (LIFO second pop); got:\n{asm}"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+}
