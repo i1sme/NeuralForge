@@ -20,14 +20,16 @@
 //! SysV AMD64 GP registers, by category:
 //! - **ABI argument** (one role each per arity): `%rdi`, `%rsi`,
 //!   `%rdx`, `%rcx`, `%r8`, `%r9` — first 6 used. M12 caps N at 4
-//!   (arity check in walk_model), so N+2 ≤ 6 — register-only.
+//!   (arity check in walk_model), so N+2 ≤ 6 — register-only. M13
+//!   closed the N=4 + matmul subcase by relocating the j-counter from
+//!   `%r9` (which becomes output_reg at N=4) to `%rbp`.
 //! - **Caller-saved non-ABI scratch**: `%rax`, `%r10`, `%r11`. Always
 //!   safe to clobber, never holds an ABI input/params/output.
-//!   `%r9` is also caller-saved but transitions into ABI at N=4.
 //! - **Callee-saved**: `%rbx`, `%rbp`, `%r12`, `%r13`, `%r14`, `%r15`.
-//!   This profile uses `%rbp` as frame pointer; the other 5 are saved
-//!   by the function-level prologue when `compute_callee_saved`
-//!   returns true (= `model.calls_extern_math() OR has_matmul(model)`,
+//!   This profile saves `%rbp` unconditionally in the prologue (frame
+//!   pointer role); the body is free to clobber it as scratch since no
+//!   op-emitter reads `%rbp`. The other 5 are saved by the function-level
+//!   prologue when `compute_callee_saved` returns true (= `model.calls_extern_math() OR has_matmul(model)`,
 //!   per `buffer.rs`).
 //!
 //! At N=3 the non-ABI caller-saved scratch shrinks to `%rax`, `%r10`,
@@ -51,7 +53,7 @@
 //! | B_slice ptr        | %r13    | per outer iter (callee-saved) |
 //! | DST_slice ptr      | %r14    | per outer iter (callee-saved) |
 //! | i counter          | %rbx    | per outer iter (callee-saved) |
-//! | j counter          | %r9     | per i iter (caller-saved scratch; non-ABI for N≤3) |
+//! | j counter          | %rbp    | per i iter (callee-saved by function-level prologue; not read by any op body) |
 //! | k_inner counter    | %r11    | per j iter (caller-saved scratch) |
 //! | addr arith temp 1  | %rax    | per use (clobbered by imulq)  |
 //! | addr arith temp 2  | %r10    | per use (clobbered by emit_imm32_to_r10) |
@@ -106,9 +108,9 @@ use profile_api::LowerError;
 /// B is `[..., K, N]`; with `transpose_b=true`, B is `[..., N, K]`.
 ///
 /// The inner kernel uses only callee-saved registers (`%r12`-`%r15`,
-/// `%rbx`) and caller-saved non-ABI scratch (`%rax`, `%r9`, `%r10`,
+/// `%rbx`, `%rbp`) and caller-saved non-ABI scratch (`%rax`, `%r10`,
 /// `%r11`, `%xmm6`-`%xmm8`) — no ABI argument register is ever
-/// touched by the matmul body, so `%rdi`/`%rsi`/`%rdx`/`%rcx`/`%r8`
+/// touched by the matmul body, so `%rdi`/`%rsi`/`%rdx`/`%rcx`/`%r8`/`%r9`
 /// survive across the call site for downstream emitters.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_matmul(
@@ -123,20 +125,8 @@ pub fn emit_matmul(
     a_loc: BufferLoc,
     b_loc: BufferLoc,
     dst_loc: BufferLoc,
-    node_span: Span,
+    _node_span: Span,
 ) -> Result<String, LowerError> {
-    // Q11 (Group C): N=4 + matmul register collision.
-    // At N=4, output_reg() == %r9 (INPUT_REGS[5]). The inner j-loop uses
-    // %r9 as its counter, which would silently clobber the output pointer.
-    // The fix requires reassigning the j-counter to a different non-ABI
-    // scratch slot — deferred to M13+ register-cascade rework.
-    // Reject at lower() time rather than producing silently wrong asm.
-    if abi.n_inputs == 4 {
-        return Err(LowerError::UnsupportedOp {
-            op: "matmul at N=4 inputs on x86_64 (j-counter %r9 collides with output register; M13+ rework planned)".into(),
-            span: node_span,
-        });
-    }
     let mid = format!("{model_idx}_{matmul_idx}");
     let mut s = String::new();
     s.push_str(&format!(
@@ -198,11 +188,13 @@ pub fn emit_matmul(
     s.push_str("    cmpq    %r10, %rbx\n");
     s.push_str(&format!("    jge     .Lmm4d_i_end_{mid}\n"));
 
-    // Inner j-loop ([0, N)). Counter %r9 (caller-saved, non-ABI for N≤3).
-    s.push_str("    movq    $0, %r9\n");
+    // Inner j-loop ([0, N)). Counter %rbp (callee-saved by function-level
+    // prologue; no op-emitter inside the body reads it. Replaces M12's
+    // %r9 which collided with output_reg() at N=4.).
+    s.push_str("    movq    $0, %rbp\n");
     s.push_str(&format!(".Lmm4d_j_{mid}:\n"));
     s.push_str(&emit_imm32_to_r10(n as u32));
-    s.push_str("    cmpq    %r10, %r9\n");
+    s.push_str("    cmpq    %r10, %rbp\n");
     s.push_str(&format!("    jge     .Lmm4d_j_end_{mid}\n"));
 
     // Accumulator %xmm0 = 0.0.
@@ -227,14 +219,14 @@ pub fn emit_matmul(
     //   true:  b_offset = j * K + k_inner   (B is [..., N, K])
     if transpose_b {
         s.push_str(&emit_imm32_to_r10(k as u32));
-        s.push_str("    movq    %r9, %rax\n");
+        s.push_str("    movq    %rbp, %rax\n");
         s.push_str("    imulq   %r10, %rax\n"); // %rax = j * K
         s.push_str("    addq    %r11, %rax\n"); // %rax = j * K + k_inner
     } else {
         s.push_str(&emit_imm32_to_r10(n as u32));
         s.push_str("    movq    %r11, %rax\n");
         s.push_str("    imulq   %r10, %rax\n"); // %rax = k_inner * N
-        s.push_str("    addq    %r9, %rax\n"); // %rax = k_inner * N + j
+        s.push_str("    addq    %rbp, %rax\n"); // %rax = k_inner * N + j
     }
     s.push_str("    movss   (%r13, %rax, 4), %xmm2\n"); // %xmm2 = B[b_offset]
 
@@ -250,11 +242,11 @@ pub fn emit_matmul(
     s.push_str(&emit_imm32_to_r10(n as u32));
     s.push_str("    movq    %rbx, %rax\n");
     s.push_str("    imulq   %r10, %rax\n"); // %rax = i * N
-    s.push_str("    addq    %r9, %rax\n"); // %rax = i * N + j
+    s.push_str("    addq    %rbp, %rax\n"); // %rax = i * N + j
     s.push_str("    movss   %xmm0, (%r14, %rax, 4)\n");
 
     // j++; j-loop tail.
-    s.push_str("    addq    $1, %r9\n");
+    s.push_str("    addq    $1, %rbp\n");
     s.push_str(&format!("    jmp     .Lmm4d_j_{mid}\n"));
     s.push_str(&format!(".Lmm4d_j_end_{mid}:\n"));
 

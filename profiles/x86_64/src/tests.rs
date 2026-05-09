@@ -870,18 +870,18 @@ model M [batch=2]:
     // Both must use mulss (no FMA on x86_64).
     assert!(asm_no_t.contains("mulss"), "no-t asm:\n{}", asm_no_t);
     assert!(asm_t.contains("mulss"), "t asm:\n{}", asm_t);
-    // M12 register layout: k_inner counter %r11, j counter %r9.
+    // M13 register layout: k_inner counter %r11, j counter %rbp.
     // Transpose flips inner b_offset computation:
     //   no-transpose: `movq    %r11, %rax` (k_inner * N + j; %rax = k_inner)
-    //   transpose:    `movq    %r9, %rax`  (j * K + k_inner;  %rax = j)
+    //   transpose:    `movq    %rbp, %rax` (j * K + k_inner;  %rax = j)
     assert!(
         asm_no_t.contains("movq    %r11, %rax"),
         "no-t asm should compute b_offset from %r11 (k_inner):\n{}",
         asm_no_t
     );
     assert!(
-        asm_t.contains("movq    %r9, %rax"),
-        "t asm should compute b_offset from %r9 (j):\n{}",
+        asm_t.contains("movq    %rbp, %rax"),
+        "t asm should compute b_offset from %rbp (j):\n{}",
         asm_t
     );
     assert_ne!(asm_no_t, asm_t, "transpose_b should change emitted asm");
@@ -1378,13 +1378,15 @@ fn emit_matmul_body_contains_zero_pushq() {
     );
 }
 
-// ---- Group C Q11: N=4 rejection -------------------------------------------
+// ---- Group A (M13): N=4 + matmul fix via %rbp j-counter --------------------
 
 #[test]
-fn emit_matmul_rejects_n4_with_clear_error() {
-    // Q11 (Group C): %r9 is both the j-counter scratch in emit_matmul and
-    // output_reg() at N=4 (INPUT_REGS[5]). emit_matmul must reject N=4 with
-    // LowerError::UnsupportedOp rather than silently producing wrong asm.
+fn emit_matmul_accepts_n4_with_rbp_j_counter() {
+    // Group A (M13): the M12 reject path (commit 37868e5) blocked N=4 matmul
+    // because %r9 was both the j-counter scratch and output_reg() at N=4.
+    // M13 relocates the j-counter to %rbp (callee-saved by the function-level
+    // prologue; no op-emitter reads it inside the body). emit_matmul must now
+    // accept N=4 and emit asm using %rbp as the j-counter.
     use compiler::ast::Span;
     let abi = AbiContext { n_inputs: 4 };
     let span = Span::new(1, 1);
@@ -1402,20 +1404,22 @@ fn emit_matmul_rejects_n4_with_clear_error() {
         /* dst_loc */ BufferLoc::OutputReg,
         span,
     );
-    match result {
-        Err(profile_api::LowerError::UnsupportedOp { op, .. }) => {
-            assert!(
-                op.contains("matmul"),
-                "error message must mention 'matmul'; got: {op}"
-            );
-            assert!(
-                op.contains("N=4") || op.contains("4 inputs"),
-                "error message must mention N=4 collision; got: {op}"
-            );
-        }
-        Err(other) => panic!("expected UnsupportedOp, got {other:?}"),
-        Ok(_) => panic!("emit_matmul accepted N=4; should have rejected per Group C Q11"),
-    }
+    let asm = result.expect("emit_matmul must accept N=4 after M13 fix");
+    // The j-counter init now writes to %rbp, not %r9.
+    assert!(
+        asm.contains("movq    $0, %rbp\n"),
+        "expected j-counter init `movq $0, %rbp`; got:\n{asm}"
+    );
+    // Old %r9 j-counter init must be gone.
+    assert!(
+        !asm.contains("movq    $0, %r9\n"),
+        "stale %r9 j-counter init must be removed; got:\n{asm}"
+    );
+    // %r9 is output_reg at N=4; it must NOT be written to by the matmul body.
+    assert!(
+        !asm.contains(", %r9\n"),
+        "matmul body must not write to %r9 (output_reg at N=4); got:\n{asm}"
+    );
 }
 
 // ---- Group C Q5: compute_callee_saved matmul-only branch ------------------
