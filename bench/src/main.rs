@@ -345,7 +345,12 @@ fn bench_one_fixture(
         .ok_or_else(|| format!("no functions in Asm for {fixture_name}"))?;
 
     // 6. Allocate FFI buffers from FnSig (spec §5.5 step 4).
-    let mut input: Vec<f32> = vec![0.0; sig.input_floats];
+    assert_eq!(
+        sig.inputs_floats.len(),
+        1,
+        "bench in Group A only handles N=1; per-arity dispatch lands in Group E"
+    );
+    let mut input: Vec<f32> = vec![0.0; sig.inputs_floats[0]];
     let mut params: Vec<f32> = vec![0.0; sig.params_floats];
     let mut output: Vec<f32> = vec![0.0; sig.output_floats];
 

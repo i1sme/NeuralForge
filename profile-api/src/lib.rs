@@ -28,8 +28,9 @@ pub struct FnSig {
     pub name: String,
     /// Original UIR model name.
     pub model: String,
-    /// Number of f32 elements in the input buffer.
-    pub input_floats: usize,
+    /// Number of f32 elements per input buffer, in declaration order.
+    /// Length = arity (number of inputs); for single-input models length = 1.
+    pub inputs_floats: Vec<usize>,
     /// Number of f32 elements in the output buffer.
     pub output_floats: usize,
     /// Total number of f32 elements in the packed params buffer.
@@ -68,6 +69,10 @@ pub enum LowerError {
     ShapeNotConcrete { span: Span },
     /// Defensive: post-op variant not supported by this profile.
     UnsupportedPostOp { op: String, span: Span },
+    /// Model declared more inputs than the profile's ABI register window
+    /// can hold without stack-spilling. M12 caps both profiles at N=4
+    /// (max=4 in the variant).
+    TooManyInputs { n: usize, max: usize, span: Span },
 }
 
 impl std::fmt::Display for LowerError {
@@ -83,6 +88,11 @@ impl std::fmt::Display for LowerError {
             LowerError::UnsupportedPostOp { op, .. } => {
                 write!(f, "post-op '{}' is not supported by this profile", op)
             }
+            LowerError::TooManyInputs { n, max, .. } => write!(
+                f,
+                "model declares {} inputs but this profile supports a maximum of {}",
+                n, max
+            ),
         }
     }
 }
@@ -96,6 +106,7 @@ impl LowerError {
             LowerError::UnsupportedOp { span, .. } => *span,
             LowerError::ShapeNotConcrete { span } => *span,
             LowerError::UnsupportedPostOp { span, .. } => *span,
+            LowerError::TooManyInputs { span, .. } => *span,
         }
     }
 }
@@ -142,13 +153,14 @@ mod tests {
         let s = FnSig {
             name: "f".into(),
             model: "M".into(),
-            input_floats: 1,
+            inputs_floats: vec![1],
             output_floats: 1,
             params_floats: 0,
             params_layout: vec![],
         };
         let dbg = format!("{:?}", s);
         assert!(dbg.contains("FnSig"));
+        assert!(dbg.contains("inputs_floats: [1]"));
     }
 
     #[test]
@@ -193,5 +205,21 @@ mod tests {
         let e = LowerError::ShapeNotConcrete { span: s };
         assert_eq!(e.span().line, 3);
         assert_eq!(e.span().col, 7);
+    }
+
+    #[test]
+    fn lower_error_too_many_inputs_display() {
+        let e = LowerError::TooManyInputs {
+            n: 5,
+            max: 4,
+            span: Span::new(1, 1),
+        };
+        let msg = format!("{}", e);
+        assert!(msg.contains("5"), "got: {msg}");
+        assert!(msg.contains("4"), "got: {msg}");
+        assert!(
+            msg.contains("not supported") || msg.contains("maximum"),
+            "msg should explain the limit; got: {msg}"
+        );
     }
 }

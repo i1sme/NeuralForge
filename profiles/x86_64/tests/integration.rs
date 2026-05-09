@@ -186,7 +186,7 @@ fn m4a_no_softmax_still_runs() {
     assert_eq!(asm.functions.len(), 1);
     let sig = &asm.functions[0];
     assert_eq!(sig.name, "nfl_forward_M4Demo");
-    assert_eq!(sig.input_floats, 32);
+    assert_eq!(sig.inputs_floats, vec![32]);
     assert_eq!(sig.params_floats, 8);
     assert_eq!(sig.output_floats, 16);
 
@@ -471,7 +471,7 @@ fn comments_runs_correctly() {
     let forward: libloading::Symbol<unsafe extern "C" fn(*const f32, *const f32, *mut f32)> =
         unsafe { lib.get(b"nfl_forward_Commented") }.unwrap();
 
-    let mut input = vec![0.0f32; sig.input_floats];
+    let mut input = vec![0.0f32; sig.inputs_floats[0]];
     for (i, v) in input.iter_mut().enumerate() {
         *v = (i as f32) * 0.1 - 1.0;
     }
@@ -658,17 +658,17 @@ fn fused_vs_unfused_softmax_match_numerically() {
             "{fixture_path}: fused/unfused param layout mismatch"
         );
 
-        let input_floats = fused_asm.functions[0].input_floats;
+        let input_floats = fused_asm.functions[0].inputs_floats[0];
         let output_floats = fused_asm.functions[0].output_floats;
         assert_eq!(input_floats, batch * input_dim,
-            "{fixture_path}: FnSig.input_floats={input_floats} disagrees with hardcoded batch*input_dim={}",
+            "{fixture_path}: FnSig.inputs_floats[0]={input_floats} disagrees with hardcoded batch*input_dim={}",
             batch * input_dim);
         assert_eq!(output_floats, batch * output_dim,
             "{fixture_path}: FnSig.output_floats={output_floats} disagrees with hardcoded batch*output_dim={}",
             batch * output_dim);
         assert_eq!(
-            input_floats, unfused_asm.functions[0].input_floats,
-            "{fixture_path}: fused/unfused input_floats mismatch"
+            input_floats, unfused_asm.functions[0].inputs_floats[0],
+            "{fixture_path}: fused/unfused inputs_floats[0] mismatch"
         );
         assert_eq!(
             output_floats, unfused_asm.functions[0].output_floats,
@@ -1011,7 +1011,7 @@ fn fused_softmax_xmm_spill_x86_64() {
         unsafe { lib.get(b"nfl_forward_SoftmaxWithBias") }.unwrap();
 
     let sig = &asm.functions[0];
-    let input_floats = sig.input_floats;
+    let input_floats = sig.inputs_floats[0];
     let params_len = sig.params_floats;
     let output_floats = sig.output_floats;
 
@@ -1082,7 +1082,7 @@ fn self_attention_ffi_matches_reference() {
 
     let asm = profiles_x86_64::lower(&uir).expect("lower");
     let sig = &asm.functions[0];
-    assert_eq!(sig.input_floats, TOTAL);
+    assert_eq!(sig.inputs_floats, vec![TOTAL]);
     assert_eq!(sig.output_floats, TOTAL);
     assert_eq!(sig.params_floats, 0);
 
