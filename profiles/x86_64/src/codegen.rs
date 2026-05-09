@@ -151,6 +151,7 @@ fn walk_model(
     let mut dropout_idx = 0usize;
     let mut matmul_idx = 0usize;
     let mut mulscalar_idx = 0usize;
+    let mut add_idx = 0usize;
     for (node_idx, node) in model.nodes.iter().enumerate() {
         if let NodeKind::Op { op, operands, .. } = &node.kind {
             match op {
@@ -323,11 +324,20 @@ fn walk_model(
                     mulscalar_idx += 1;
                 }
                 StdOp::Add => {
-                    // M13 placeholder: emit_add lands in Task 4 (x86_64).
-                    return Err(LowerError::UnsupportedOp {
-                        op: "add (M13 codegen pending — Task 3/4)".into(),
-                        span: node.source_span,
-                    });
+                    let total_elements: u64 = node.ty.shape.0.iter().product();
+                    let a_loc = resolve_loc(&assignment.locs, operands[0]);
+                    let other_loc = resolve_loc(&assignment.locs, operands[1]);
+                    let dst_loc = resolve_loc(&assignment.locs, node_idx);
+                    body.push_str(&crate::ops::emit_add(
+                        &abi,
+                        total_elements,
+                        model_idx,
+                        add_idx,
+                        a_loc,
+                        other_loc,
+                        dst_loc,
+                    ));
+                    add_idx += 1;
                 }
                 #[allow(unreachable_patterns)]
                 _ => {
@@ -371,7 +381,7 @@ fn classify_op(
         StdOp::Softmax => Ok(()),
         StdOp::Matmul => Ok(()),
         StdOp::MulScalar => Ok(()),
-        StdOp::Add => Ok(()), // M13 placeholder: walk_model returns UnsupportedOp until Task 4 lands emit_add (intentional classify→walk gap during the multi-task rollout)
+        StdOp::Add => Ok(()),
         #[allow(unreachable_patterns)]
         _ => Err(LowerError::UnsupportedOp {
             op: format!("{op}"),

@@ -1378,6 +1378,108 @@ fn emit_matmul_body_contains_zero_pushq() {
     );
 }
 
+// ---- M13 Group D: emit_add x86_64 ----------------------------------------
+
+#[test]
+fn emit_add_x86_64_emits_two_loads_one_addss_one_store() {
+    use crate::abi::AbiContext;
+    use crate::buffer::BufferLoc;
+    let abi = AbiContext { n_inputs: 2 };
+    let asm = crate::ops::add::emit_add(
+        &abi,
+        /* total_elements */ 8,
+        /* model_idx */ 0,
+        /* op_idx */ 0,
+        /* a_loc */ BufferLoc::InputReg(0),
+        /* other_loc */ BufferLoc::InputReg(1),
+        /* dst_loc */ BufferLoc::OutputReg,
+    );
+    // Two scalar loads (one per input pointer).
+    assert!(
+        asm.contains("movss   (%rax,"),
+        "expected movss from %rax (a_ptr); got:\n{asm}"
+    );
+    assert!(
+        asm.contains("movss   (%r10,"),
+        "expected movss from %r10 (other_ptr); got:\n{asm}"
+    );
+    // One addss.
+    assert_eq!(
+        asm.matches("addss").count(),
+        1,
+        "expected exactly one addss; got:\n{asm}"
+    );
+    // One movss store to %r11.
+    assert!(
+        asm.contains("movss   %xmm0, (%r11,"),
+        "expected movss store to %r11; got:\n{asm}"
+    );
+}
+
+#[test]
+fn emit_add_x86_64_uses_rbp_counter_no_pushq_no_rcx_clobber() {
+    use crate::abi::AbiContext;
+    use crate::buffer::BufferLoc;
+    // At N=2, %rcx = output_reg. emit_add must NOT clobber %rcx.
+    let abi = AbiContext { n_inputs: 2 };
+    let asm = crate::ops::add::emit_add(
+        &abi,
+        16,
+        0,
+        0,
+        BufferLoc::InputReg(0),
+        BufferLoc::InputReg(1),
+        BufferLoc::OutputReg,
+    );
+    // Counter init goes to %rbp.
+    assert!(
+        asm.contains("movq    $0, %rbp\n"),
+        "expected counter init in %rbp; got:\n{asm}"
+    );
+    // No pushq/popq — %rbp is already saved by function-level prologue.
+    assert!(
+        !asm.contains("pushq"),
+        "emit_add must not pushq inside body (rbp is preserved by prologue); got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("popq"),
+        "emit_add must not popq inside body; got:\n{asm}"
+    );
+    // %rcx (ABI at N=2) is not written.
+    assert!(
+        !asm.contains(", %rcx\n"),
+        "emit_add must not write to %rcx (ABI register at N≥2); got:\n{asm}"
+    );
+}
+
+#[test]
+fn emit_add_x86_64_no_callee_saved_or_ffi_save() {
+    use crate::abi::AbiContext;
+    use crate::buffer::BufferLoc;
+    let abi = AbiContext { n_inputs: 1 };
+    let asm = crate::ops::add::emit_add(
+        &abi,
+        4,
+        0,
+        0,
+        BufferLoc::InputReg(0),
+        BufferLoc::InputReg(0),
+        BufferLoc::OutputReg,
+    );
+    // No call to expf@PLT (no FFI save needed inside emit_add).
+    assert!(
+        !asm.contains("call    expf@PLT"),
+        "emit_add must not call expf; got:\n{asm}"
+    );
+    // No %rbx/%r12-%r15 writes (matmul-only callee-saved set).
+    for reg in &["%rbx", "%r12", "%r13", "%r14", "%r15"] {
+        assert!(
+            !asm.contains(&format!(", {reg}\n")),
+            "emit_add must not write to callee-saved {reg}; got:\n{asm}"
+        );
+    }
+}
+
 // ---- Group A (M13): N=4 + matmul fix via %rbp j-counter --------------------
 
 #[test]
