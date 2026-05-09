@@ -39,6 +39,14 @@
 //! output_reg at N=3; `%r9` (weight ptr scratch, line 63) becomes
 //! output_reg at N=4. No fixture exercises these today; close in a
 //! future milestone where an N≥3 multi-input linear model surfaces them.
+//!
+//! Latent N=2 bias hazard: when `bias_offset.is_some()` AND N=2,
+//! `output_reg() == %rcx`, which the push/pop save treats as an
+//! ABI register but the bias-add (line 205) also uses as the j-counter.
+//! Both refer to the same physical register — the bias read uses j as
+//! the base address, producing wrong output. No M13 fixture exercises
+//! this path (residual_add has no bias). Fix in a future milestone
+//! when an N=2 + linear-with-bias fixture surfaces it.
 
 use crate::abi::AbiContext;
 use crate::asm::emit_imm32_to_r10;
