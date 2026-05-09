@@ -112,8 +112,8 @@ pub fn emit_matmul(
     s.push_str(&format!("    b.ge    .Lmm4d_outer_end_{mid}\n"));
 
     // Per-outer slice base pointers go into x12, x13, x14. All non-ABI
-    // scratch — no stack spill needed (M11's `stp x1, x2, [sp, #-16]!`
-    // block is gone). x12 = A_slice = x9 + x15 * a_slice * 4.
+    // scratch — no stack spill needed (matmul never spills; only emit_ffi_save
+    // emits stack manipulation). x12 = A_slice = x9 + x15 * a_slice * 4.
     s.push_str(&emit_imm32("x8", a_slice));
     s.push_str("    mul     x6, x15, x8\n");
     s.push_str("    add     x12, x9, x6, lsl #2\n");
@@ -196,8 +196,7 @@ pub fn emit_matmul(
     s.push_str(&format!("    b       .Lmm4d_i_{mid}\n"));
     s.push_str(&format!(".Lmm4d_i_end_{mid}:\n"));
 
-    // Outer++; outer-loop tail. No stack restore — the M11 `ldp x1, x2`
-    // block is gone (matmul body never spilled in M12).
+    // Outer++; outer-loop tail. No stack restore — matmul never spills.
     s.push_str("    add     x15, x15, #1\n");
     s.push_str(&format!("    b       .Lmm4d_outer_{mid}\n"));
     s.push_str(&format!(".Lmm4d_outer_end_{mid}:\n"));

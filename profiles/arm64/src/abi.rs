@@ -131,6 +131,7 @@ impl AbiContext {
     /// harmlessly: `xzr` is the zero register, so `ldp ..., xzr, ...`
     /// is a write-discard. Per spec §6.3.
     pub fn emit_ffi_restore(&self, asm: &mut String) {
+        // Build pairs first; we must traverse in reverse (LIFO) — `emit_ffi_save` could iterate forward, this can't.
         let regs = self.ffi_save_set();
         let n = regs.len();
         let mut pairs: Vec<(&str, &str)> = Vec::with_capacity(n.div_ceil(2));
