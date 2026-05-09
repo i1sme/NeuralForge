@@ -1323,3 +1323,93 @@ fn too_many_inputs_returns_too_many_inputs_error() {
         Ok(_) => panic!("expected Err, got Ok"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// M13 Group E: residual_add (StdOp::Add end-to-end on arm64).
+//
+// E.1: residual_add_match_numerically — cc + dlopen + bit-exact comparison
+//      vs Rust reference (relu(x @ W) + skip). Linear bias is off (default
+//      — no bias=true arg), so params = dim*dim = 16 floats.
+//      Matmul reference uses f32::mul_add (FMA) to match arm64 fmadd.
+//      ReLU reference uses f32::max(0.0) to match arm64 fmax.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn residual_add_match_numerically() {
+    if !cfg!(target_arch = "aarch64") {
+        eprintln!("skip: integration test requires aarch64 host");
+        return;
+    }
+    if !common::cc_available() {
+        eprintln!("skip: integration test requires `cc` on PATH");
+        return;
+    }
+
+    let src =
+        std::fs::read_to_string("../../tests/fixtures/residual_add.nfl").expect("fixture readable");
+    let nfl = compiler::parse(&src).expect("parse");
+    let uir = compiler::ir::build(&nfl).expect("ir::build");
+    let asm = profiles_arm64::lower(&uir).expect("lower");
+
+    let sig = &asm.functions[0];
+    assert_eq!(sig.inputs_floats.len(), 2, "residual_add has arity 2");
+    assert_eq!(sig.inputs_floats[0], 2 * 4, "x is [2,4]=8 floats");
+    assert_eq!(sig.inputs_floats[1], 2 * 4, "skip is [2,4]=8 floats");
+    // linear[dim] with no bias=true → params = dim*dim = 16 floats (weights only).
+    assert_eq!(
+        sig.params_floats,
+        4 * 4,
+        "linear weights only, 4x4=16 floats"
+    );
+
+    let dylib_path = common::compile_to_dylib(&asm.source, "residual_add");
+    let lib = unsafe { libloading::Library::new(&dylib_path) }.expect("dlopen");
+
+    // ABI: x (x0), skip (x1), params (x2), out (x3).
+    type ForwardFn = unsafe extern "C" fn(*const f32, *const f32, *const f32, *mut f32);
+    let forward: libloading::Symbol<ForwardFn> =
+        unsafe { lib.get(b"nfl_forward_ResidualBlock") }.expect("dlsym");
+
+    let batch = 2usize;
+    let dim = 4usize;
+    let x: Vec<f32> = (0..batch * dim).map(|i| (i as f32) * 0.1).collect();
+    let skip: Vec<f32> = (0..batch * dim).map(|i| (i as f32) * 0.07).collect();
+    // Linear weights: dim×dim row-major (no bias).
+    let weights: Vec<f32> = (0..dim * dim).map(|i| (i as f32) * 0.05).collect();
+    let mut out = vec![0.0f32; batch * dim];
+
+    unsafe {
+        forward(
+            x.as_ptr(),
+            skip.as_ptr(),
+            weights.as_ptr(),
+            out.as_mut_ptr(),
+        );
+    }
+
+    // Reference: relu(x @ W) + skip, element-wise.
+    // Matmul uses f32::mul_add (FMA) to match arm64 fmadd.
+    // ReLU uses f32::max(0.0) to match arm64 fmax.
+    let mut expected = vec![0.0f32; batch * dim];
+    for b in 0..batch {
+        for j in 0..dim {
+            let mut sum = 0.0f32;
+            for kk in 0..dim {
+                sum = f32::mul_add(x[b * dim + kk], weights[kk * dim + j], sum);
+            }
+            let relu_out = sum.max(0.0f32);
+            expected[b * dim + j] = relu_out + skip[b * dim + j];
+        }
+    }
+
+    for (i, (got, want)) in out.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            got.to_bits() == want.to_bits(),
+            "mismatch at index {i}: got {got} ({:#010x}), want {want} ({:#010x})",
+            got.to_bits(),
+            want.to_bits()
+        );
+    }
+
+    drop(lib);
+}

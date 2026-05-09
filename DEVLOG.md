@@ -14,6 +14,104 @@ Format for each entry:
 
 ---
 
+## 2026-05-09 — Milestone 13 closed: N=4 + matmul fix + add op (A2 first brick)
+
+### What was done
+
+- **Task 1 — N=4 + matmul gap closed on x86_64.** `emit_matmul`'s
+  inner j-loop counter relocated from `%r9` (which becomes
+  `output_reg()` at N=4) to `%rbp` (callee-saved by unconditional
+  prologue `pushq %rbp`; unread by op bodies). The M12 reject path
+  removed. Test `emit_matmul_rejects_n4_with_clear_error` flipped
+  to `emit_matmul_accepts_n4_with_rbp_j_counter`.
+- **Task 2 — `StdOp::Add` foundation.** Flat StdOp variant + new
+  `ShapeError::AddShapeMismatch` (no Span — pattern-consistent with
+  the 7 existing variants; M5c OQ-4 not triggered). NFL surface
+  `a -> add[skip]` — first real consumer of M10's `ArgType::Tensor`
+  outside Matmul. Two builder tests added.
+- **Task 3 — arm64 `emit_add`.** New `profiles/arm64/src/ops/add.rs`.
+  Flat AArch64 loop modeled after `emit_mulscalar`. x9/x10/x11
+  pointers, x12 counter, x13 bound. No FFI, no callee-saved.
+- **Task 4 — x86_64 `emit_add`.** New `profiles/x86_64/src/ops/add.rs`.
+  Flat AT&T loop. %rax/%r10/%r11 pointers, %rbp counter (same trick
+  as Task 1).
+- **Pre-Task-5 fix — arm64 `emit_linear` ABI register clobber.**
+  `emit_linear` used x3/x4/x5 as i/j/k loop counters; at N≥2 these
+  overlap with ABI argument registers (output_reg = INPUT_REGS[n+1]).
+  M12 missed this because all M12 multi-input fixtures were matmul-
+  only. Surfaced by Task 5's residual_add FFI test crashing with
+  SIGSEGV. Fix: stp/ldp save/restore of x3 (and x4 at N≥3, x5 at
+  N≥4) around the i-loop body. Same class of bug as Task 1; resolved
+  differently (save/restore vs relocate) because emit_linear's bias
+  paths and fused PostOp::SoftmaxRow dispatch saturate x9-x16.
+- **Task 5 — fixtures + FFI tests.** `residual_add.nfl` (positive
+  both profiles), `four_input_matmul.nfl` (closes Task 1 end-to-end
+  x86_64), `negative/add_shape_mismatch.nfl` (IR reject). Per-
+  profile FFI integration tests bit-exact vs Rust reference.
+- **Task 6 — docs.** PROJECT_SPEC.md M13 row + Current Status +
+  Strategic Roadmap A2 annotation. CLAUDE.md tree + status.
+  grammar.md `add` reference. profile_guide/{arm64,x86_64}.md M13
+  ops sections.
+- **Test count: 390 → 400** (macOS arm64); ~404 on Linux x86_64 CI.
+
+### Decisions made
+
+- **`%rbp` over spec §3.3 enumerated options for x86_64** (Task 1
+  + Task 4). Spec §3.3 enumerated stack slot / `%xmm9` / loop
+  restructure; plan synthesis discovered a fourth simpler option
+  (`%rbp`) satisfying all four §3.2 constraints with zero prologue
+  surface change. Rationale: `%rbp` is already saved/restored by the
+  unconditional prologue `pushq %rbp` / epilogue `popq %rbp`, and
+  grep across all op emitters confirmed zero reads of `%rbp` inside
+  function bodies. Both Task 1 and Task 4 use the same trick —
+  symmetric design.
+
+- **Save/restore (not relocate) for arm64 emit_linear.** The arm64
+  analog of the `%rbp` trick would be `x29` (frame pointer). But
+  emit_linear's bias paths and fused PostOp::SoftmaxRow dispatch
+  already touch x9-x16 extensively, making a counter-rename
+  refactor risky. Conservative save/restore was chosen: 2-4 extra
+  instructions per linear op at N≥2, but a much smaller diff. The
+  cross-profile asymmetry (relocate on x86_64, save/restore on
+  arm64) is documented in both profile guides.
+
+- **Negative fixture in `tests/fixtures/negative/`**, not
+  `profile-negative/`. Spec §6.3 originally said `profile-negative/`;
+  plan synthesis corrected because `AddShapeMismatch` fires at IR
+  build (compiler-level), not at lower (profile-level). The
+  `profile-negative/` dir is reserved for `LowerError` fixtures
+  (`too_many_inputs.nfl` is the existing example).
+
+- **`four_input_matmul.nfl` form: `a -> matmul[b] -> add[c] -> add[d]`.**
+  Single fixture exercising N=4 ABI mapping AND matmul (the M12
+  bug surface) AND emit_add at N=4 in one go. Cheaper than two
+  separate fixtures.
+
+### Problems encountered
+
+- **Latent arm64 emit_linear bug surfaced at Task 5.** The
+  residual_add FFI test crashed with SIGSEGV; root cause was the
+  ABI register conflict described above. M12 didn't catch it
+  because matmul-only multi-input fixtures don't exercise emit_linear
+  at N≥2. Fix landed as a separate commit (`c7fba5b`) before the
+  Task 5 commit (`b31a950`) for clean audit trail.
+
+### Next step
+
+A2 LayerNorm + FFN in M14. LayerNorm requires mean/variance/sqrt/
+divide computation pattern not yet present in any codegen — likely
+a single `StdOp::LayerNorm` with internal multi-pass codegen
+(mirroring how `Softmax` is one node, not "exp + sum + divide"
+decomposed). FFN composes existing ops (`linear → activation →
+linear`).
+
+Trigger-driven cleanup status: OQ-7/8/9 + M5c OQ-4 still dormant
+through M13 (no triggers fired). Per project memory rule
+("triggered cleanup is an obligation"), monitor across M14
+implementation.
+
+---
+
 ## 2026-05-09 — Milestone 12 closed: multi-input ABI (A1) end-to-end on both profiles
 
 ### What was done

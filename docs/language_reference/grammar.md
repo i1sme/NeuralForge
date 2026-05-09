@@ -470,8 +470,37 @@ statements, the grammar accepts the source but `lower()` on both profiles return
 `Err(LowerError::TooManyInputs { n })`. The cap is a calling-convention constraint
 (only 4 ABI input registers are reserved); it is not enforced at parse time.
 
-**Note on x86_64.** On x86_64, models with exactly N=4 inputs that also contain
-`StdOp::Matmul` additionally fail at lowering with `Err(LowerError::UnsupportedOp)`
-due to a j-counter register collision (`%r9` is both `output_reg()` at N=4 and the
-matmul j-counter). This is a known M12 limitation; see
-[`docs/profile_guide/x86_64.md`](../profile_guide/x86_64.md) §11.5 for details.
+**Note on x86_64 (M13 update).** The M12 limitation where N=4 + matmul failed on
+x86_64 is closed in M13: the j-counter was relocated from `%r9` to `%rbp`
+(callee-saved by the unconditional prologue `pushq %rbp`; unread by op bodies).
+N=4 + matmul now compiles and runs bit-exact on x86_64. See
+[`docs/profile_guide/x86_64.md`](../profile_guide/x86_64.md) §M13 for details.
+
+---
+
+## 11. Stdlib Operations Reference (M13)
+
+### `add[other]`
+
+Per-element tensor addition. Adds the named `other` tensor to the
+pipeline carrier element-wise. Strict shape equality required — no
+broadcasting (per design principle #1, "Explicit over implicit").
+
+**Signature:** positional `other: Tensor` (required); no named args.
+
+**Shape inference:** input shape is preserved. Both operand shapes
+must be exactly equal; otherwise `ShapeError::AddShapeMismatch` fires
+at IR build time.
+
+**Example:**
+
+```nfl
+model ResidualBlock [batch=32, dim=512]:
+    x: Tensor[batch, dim]
+    skip: Tensor[batch, dim]
+
+    x -> linear[dim] -> relu -> add[skip]
+```
+
+**Codegen:** flat elementwise loop on both `arm64` and `x86_64`
+profiles. No FFI dependency. New in M13.

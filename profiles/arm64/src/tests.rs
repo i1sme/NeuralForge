@@ -1321,3 +1321,214 @@ fn emit_matmul_body_contains_zero_stp() {
         "emit_matmul body must contain zero stp instructions per §9.1; got {stp_count}\n{result}"
     );
 }
+
+// ---- M13 Group C: emit_add arm64 -----------------------------------------
+
+#[test]
+fn emit_add_arm64_emits_three_pointer_loads_and_fadd() {
+    use crate::abi::AbiContext;
+    use crate::buffer::BufferLoc;
+    let abi = AbiContext { n_inputs: 2 };
+    let asm = crate::ops::add::emit_add(
+        &abi,
+        /* total_elements */ 8,
+        /* model_idx */ 0,
+        /* op_idx */ 0,
+        /* a_loc */ BufferLoc::InputReg(0),
+        /* other_loc */ BufferLoc::InputReg(1),
+        /* dst_loc */ BufferLoc::OutputReg,
+    );
+    // Three pointers materialised.
+    assert!(
+        asm.contains("ldr     s0,"),
+        "expected ldr s0 (a load); got:\n{asm}"
+    );
+    assert!(
+        asm.contains("ldr     s1,"),
+        "expected ldr s1 (other load); got:\n{asm}"
+    );
+    assert!(
+        asm.contains("fadd    s2, s0, s1"),
+        "expected fadd s2, s0, s1; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("str     s2,"),
+        "expected str s2 (dst store); got:\n{asm}"
+    );
+}
+
+#[test]
+fn emit_add_arm64_no_callee_saved_or_ffi_save() {
+    use crate::abi::AbiContext;
+    use crate::buffer::BufferLoc;
+    let abi = AbiContext { n_inputs: 2 };
+    let asm = crate::ops::add::emit_add(
+        &abi,
+        16,
+        0,
+        0,
+        BufferLoc::InputReg(0),
+        BufferLoc::InputReg(1),
+        BufferLoc::OutputReg,
+    );
+    // No callee-saved GPR pushes (x19-x28).
+    for reg in &[
+        "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27", "x28",
+    ] {
+        assert!(
+            !asm.contains(&format!("str     {reg}")),
+            "emit_add must not push callee-saved {reg}; got:\n{asm}"
+        );
+    }
+    // No callee-saved FP pushes (d8-d15). emit_add uses s0/s1/s2 = d0/d1/d2
+    // (caller-saved); a regression spilling into d8-d15 would silently violate
+    // the doc-comment claim "No callee-saved register usage".
+    for reg in &["d8", "d9", "d10", "d11", "d12", "d13", "d14", "d15"] {
+        assert!(
+            !asm.contains(&format!("str     {reg}")),
+            "emit_add must not push callee-saved FP {reg}; got:\n{asm}"
+        );
+    }
+    // No bl _expf (no FFI save needed).
+    assert!(
+        !asm.contains("bl      _expf"),
+        "emit_add must not call _expf; got:\n{asm}"
+    );
+}
+
+// ---- M13 Task 5 dependency: emit_linear ABI register save at N≥2 --------
+
+#[test]
+fn emit_linear_arm64_saves_x3_at_n2_to_avoid_output_clobber() {
+    // M13: at N=2 on arm64, x3 = output_reg(). emit_linear uses x3 as
+    // its i-counter, which would silently clobber the output pointer.
+    // emit_linear must save x3 around its body so downstream ops can
+    // re-read OutputReg via materialise_ptr.
+    use compiler::ast::Span;
+    use compiler::PostOp;
+    let abi = AbiContext { n_inputs: 2 };
+    let post: Vec<PostOp> = vec![];
+    let asm = crate::ops::linear::emit_linear(
+        &abi,
+        /* b */ 2,
+        /* k */ 4,
+        /* n */ 4,
+        /* model_idx */ 0,
+        /* linear_idx */ 0,
+        /* src_loc */ BufferLoc::InputReg(0),
+        /* dst_loc */ BufferLoc::OutputReg,
+        /* weight_offset */ 0,
+        /* bias_offset */ None,
+        /* node_span */ Span::new(1, 1),
+        /* fused_post_ops */ &post,
+        /* sym_prefix */ "",
+    )
+    .expect("emit_linear must succeed at N=2");
+    // x3 saved and restored — pair must balance.
+    let stp_count = asm.matches("stp     x3,").count();
+    let ldp_count = asm.matches("ldp     x3,").count();
+    assert!(
+        stp_count >= 1 && stp_count == ldp_count,
+        "emit_linear must save+restore x3 in balanced pairs at N=2; got stp={stp_count} ldp={ldp_count}\n{asm}"
+    );
+}
+
+#[test]
+fn emit_linear_arm64_save_block_balances_at_all_n() {
+    // M13: parametric coverage of the save/restore block across N ∈ [1, 4].
+    // At each arity, count stp-into-sp pushes vs ldp-from-sp pops emitted by
+    // the M13 save/restore block specifically (the inner loop body uses
+    // x3/x4/x5 as plain registers, not stack ops). Counts must balance and
+    // match the expected number of conflicting registers (output_reg =
+    // INPUT_REGS[n_inputs+1]):
+    //   N=1 → 0 conflicts (x3..x5 are non-ABI), 0 pairs.
+    //   N=2 → x3 conflicts, 1 pair (stp x3, xzr).
+    //   N=3 → x3+x4 conflict, 1 pair (stp x3, x4).
+    //   N=4 → x3+x4+x5 conflict, 2 pairs (stp x3, x4 + stp x5, xzr).
+    use compiler::ast::Span;
+    use compiler::PostOp;
+    let cases = [(1usize, 0), (2, 1), (3, 1), (4, 2)];
+    for &(n_inputs, expected_pairs) in &cases {
+        let abi = AbiContext { n_inputs };
+        let post: Vec<PostOp> = vec![];
+        let asm = crate::ops::linear::emit_linear(
+            &abi,
+            /* b */ 2,
+            /* k */ 4,
+            /* n */ 4,
+            /* model_idx */ 0,
+            /* linear_idx */ 0,
+            /* src_loc */ BufferLoc::InputReg(0),
+            /* dst_loc */ BufferLoc::OutputReg,
+            /* weight_offset */ 0,
+            /* bias_offset */ None,
+            /* node_span */ Span::new(1, 1),
+            /* fused_post_ops */ &post,
+            /* sym_prefix */ "",
+        )
+        .expect("emit_linear must succeed");
+        // Count save/restore pairs. The save block uses
+        // `stp ..., [sp, #-16]!`; the restore block uses `ldp ..., [sp], #16`.
+        let stp_pairs = asm.matches("[sp, #-16]!").count();
+        let ldp_pairs = asm.matches("[sp], #16").count();
+        assert_eq!(
+            stp_pairs, expected_pairs,
+            "N={n_inputs}: expected {expected_pairs} stp-into-sp pair(s); got {stp_pairs}\n{asm}"
+        );
+        assert_eq!(
+            ldp_pairs, expected_pairs,
+            "N={n_inputs}: expected {expected_pairs} ldp-from-sp pair(s); got {ldp_pairs}\n{asm}"
+        );
+        // Specific register-pair shapes per arity.
+        match n_inputs {
+            1 => {
+                assert!(
+                    !asm.contains("stp     x3,"),
+                    "N=1: no x3 save needed; got:\n{asm}"
+                );
+            }
+            2 => {
+                // Single x3+xzr pair.
+                assert!(
+                    asm.contains("stp     x3, xzr, [sp, #-16]!"),
+                    "N=2: expected `stp x3, xzr`; got:\n{asm}"
+                );
+                assert!(
+                    asm.contains("ldp     x3, xzr, [sp], #16"),
+                    "N=2: expected matching `ldp x3, xzr`; got:\n{asm}"
+                );
+            }
+            3 => {
+                // Single x3+x4 pair.
+                assert!(
+                    asm.contains("stp     x3, x4, [sp, #-16]!"),
+                    "N=3: expected `stp x3, x4`; got:\n{asm}"
+                );
+                assert!(
+                    asm.contains("ldp     x3, x4, [sp], #16"),
+                    "N=3: expected matching `ldp x3, x4`; got:\n{asm}"
+                );
+            }
+            4 => {
+                // Two pairs: outer (x3, x4) then inner (x5, xzr). LIFO restore.
+                assert!(
+                    asm.contains("stp     x3, x4, [sp, #-16]!"),
+                    "N=4: expected `stp x3, x4` (first push); got:\n{asm}"
+                );
+                assert!(
+                    asm.contains("stp     x5, xzr, [sp, #-16]!"),
+                    "N=4: expected `stp x5, xzr` (second push); got:\n{asm}"
+                );
+                assert!(
+                    asm.contains("ldp     x5, xzr, [sp], #16"),
+                    "N=4: expected `ldp x5, xzr` (LIFO first pop); got:\n{asm}"
+                );
+                assert!(
+                    asm.contains("ldp     x3, x4, [sp], #16"),
+                    "N=4: expected `ldp x3, x4` (LIFO second pop); got:\n{asm}"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+}

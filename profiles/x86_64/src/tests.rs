@@ -152,11 +152,11 @@ fn dropout_as_output_emits_copy_loop_no_maxss() {
     let s = lower_x86_no_passes(src).source;
     assert!(s.contains(".Ldropout_"), "missing dropout loop label:\n{s}");
     assert!(
-        s.contains("movss   (%rax, %rcx, 4), %xmm0"),
+        s.contains("movss   (%rax, %rbp, 4), %xmm0"),
         "missing load:\n{s}"
     );
     assert!(
-        s.contains("movss   %xmm0, (%r11, %rcx, 4)"),
+        s.contains("movss   %xmm0, (%r11, %rbp, 4)"),
         "missing store:\n{s}"
     );
     assert!(
@@ -870,18 +870,18 @@ model M [batch=2]:
     // Both must use mulss (no FMA on x86_64).
     assert!(asm_no_t.contains("mulss"), "no-t asm:\n{}", asm_no_t);
     assert!(asm_t.contains("mulss"), "t asm:\n{}", asm_t);
-    // M12 register layout: k_inner counter %r11, j counter %r9.
+    // M13 register layout: k_inner counter %r11, j counter %rbp.
     // Transpose flips inner b_offset computation:
     //   no-transpose: `movq    %r11, %rax` (k_inner * N + j; %rax = k_inner)
-    //   transpose:    `movq    %r9, %rax`  (j * K + k_inner;  %rax = j)
+    //   transpose:    `movq    %rbp, %rax` (j * K + k_inner;  %rax = j)
     assert!(
         asm_no_t.contains("movq    %r11, %rax"),
         "no-t asm should compute b_offset from %r11 (k_inner):\n{}",
         asm_no_t
     );
     assert!(
-        asm_t.contains("movq    %r9, %rax"),
-        "t asm should compute b_offset from %r9 (j):\n{}",
+        asm_t.contains("movq    %rbp, %rax"),
+        "t asm should compute b_offset from %rbp (j):\n{}",
         asm_t
     );
     assert_ne!(asm_no_t, asm_t, "transpose_b should change emitted asm");
@@ -1378,13 +1378,204 @@ fn emit_matmul_body_contains_zero_pushq() {
     );
 }
 
-// ---- Group C Q11: N=4 rejection -------------------------------------------
+// ---- M13 Group D: emit_add x86_64 ----------------------------------------
 
 #[test]
-fn emit_matmul_rejects_n4_with_clear_error() {
-    // Q11 (Group C): %r9 is both the j-counter scratch in emit_matmul and
-    // output_reg() at N=4 (INPUT_REGS[5]). emit_matmul must reject N=4 with
-    // LowerError::UnsupportedOp rather than silently producing wrong asm.
+fn emit_add_x86_64_emits_two_loads_one_addss_one_store() {
+    use crate::abi::AbiContext;
+    use crate::buffer::BufferLoc;
+    let abi = AbiContext { n_inputs: 2 };
+    let asm = crate::ops::add::emit_add(
+        &abi,
+        /* total_elements */ 8,
+        /* model_idx */ 0,
+        /* op_idx */ 0,
+        /* a_loc */ BufferLoc::InputReg(0),
+        /* other_loc */ BufferLoc::InputReg(1),
+        /* dst_loc */ BufferLoc::OutputReg,
+    );
+    // Two scalar loads (one per input pointer).
+    assert!(
+        asm.contains("movss   (%rax,"),
+        "expected movss from %rax (a_ptr); got:\n{asm}"
+    );
+    assert!(
+        asm.contains("movss   (%r10,"),
+        "expected movss from %r10 (other_ptr); got:\n{asm}"
+    );
+    // One addss.
+    assert_eq!(
+        asm.matches("addss").count(),
+        1,
+        "expected exactly one addss; got:\n{asm}"
+    );
+    // One movss store to %r11.
+    assert!(
+        asm.contains("movss   %xmm0, (%r11,"),
+        "expected movss store to %r11; got:\n{asm}"
+    );
+}
+
+#[test]
+fn emit_add_x86_64_uses_rbp_counter_no_pushq_no_abi_clobber() {
+    use crate::abi::AbiContext;
+    use crate::buffer::BufferLoc;
+    // emit_add must preserve all ABI argument registers across its body
+    // (M12 §9.1 invariant — downstream emitters re-read input/params/output
+    // from those registers). %rbp is callee-saved by the function-level
+    // prologue and unread by op bodies, so emit_add uses it as the counter.
+    //
+    // Cover the full N ∈ [2, 4] range; at each arity, output_reg lands on
+    // a different ABI register (%rcx at N=2, %r8 at N=3, %r9 at N=4) so the
+    // "no ABI clobber" invariant must hold across all of them.
+    for n_inputs in [2, 3, 4] {
+        let abi = AbiContext { n_inputs };
+        let asm = crate::ops::add::emit_add(
+            &abi,
+            16,
+            0,
+            0,
+            BufferLoc::InputReg(0),
+            BufferLoc::InputReg(1),
+            BufferLoc::OutputReg,
+        );
+        // Counter init goes to %rbp.
+        assert!(
+            asm.contains("movq    $0, %rbp\n"),
+            "N={n_inputs}: expected counter init in %rbp; got:\n{asm}"
+        );
+        // No pushq/popq — %rbp is already saved by function-level prologue.
+        assert!(
+            !asm.contains("pushq"),
+            "N={n_inputs}: emit_add must not pushq inside body; got:\n{asm}"
+        );
+        assert!(
+            !asm.contains("popq"),
+            "N={n_inputs}: emit_add must not popq inside body; got:\n{asm}"
+        );
+        // No ABI argument register is written across N ∈ [2, 4]. Tracks
+        // INPUT_REGS = [%rdi, %rsi, %rdx, %rcx, %r8, %r9]; the first
+        // n_inputs+2 are reserved at each arity.
+        for reg in &["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"] {
+            assert!(
+                !asm.contains(&format!(", {reg}\n")),
+                "N={n_inputs}: emit_add must not write to ABI register {reg}; got:\n{asm}"
+            );
+        }
+    }
+}
+
+#[test]
+fn emit_add_x86_64_no_callee_saved_or_ffi_save() {
+    use crate::abi::AbiContext;
+    use crate::buffer::BufferLoc;
+    let abi = AbiContext { n_inputs: 1 };
+    let asm = crate::ops::add::emit_add(
+        &abi,
+        4,
+        0,
+        0,
+        BufferLoc::InputReg(0),
+        BufferLoc::InputReg(0),
+        BufferLoc::OutputReg,
+    );
+    // No call to expf@PLT (no FFI save needed inside emit_add).
+    assert!(
+        !asm.contains("call    expf@PLT"),
+        "emit_add must not call expf; got:\n{asm}"
+    );
+    // No %rbx/%r12-%r15 writes (matmul-only callee-saved set).
+    for reg in &["%rbx", "%r12", "%r13", "%r14", "%r15"] {
+        assert!(
+            !asm.contains(&format!(", {reg}\n")),
+            "emit_add must not write to callee-saved {reg}; got:\n{asm}"
+        );
+    }
+}
+
+// ---- M13 PR-fix: emit_linear x86_64 ABI register save at N≥2 -----------
+
+#[test]
+fn emit_linear_x86_64_save_block_balances_at_all_n() {
+    // M13 (PR follow-up): x86_64 emit_linear's body clobbers %rdi/%rsi/%rcx
+    // (k-counter, offset scratch, j-counter). At N=1 these are non-ABI; at
+    // N≥2 they overlap with input(0)/input(1)/output_reg respectively
+    // (and shift further at N=3, N=4). The fix: pushq save at body entry,
+    // popq restore at body exit, conditional on n_inputs ≥ 2.
+    //
+    // This test verifies push/pop balance at every N ∈ [1, 4] and pins
+    // the exact register set for N≥2:
+    //   N=1 → 0 pushq/popq pairs (no save needed).
+    //   N=2..4 → 3 pushq + 3 popq, in LIFO order (push %rdi, %rsi, %rcx;
+    //            pop %rcx, %rsi, %rdi).
+    use crate::abi::AbiContext;
+    use crate::buffer::BufferLoc;
+    use compiler::ast::Span;
+    use compiler::PostOp;
+    let cases = [(1usize, 0usize), (2, 3), (3, 3), (4, 3)];
+    for &(n_inputs, expected_pushes) in &cases {
+        let abi = AbiContext { n_inputs };
+        let post: Vec<PostOp> = vec![];
+        let asm = crate::ops::emit_linear(
+            &abi,
+            /* b */ 2,
+            /* k */ 4,
+            /* n */ 4,
+            /* model_idx */ 0,
+            /* linear_idx */ 0,
+            /* src_loc */ BufferLoc::InputReg(0),
+            /* dst_loc */ BufferLoc::OutputReg,
+            /* weight_offset */ 0,
+            /* bias_offset */ None,
+            /* node_span */ Span::new(1, 1),
+            /* fused_post_ops */ &post,
+            /* sym_prefix */ "",
+        )
+        .expect("emit_linear must succeed");
+        let pushq_count = asm.matches("    pushq   ").count();
+        let popq_count = asm.matches("    popq    ").count();
+        assert_eq!(
+            pushq_count, expected_pushes,
+            "N={n_inputs}: expected {expected_pushes} pushq; got {pushq_count}\n{asm}"
+        );
+        assert_eq!(
+            popq_count, expected_pushes,
+            "N={n_inputs}: expected {expected_pushes} popq; got {popq_count}\n{asm}"
+        );
+        if n_inputs >= 2 {
+            // Specific register set + LIFO ordering.
+            for reg in &["%rdi", "%rsi", "%rcx"] {
+                assert!(
+                    asm.contains(&format!("    pushq   {reg}\n")),
+                    "N={n_inputs}: expected `pushq {reg}`; got:\n{asm}"
+                );
+                assert!(
+                    asm.contains(&format!("    popq    {reg}\n")),
+                    "N={n_inputs}: expected `popq {reg}`; got:\n{asm}"
+                );
+            }
+            // LIFO check: pop order must be %rcx, %rsi, %rdi (reverse of
+            // push order %rdi, %rsi, %rcx). Verify by relative position.
+            let pop_rcx = asm.find("    popq    %rcx\n").expect("popq %rcx");
+            let pop_rsi = asm.find("    popq    %rsi\n").expect("popq %rsi");
+            let pop_rdi = asm.find("    popq    %rdi\n").expect("popq %rdi");
+            assert!(
+                pop_rcx < pop_rsi && pop_rsi < pop_rdi,
+                "N={n_inputs}: popq order must be LIFO (%rcx < %rsi < %rdi); got {pop_rcx}/{pop_rsi}/{pop_rdi}\n{asm}"
+            );
+        }
+    }
+}
+
+// ---- Group A (M13): N=4 + matmul fix via %rbp j-counter --------------------
+
+#[test]
+fn emit_matmul_accepts_n4_with_rbp_j_counter() {
+    // Group A (M13): the M12 reject path (commit 37868e5) blocked N=4 matmul
+    // because %r9 was both the j-counter scratch and output_reg() at N=4.
+    // M13 relocates the j-counter to %rbp (callee-saved by the function-level
+    // prologue; no op-emitter reads it inside the body). emit_matmul must now
+    // accept N=4 and emit asm using %rbp as the j-counter.
     use compiler::ast::Span;
     let abi = AbiContext { n_inputs: 4 };
     let span = Span::new(1, 1);
@@ -1402,20 +1593,22 @@ fn emit_matmul_rejects_n4_with_clear_error() {
         /* dst_loc */ BufferLoc::OutputReg,
         span,
     );
-    match result {
-        Err(profile_api::LowerError::UnsupportedOp { op, .. }) => {
-            assert!(
-                op.contains("matmul"),
-                "error message must mention 'matmul'; got: {op}"
-            );
-            assert!(
-                op.contains("N=4") || op.contains("4 inputs"),
-                "error message must mention N=4 collision; got: {op}"
-            );
-        }
-        Err(other) => panic!("expected UnsupportedOp, got {other:?}"),
-        Ok(_) => panic!("emit_matmul accepted N=4; should have rejected per Group C Q11"),
-    }
+    let asm = result.expect("emit_matmul must accept N=4 after M13 fix");
+    // The j-counter init now writes to %rbp, not %r9.
+    assert!(
+        asm.contains("movq    $0, %rbp\n"),
+        "expected j-counter init `movq $0, %rbp`; got:\n{asm}"
+    );
+    // Old %r9 j-counter init must be gone.
+    assert!(
+        !asm.contains("movq    $0, %r9\n"),
+        "stale %r9 j-counter init must be removed; got:\n{asm}"
+    );
+    // %r9 is output_reg at N=4; it must NOT be written to by the matmul body.
+    assert!(
+        !asm.contains(", %r9\n"),
+        "matmul body must not write to %r9 (output_reg at N=4); got:\n{asm}"
+    );
 }
 
 // ---- Group C Q5: compute_callee_saved matmul-only branch ------------------

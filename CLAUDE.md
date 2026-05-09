@@ -67,6 +67,7 @@ NeuralForge/
 │   │   │   ├── codegen.rs  ← walk_uir/walk_model dispatcher + classify_op
 │   │   │   ├── ops/
 │   │   │   │   ├── mod.rs        ← per-op submodule entry + re-exports
+│   │   │   │   ├── add.rs        ← emit_add (elementwise tensor add, M13)
 │   │   │   │   ├── linear.rs     ← emit_linear (matmul ± bias) + materialise_ptr
 │   │   │   │   ├── matmul.rs     ← emit_matmul (rank ≥ 2, optional transpose_b, M10; scratch rework M12)
 │   │   │   │   ├── mulscalar.rs  ← emit_mulscalar (scalar pre-load + flat loop, M10)
@@ -80,7 +81,7 @@ NeuralForge/
 │   └── x86_64/             ← Linux ELF scalar SSE2 codegen profile, M9
 │       └── src/
 │           ├── abi.rs      ← AbiContext (SysV AMD64 variant, M12)
-│           └── ops/        ← linear.rs, matmul.rs (M10; callee-saved scratch rework M12), mulscalar.rs (M10), relu.rs, softmax.rs, dropout.rs
+│           └── ops/        ← add.rs (M13), linear.rs, matmul.rs (M10; callee-saved scratch rework M12; %rbp j-counter fix M13), mulscalar.rs (M10), relu.rs, softmax.rs, dropout.rs
 │
 ├── language/
 │   ├── grammar.ebnf        ← formal NFL grammar
@@ -173,25 +174,13 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-**Milestone 12 complete. 390 tests passing on macOS arm64 (~398 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean
+**Milestone 13 complete. 400 tests passing on macOS arm64 (~404 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean
 (`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo fmt --all -- --check`, `cargo test --workspace`).
 
-M12 closed A1 (multi-input ABI, first follow-up to Axis 2): per-profile `AbiContext`
-maps N=1..4 typed inputs to distinct ABI registers on both profiles. New
-`profiles/{arm64,x86_64}/src/abi.rs`; reworked `emit_matmul` with scratch register
-reassignment eliminating M10 outer-loop spill blocks. Three new fixtures:
-`two_input_matmul.nfl`, `multi_input_attention.nfl`,
-`tests/fixtures/profile-negative/too_many_inputs.nfl`. Bench gains per-arity
-dispatch + seed cascade.
+M13 closed the x86_64 N=4 + matmul gap (j-counter relocated from `%r9` to `%rbp`) and shipped `StdOp::Add` (first A2 brick — residual connections). NFL surface `a -> add[skip]`. Both profiles ship `emit_add` (flat elementwise loop) reusing the `%rbp` scratch trick. Pre-Task-5 fix also closed an arm64 `emit_linear` ABI register clobber for N≥2 (stp/ldp save/restore of x3/x4/x5). Three new fixtures.
 
-Strategic direction: see `PROJECT_SPEC.md` §"Strategic Roadmap" — A1 closed in M12;
-A2 (transformer block) and A3 (viewer annotations) remain open along Axis 2.
-Trigger-driven cleanup items (OQ-7, OQ-8, OQ-9, M5c OQ-4) live in `PROJECT_SPEC.md`
-§"Open Questions" / "Trigger-driven cleanup" and stay dormant until their
-trigger fires. OQ-NEW closed in M9 (commit `a08fd24`). OQ-BENCH closed in M11 (commit `e7c29b8`).
-**Known M12 follow-up:** x86_64 `emit_matmul` rejects N=4+matmul (j-counter %r9
-collision); deferred to M13+.
+Strategic direction: see `PROJECT_SPEC.md` §"Strategic Roadmap" — A1 closed M12, A2 first brick (`add`) closed M13; A2 LayerNorm + FFN remain in M14+. Trigger-driven cleanup (OQ-7, OQ-8, OQ-9, M5c OQ-4) stays dormant.
 
 ---
 

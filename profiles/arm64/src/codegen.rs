@@ -133,6 +133,7 @@ fn walk_model(
     ));
 
     // Per-op emission (Tasks 5-8 refactor this dispatch into ops/*).
+    let mut add_idx = 0usize;
     let mut linear_idx = 0usize;
     let mut relu_idx = 0usize;
     let mut softmax_idx = 0usize;
@@ -314,6 +315,22 @@ fn walk_model(
                     ));
                     mulscalar_idx += 1;
                 }
+                StdOp::Add => {
+                    let total_elements: u64 = node.ty.shape.0.iter().product();
+                    let a_loc = resolve_loc(&assignment.locs, operands[0]);
+                    let other_loc = resolve_loc(&assignment.locs, operands[1]);
+                    let dst_loc = resolve_loc(&assignment.locs, node_idx);
+                    body.push_str(&crate::ops::emit_add(
+                        &abi,
+                        total_elements,
+                        model_idx,
+                        add_idx,
+                        a_loc,
+                        other_loc,
+                        dst_loc,
+                    ));
+                    add_idx += 1;
+                }
                 // M5c: #[non_exhaustive] on StdOp requires a wildcard
                 // arm. Future ops (e.g. Tanh, Gelu, Embedding) will
                 // route here until codegen learns them. Returning
@@ -367,6 +384,7 @@ fn classify_op(
         StdOp::Softmax => Ok(()),
         StdOp::Matmul => Ok(()),
         StdOp::MulScalar => Ok(()),
+        StdOp::Add => Ok(()),
         // M5c: #[non_exhaustive] on StdOp requires a wildcard arm.
         // Future ops are rejected here until codegen learns them.
         #[allow(unreachable_patterns)]

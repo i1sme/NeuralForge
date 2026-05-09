@@ -41,10 +41,10 @@ nfl_forward_SelfAttention:
     movl    $16, %r10d
     cmpq    %r10, %rbx
     jge     .Lmm4d_i_end_0_0
-    movq    $0, %r9
+    movq    $0, %rbp
 .Lmm4d_j_0_0:
     movl    $16, %r10d
-    cmpq    %r10, %r9
+    cmpq    %r10, %rbp
     jge     .Lmm4d_j_end_0_0
     xorps   %xmm0, %xmm0
     movq    $0, %r11
@@ -58,7 +58,7 @@ nfl_forward_SelfAttention:
     addq    %r11, %rax
     movss   (%r12, %rax, 4), %xmm1
     movl    $16, %r10d
-    movq    %r9, %rax
+    movq    %rbp, %rax
     imulq   %r10, %rax
     addq    %r11, %rax
     movss   (%r13, %rax, 4), %xmm2
@@ -70,9 +70,9 @@ nfl_forward_SelfAttention:
     movl    $16, %r10d
     movq    %rbx, %rax
     imulq   %r10, %rax
-    addq    %r9, %rax
+    addq    %rbp, %rax
     movss   %xmm0, (%r14, %rax, 4)
-    addq    $1, %r9
+    addq    $1, %rbp
     jmp     .Lmm4d_j_0_0
 .Lmm4d_j_end_0_0:
     addq    $1, %rbx
@@ -86,15 +86,15 @@ nfl_forward_SelfAttention:
     movd    %r10d, %xmm4
     leaq    16(%rsp), %rax
     leaq    16(%rsp), %r11
-    movq    $0, %rcx
+    movq    $0, %rbp
 .Lms_0_0:
     movl    $2048, %r10d
-    cmpq    %r10, %rcx
+    cmpq    %r10, %rbp
     jge     .Lms_end_0_0
-    movss   (%rax, %rcx, 4), %xmm0
+    movss   (%rax, %rbp, 4), %xmm0
     mulss   %xmm4, %xmm0
-    movss   %xmm0, (%r11, %rcx, 4)
-    addq    $1, %rcx
+    movss   %xmm0, (%r11, %rbp, 4)
+    addq    $1, %rbp
     jmp     .Lms_0_0
 .Lms_end_0_0:
     # softmax (3-pass): input [128,16] -> output [128,16]
@@ -199,10 +199,10 @@ nfl_forward_SelfAttention:
     movl    $16, %r10d
     cmpq    %r10, %rbx
     jge     .Lmm4d_i_end_0_1
-    movq    $0, %r9
+    movq    $0, %rbp
 .Lmm4d_j_0_1:
     movl    $16, %r10d
-    cmpq    %r10, %r9
+    cmpq    %r10, %rbp
     jge     .Lmm4d_j_end_0_1
     xorps   %xmm0, %xmm0
     movq    $0, %r11
@@ -218,7 +218,7 @@ nfl_forward_SelfAttention:
     movl    $16, %r10d
     movq    %r11, %rax
     imulq   %r10, %rax
-    addq    %r9, %rax
+    addq    %rbp, %rax
     movss   (%r13, %rax, 4), %xmm2
     mulss   %xmm2, %xmm1
     addss   %xmm1, %xmm0
@@ -228,9 +228,9 @@ nfl_forward_SelfAttention:
     movl    $16, %r10d
     movq    %rbx, %rax
     imulq   %r10, %rax
-    addq    %r9, %rax
+    addq    %rbp, %rax
     movss   %xmm0, (%r14, %rax, 4)
-    addq    $1, %r9
+    addq    $1, %rbp
     jmp     .Lmm4d_j_0_1
 .Lmm4d_j_end_0_1:
     addq    $1, %rbx
