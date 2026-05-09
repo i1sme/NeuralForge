@@ -371,7 +371,7 @@ fn classify_op(
         StdOp::Softmax => Ok(()),
         StdOp::Matmul => Ok(()),
         StdOp::MulScalar => Ok(()),
-        StdOp::Add => Ok(()), // M13: codegen lands in Task 4 (x86_64)
+        StdOp::Add => Ok(()), // M13 placeholder: walk_model returns UnsupportedOp until Task 4 lands emit_add (intentional classify→walk gap during the multi-task rollout)
         #[allow(unreachable_patterns)]
         _ => Err(LowerError::UnsupportedOp {
             op: format!("{op}"),
