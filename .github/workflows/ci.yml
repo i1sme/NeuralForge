@@ -47,7 +47,7 @@ jobs:
         # M13 PR temporary: --test-threads=1 to identify which integration
         # test SIGSEGVs on Linux x86_64 (parallel runs hide the crasher).
         # Revert this once the bug is identified and fixed.
-        run: cargo test --workspace -- --test-threads=1
+        run: cargo test --workspace -- --test-threads=1 --nocapture
 
   integration:
     name: Integration (macos-14, arm64)
