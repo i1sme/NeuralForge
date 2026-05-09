@@ -32,16 +32,20 @@
 //!   prologue when `compute_callee_saved` returns true (= `model.calls_extern_math() OR has_matmul(model)`,
 //!   per `buffer.rs`).
 //!
-//! At N=3 the non-ABI caller-saved scratch shrinks to `%rax`, `%r10`,
-//! `%r11`, `%r9` = 4 registers — insufficient for the 9 register-roles
-//! a matmul kernel needs (3 base ptrs, 3 slice ptrs, 3 counters). The
-//! rework therefore uses **callee-saved registers** as long-lived
+//! At N=3 the non-ABI caller-saved scratch is `%rax`, `%r10`, `%r11`
+//! — three registers. (`%r9` is non-ABI at N=3 but is short-lived in
+//! the body, used only inside arithmetic sequences that immediately
+//! consume it.) Three caller-saved registers are insufficient for the
+//! 9 long-lived register-roles a matmul kernel needs (3 base ptrs,
+//! 3 slice ptrs, 3 counters held across the full inner-loop lifetime).
+//! The rework therefore uses **callee-saved registers** as long-lived
 //! scratch (option β per the spec §10.2 amendment's "register-cascade-
 //! induced changes" relaxation), with base pointers spilled to
 //! caller-saved `%xmm6`/`%xmm7`/`%xmm8` and reloaded into GPRs once
-//! at entry.
+//! at entry. M13 added one further callee-saved consumer: `%rbp` for
+//! the j-counter (see table below).
 //!
-//! ## Register layout (M12)
+//! ## Register layout (M12 → M13 rework)
 //!
 //! | Role               | Reg     | Lifetime               |
 //! |--------------------|---------|------------------------|
@@ -190,7 +194,7 @@ pub fn emit_matmul(
 
     // Inner j-loop ([0, N)). Counter %rbp (callee-saved by function-level
     // prologue; no op-emitter inside the body reads it. Replaces M12's
-    // %r9 which collided with output_reg() at N=4.).
+    // %r9 which collided with output_reg() at N=4.)
     s.push_str("    movq    $0, %rbp\n");
     s.push_str(&format!(".Lmm4d_j_{mid}:\n"));
     s.push_str(&emit_imm32_to_r10(n as u32));
