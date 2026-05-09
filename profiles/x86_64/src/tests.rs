@@ -1417,39 +1417,52 @@ fn emit_add_x86_64_emits_two_loads_one_addss_one_store() {
 }
 
 #[test]
-fn emit_add_x86_64_uses_rbp_counter_no_pushq_no_rcx_clobber() {
+fn emit_add_x86_64_uses_rbp_counter_no_pushq_no_abi_clobber() {
     use crate::abi::AbiContext;
     use crate::buffer::BufferLoc;
-    // At N=2, %rcx = output_reg. emit_add must NOT clobber %rcx.
-    let abi = AbiContext { n_inputs: 2 };
-    let asm = crate::ops::add::emit_add(
-        &abi,
-        16,
-        0,
-        0,
-        BufferLoc::InputReg(0),
-        BufferLoc::InputReg(1),
-        BufferLoc::OutputReg,
-    );
-    // Counter init goes to %rbp.
-    assert!(
-        asm.contains("movq    $0, %rbp\n"),
-        "expected counter init in %rbp; got:\n{asm}"
-    );
-    // No pushq/popq — %rbp is already saved by function-level prologue.
-    assert!(
-        !asm.contains("pushq"),
-        "emit_add must not pushq inside body (rbp is preserved by prologue); got:\n{asm}"
-    );
-    assert!(
-        !asm.contains("popq"),
-        "emit_add must not popq inside body; got:\n{asm}"
-    );
-    // %rcx (ABI at N=2) is not written.
-    assert!(
-        !asm.contains(", %rcx\n"),
-        "emit_add must not write to %rcx (ABI register at N≥2); got:\n{asm}"
-    );
+    // emit_add must preserve all ABI argument registers across its body
+    // (M12 §9.1 invariant — downstream emitters re-read input/params/output
+    // from those registers). %rbp is callee-saved by the function-level
+    // prologue and unread by op bodies, so emit_add uses it as the counter.
+    //
+    // Cover the full N ∈ [2, 4] range; at each arity, output_reg lands on
+    // a different ABI register (%rcx at N=2, %r8 at N=3, %r9 at N=4) so the
+    // "no ABI clobber" invariant must hold across all of them.
+    for n_inputs in [2, 3, 4] {
+        let abi = AbiContext { n_inputs };
+        let asm = crate::ops::add::emit_add(
+            &abi,
+            16,
+            0,
+            0,
+            BufferLoc::InputReg(0),
+            BufferLoc::InputReg(1),
+            BufferLoc::OutputReg,
+        );
+        // Counter init goes to %rbp.
+        assert!(
+            asm.contains("movq    $0, %rbp\n"),
+            "N={n_inputs}: expected counter init in %rbp; got:\n{asm}"
+        );
+        // No pushq/popq — %rbp is already saved by function-level prologue.
+        assert!(
+            !asm.contains("pushq"),
+            "N={n_inputs}: emit_add must not pushq inside body; got:\n{asm}"
+        );
+        assert!(
+            !asm.contains("popq"),
+            "N={n_inputs}: emit_add must not popq inside body; got:\n{asm}"
+        );
+        // No ABI argument register is written across N ∈ [2, 4]. Tracks
+        // INPUT_REGS = [%rdi, %rsi, %rdx, %rcx, %r8, %r9]; the first
+        // n_inputs+2 are reserved at each arity.
+        for reg in &["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"] {
+            assert!(
+                !asm.contains(&format!(", {reg}\n")),
+                "N={n_inputs}: emit_add must not write to ABI register {reg}; got:\n{asm}"
+            );
+        }
+    }
 }
 
 #[test]

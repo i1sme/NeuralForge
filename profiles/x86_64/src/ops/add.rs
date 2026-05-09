@@ -23,8 +23,8 @@
 //! j-counter at N=4. Both choices share the rationale: the prologue
 //! already saves `%rbp`, no per-op save/restore needed.
 //!
-//! No FFI save/restore (no `bl _expf` / `call expf@PLT`). No additional
-//! callee-saved register usage beyond `%rbp` (already saved).
+//! No FFI save/restore (no `call expf@PLT`). No additional callee-saved
+//! register usage beyond `%rbp` (already saved).
 
 use crate::abi::AbiContext;
 use crate::buffer::BufferLoc;
