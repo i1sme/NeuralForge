@@ -67,11 +67,30 @@ use crate::buffer::BufferLoc;
 use compiler::ast::Span;
 use profile_api::LowerError;
 
+/// Bytes pushed to stack by the op-local callee-saved save block when affine
+/// is enabled (4 pushq: %r12, %r13, %rbx, %r14).
+///
+/// MUST equal 8 × number of `pushq` instructions emitted in the affine save
+/// block of `emit_layernorm`. If a future change adds/removes a pushq without
+/// updating this constant, `materialise_ptr_with_rsp_bias`'s debug_assert will
+/// fire — the address compensation depends on this number being exact.
+const OP_LOCAL_PUSH_BYTES_AFFINE: usize = 4 * 8;
+
+/// Bytes pushed to stack by the op-local callee-saved save block when affine
+/// is disabled (2 pushq: %rbx, %r14). Same invariant as the affine const —
+/// keep in sync with the actual push count in `emit_layernorm`.
+const OP_LOCAL_PUSH_BYTES_NO_AFFINE: usize = 2 * 8;
+
 /// Materialise a `BufferLoc` into `dst_reg`, with `rsp_bias_bytes` added to
 /// stack-relative offsets to compensate for op-local `pushq` instructions
 /// that have decremented `%rsp` since the function-frame base. For non-stack
 /// locations (`InputReg`/`OutputReg`), delegates to `abi.materialise_ptr`
 /// (no bias needed — those use ABI argument registers, not `%rsp`).
+///
+/// `rsp_bias_bytes` MUST match one of the two `OP_LOCAL_PUSH_BYTES_*` consts
+/// — guarded by debug_assert so a divergence between push count and bias
+/// fires loudly in dev/test rather than producing silent buffer-address
+/// corruption.
 fn materialise_ptr_with_rsp_bias(
     abi: &AbiContext,
     loc: BufferLoc,
@@ -79,6 +98,16 @@ fn materialise_ptr_with_rsp_bias(
     rsp_bias_bytes: usize,
     s: &mut String,
 ) {
+    debug_assert!(
+        rsp_bias_bytes == OP_LOCAL_PUSH_BYTES_AFFINE
+            || rsp_bias_bytes == OP_LOCAL_PUSH_BYTES_NO_AFFINE,
+        "rsp_bias_bytes ({}) must match one of the OP_LOCAL_PUSH_BYTES_* consts \
+         (affine={}, no-affine={}). If push count in emit_layernorm changed, \
+         update the const to match.",
+        rsp_bias_bytes,
+        OP_LOCAL_PUSH_BYTES_AFFINE,
+        OP_LOCAL_PUSH_BYTES_NO_AFFINE,
+    );
     match loc {
         BufferLoc::StackOffset(n) => {
             let adjusted = n + rsp_bias_bytes;
@@ -130,7 +159,11 @@ pub fn emit_layernorm(
     // intended buffer address we must add `op_local_push_bytes` to N. Pre-fix,
     // this adjustment was missing → silent buffer-address corruption when
     // src_loc / dst_loc was a StackOffset (e.g. pre_ln_block fixture).
-    let op_local_push_bytes = if has_affine { 4 * 8 } else { 2 * 8 };
+    let op_local_push_bytes = if has_affine {
+        OP_LOCAL_PUSH_BYTES_AFFINE
+    } else {
+        OP_LOCAL_PUSH_BYTES_NO_AFFINE
+    };
     if has_affine {
         s.push_str("    pushq   %r12\n");
         s.push_str("    pushq   %r13\n");
