@@ -1857,7 +1857,7 @@ fn emit_add_abi_clean_at_n4() {
 // post-fix invariants on that body.
 
 #[cfg(test)]
-fn emit_linear_direct(n_inputs: usize, bias: bool) -> String {
+fn emit_linear_at(n_inputs: usize, bias: bool) -> String {
     use crate::abi::AbiContext;
     use compiler::PostOp;
     let abi = AbiContext { n_inputs };
@@ -1914,7 +1914,7 @@ fn emit_linear_n2_with_bias_does_not_alias_output_reg_in_body() {
     // matmul body (between `.Lmm_i_` and `.Lmm_i_end_` labels), assert
     // post-fix invariants on the body.
 
-    let asm = emit_linear_direct(2, true);
+    let asm = emit_linear_at(2, true);
     let body = extract_linear_matmul_body(&asm);
 
     // Pre-fix marker — must NOT appear:
@@ -1943,7 +1943,7 @@ fn emit_linear_n3_does_not_clobber_output_reg() {
     // LH-2 regression guard.
     //
     // Pre-fix: at N=3, output_reg = %r8 (INPUT_REGS[4]). emit_linear's
-    // src_ptr materialise wrote to %r8 (line 90), destroying the FFI
+    // src_ptr materialise wrote to %r8 (via materialise_ptr call), destroying the FFI
     // output_reg. Subsequent ops in the same function would see a
     // garbage output pointer.
     //
@@ -1951,7 +1951,7 @@ fn emit_linear_n3_does_not_clobber_output_reg() {
     // op-local pushq/popq inside emit_linear body — function-level
     // prologue unchanged).
 
-    let asm = emit_linear_direct(3, false);
+    let asm = emit_linear_at(3, false);
     let body = extract_linear_matmul_body(&asm);
 
     // Pre-fix marker — must NOT appear. At N=3, output_reg = %r8;
@@ -1989,14 +1989,14 @@ fn emit_linear_n4_does_not_clobber_output_reg() {
     // LH-3 regression guard.
     //
     // Pre-fix: at N=4, output_reg = %r9 (INPUT_REGS[5]). emit_linear's
-    // weight base setup (lines 95-101) wrote to %r9, destroying the FFI
+    // weight base setup (via movq/leaq into %r9) wrote to %r9, destroying the FFI
     // output_reg.
     //
     // Post-fix: weight ptr scratch relocated to %r15 (callee-saved per
     // SysV; op-local pushq/popq inside emit_linear body — function-level
     // prologue unchanged).
 
-    let asm = emit_linear_direct(4, false);
+    let asm = emit_linear_at(4, false);
     let body = extract_linear_matmul_body(&asm);
 
     // Pre-fix marker — must NOT appear. At N=4, output_reg = %r9; the
@@ -2016,5 +2016,290 @@ fn emit_linear_n4_does_not_clobber_output_reg() {
     assert!(
         asm.contains("    pushq   %r15\n") && asm.contains("    popq    %r15\n"),
         "op-local pushq/popq %r15 must bracket the body. Asm:\n{asm}"
+    );
+}
+
+// ── emit_layernorm ──────────────────────────────────────────────────────────
+
+#[cfg(test)]
+fn emit_layernorm_x86_64_at(n_inputs: usize, has_affine: bool) -> String {
+    use crate::abi::AbiContext;
+    use compiler::ast::Span;
+    let abi = AbiContext { n_inputs };
+    let (gamma_offset, beta_offset) = if has_affine {
+        (Some(0usize), Some(32usize))
+    } else {
+        (None, None)
+    };
+    crate::ops::emit_layernorm(
+        &abi,
+        /* b */ 8,
+        /* d */ 32,
+        /* model_idx */ 0,
+        /* layernorm_idx */ 0,
+        /* src_loc */ BufferLoc::InputReg(0),
+        /* dst_loc */ BufferLoc::OutputReg,
+        gamma_offset,
+        beta_offset,
+        Span::new(1, 1),
+    )
+    .expect("emit succeeds")
+}
+
+#[test]
+fn emit_layernorm_x86_64_abi_clean_at_n1_no_affine() {
+    let abi = crate::abi::AbiContext { n_inputs: 1 };
+    let asm = emit_layernorm_x86_64_at(1, false);
+    assert_emit_abi_clean("emit_layernorm", &asm, &abi);
+}
+
+#[test]
+fn emit_layernorm_x86_64_abi_clean_at_n1_with_affine() {
+    let abi = crate::abi::AbiContext { n_inputs: 1 };
+    let asm = emit_layernorm_x86_64_at(1, true);
+    assert_emit_abi_clean("emit_layernorm", &asm, &abi);
+}
+
+#[test]
+fn emit_layernorm_x86_64_abi_clean_at_n2_no_affine() {
+    let abi = crate::abi::AbiContext { n_inputs: 2 };
+    let asm = emit_layernorm_x86_64_at(2, false);
+    assert_emit_abi_clean("emit_layernorm", &asm, &abi);
+}
+
+#[test]
+fn emit_layernorm_x86_64_abi_clean_at_n2_with_affine() {
+    let abi = crate::abi::AbiContext { n_inputs: 2 };
+    let asm = emit_layernorm_x86_64_at(2, true);
+    assert_emit_abi_clean("emit_layernorm", &asm, &abi);
+}
+
+// ---- M14 Task 3: emit_layernorm x86_64 unit tests ----------------------------
+
+#[test]
+fn emit_layernorm_x86_64_no_affine_emits_three_passes_with_native_sqrtss() {
+    use crate::abi::AbiContext;
+    use crate::buffer::BufferLoc;
+    use compiler::ast::Span;
+
+    let abi = AbiContext { n_inputs: 1 };
+    let asm = crate::ops::emit_layernorm(
+        &abi,
+        8,
+        32,
+        0,
+        0,
+        BufferLoc::InputReg(0),
+        BufferLoc::OutputReg,
+        None,
+        None,
+        Span::new(1, 1),
+    )
+    .expect("no-affine emit should succeed");
+
+    // Three pass labels.
+    assert!(asm.matches(".Lln_p1_").count() >= 2);
+    assert!(asm.matches(".Lln_p2_").count() >= 2);
+    assert!(asm.matches(".Lln_p3_").count() >= 2);
+
+    // Native sqrtss — no `call sqrtf@PLT`.
+    assert!(asm.contains("sqrtss"));
+    assert!(!asm.contains("sqrtf@PLT"));
+    assert!(
+        !asm.contains("    call    "),
+        "leaf function — no `call` instruction"
+    );
+
+    // divss for inv_std reciprocal — exactly one, OUTSIDE Pass 3.
+    // Use "\n.Lln_p3_end_" to find the actual end LABEL, not the `jge`
+    // branch-target substring that appears inside the loop body earlier.
+    let p3_label = asm.find(".Lln_p3_").expect("Pass 3 label");
+    let p3_end = asm
+        .find("\n.Lln_p3_end_")
+        .expect("Pass 3 end label (newline-prefixed to skip branch target)");
+    let p3_body = &asm[p3_label..p3_end];
+    assert!(
+        !p3_body.contains("divss"),
+        "Pass 3 hot loop must contain ZERO divss (Q4 constraint); body:\n{p3_body}"
+    );
+
+    // Always-present op-local saves for src/dst base ptrs (callee-saved per SysV).
+    assert!(
+        asm.contains("pushq   %rbx") && asm.contains("popq    %rbx"),
+        "no-affine path must still push %rbx for src base ptr scratch"
+    );
+    assert!(
+        asm.contains("pushq   %r14") && asm.contains("popq    %r14"),
+        "no-affine path must still push %r14 for dst base ptr scratch"
+    );
+    // Affine-only saves must NOT appear in no-affine path:
+    assert!(
+        !asm.contains("pushq   %r12"),
+        "no-affine must not push %r12 (γ ptr)"
+    );
+    assert!(
+        !asm.contains("pushq   %r13"),
+        "no-affine must not push %r13 (β ptr)"
+    );
+}
+
+#[test]
+fn emit_layernorm_x86_64_affine_emits_gamma_beta_loads_and_callee_saved_pushes() {
+    use crate::abi::AbiContext;
+    use crate::buffer::BufferLoc;
+    use compiler::ast::Span;
+
+    let abi = AbiContext { n_inputs: 1 };
+    let asm = crate::ops::emit_layernorm(
+        &abi,
+        /* b = */ 8,
+        /* d = */ 32,
+        /* model_idx = */ 0,
+        /* layernorm_idx = */ 0,
+        BufferLoc::InputReg(0),
+        BufferLoc::OutputReg,
+        /* gamma_offset = */ Some(0),
+        /* beta_offset = */ Some(32), // β follows γ at offset 32 floats
+        Span::new(1, 1),
+    )
+    .expect("affine emit should succeed");
+
+    // Op-local callee-saved push/pop for affine path — must bracket the body.
+    assert!(
+        asm.contains("    pushq   %r12\n"),
+        "affine path must push %r12 (op-local save of γ base ptr). Asm:\n{asm}"
+    );
+    assert!(
+        asm.contains("    pushq   %r13\n"),
+        "affine path must push %r13 (op-local save of β base ptr). Asm:\n{asm}"
+    );
+    assert!(
+        asm.contains("    popq    %r12\n"),
+        "affine path must pop %r12 (matching restore). Asm:\n{asm}"
+    );
+    assert!(
+        asm.contains("    popq    %r13\n"),
+        "affine path must pop %r13 (matching restore). Asm:\n{asm}"
+    );
+
+    // Pass 3 must contain γ and β loads from %r12 and %r13.
+    // Use "\n.Lln_p3_end_" to find the actual end LABEL, not the `jge`
+    // branch-target substring that appears inside the loop body earlier.
+    let p3_label = asm.find(".Lln_p3_").expect("Pass 3 label");
+    let p3_end = asm
+        .find("\n.Lln_p3_end_")
+        .expect("Pass 3 end label (newline-prefixed to skip branch target)");
+    let p3_body = &asm[p3_label..p3_end];
+
+    assert!(
+        p3_body.contains("movss   (%r12, "),
+        "Pass 3 must load γ_j from %r12 base; body:\n{p3_body}"
+    );
+    assert!(
+        p3_body.contains("movss   (%r13, "),
+        "Pass 3 must load β_j from %r13 base; body:\n{p3_body}"
+    );
+    assert!(
+        p3_body.contains("mulss"),
+        "Pass 3 affine must include γ multiply (mulss)"
+    );
+    assert!(
+        p3_body.contains("addss"),
+        "Pass 3 affine must include β add (addss)"
+    );
+
+    // Q4 constraint persists in affine path — Pass 3 hot loop has zero divss.
+    assert!(
+        !p3_body.contains("divss"),
+        "Pass 3 hot loop must contain ZERO divss (Q4 constraint). Body:\n{p3_body}"
+    );
+}
+
+#[test]
+fn emit_layernorm_x86_64_does_not_extend_function_level_callee_saved_set() {
+    // The op-local %r12/%r13 push/pop lives entirely inside emit_layernorm's
+    // emitted asm. compute_callee_saved (in buffer.rs) must NOT report
+    // callee_saved_int == true for a LayerNorm-only function — the function-
+    // level prologue should NOT push the 5-register callee-saved block.
+    // (M13 pre-Task-5 arm64 emit_linear stp/ldp precedent applied to x86_64.)
+    //
+    // Two-pronged check:
+    //   1. compute_callee_saved returns callee_saved_int=false (analyzer level).
+    //   2. The full lowered asm contains the op-local pushq %r12/%r13 (body
+    //      level), but the function prologue block (up to the first pushq from
+    //      emit_layernorm) is only "pushq %rbp; movq %rsp, %rbp" — no 5-reg block.
+    let nfl_src = "model M [b=2, d=4]:\n    x: Tensor[b, d]\n    x -> layernorm[affine=true]\n";
+    let ast = compiler::parse(nfl_src).expect("parse");
+    let uir = compiler::ir::build(&ast).expect("ir::build");
+    let model = &uir.models[0];
+
+    // Prong 1: analyzer must not trigger callee-saved-int promotion.
+    let regs = compute_callee_saved(model);
+    assert!(
+        !regs.contains_callee_saved_int(),
+        "compute_callee_saved must return callee_saved_int=false for LayerNorm-only model; \
+         function-level prologue should not push %rbx/%r12-%r15"
+    );
+
+    // Prong 2: full asm contains op-local pushq %r12/%r13 from emit_layernorm body.
+    let asm = crate::X86_64Profile.lower(&uir).expect("lower").source;
+    assert!(
+        asm.contains("    pushq   %r12\n"),
+        "Op-local pushq %r12 must appear in full asm (from emit_layernorm body). Asm:\n{asm}"
+    );
+    assert!(
+        asm.contains("    pushq   %r13\n"),
+        "Op-local pushq %r13 must appear in full asm (from emit_layernorm body). Asm:\n{asm}"
+    );
+    // The function-level prologue (per asm.rs::format_function_prologue with
+    // callee_saved_int=false) emits only: pushq %rbp + movq %rsp, %rbp.
+    // Verify the 5-register block (%rbx, %r12, %r13, %r14, %r15) is absent
+    // from the top of the asm (before the first emit_layernorm label).
+    let body_start = asm
+        .find(".Lln_row_")
+        .expect("outer row loop label must exist");
+    // The function header is everything before the outer row loop. The op-local
+    // pushes appear between the function entry and .Lln_row_ — that is expected
+    // and correct. What must NOT appear: "pushq   %rbx\n    pushq   %r12\n" as
+    // the function-level 5-register block. Check absence of the %r15 push
+    // (last in the 5-reg block) in the header section.
+    let header = &asm[..body_start];
+    assert!(
+        !header.contains("    pushq   %r15\n"),
+        "Function-level prologue must NOT push %r15 (callee-saved 5-reg block absent). \
+         Header:\n{header}"
+    );
+}
+
+#[test]
+fn emit_layernorm_x86_64_affine_allocates_scale_before_bias_in_params_layout() {
+    // ParamSlot order contract: γ (LayerNormScale) must appear before β
+    // (LayerNormBias) in params_layout. Mirrors arm64's ParamSlot order test.
+    use crate::ParamKind;
+    let nfl_src = "model M [b=2, d=4]:\n    x: Tensor[b, d]\n    x -> layernorm[affine=true]\n";
+    let ast = compiler::parse(nfl_src).expect("parse should succeed");
+    let uir = compiler::ir::build(&ast).expect("ir::build should succeed");
+
+    let asm = crate::X86_64Profile
+        .lower(&uir)
+        .expect("lower should succeed");
+
+    let sig = &asm.functions[0];
+    let scale_idx = sig
+        .params_layout
+        .iter()
+        .position(|s| s.kind == ParamKind::LayerNormScale)
+        .expect("LayerNormScale must be in params_layout when affine=true");
+    let bias_idx = sig
+        .params_layout
+        .iter()
+        .position(|s| s.kind == ParamKind::LayerNormBias)
+        .expect("LayerNormBias must be in params_layout when affine=true");
+
+    assert!(
+        scale_idx < bias_idx,
+        "Contract violation: γ (LayerNormScale at idx {scale_idx}) must come before \
+         β (LayerNormBias at idx {bias_idx}) in params_layout. Layout: {:?}",
+        sig.params_layout
     );
 }

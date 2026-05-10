@@ -40,3 +40,23 @@ fn all_negative_fixtures_reject() {
         );
     }
 }
+
+/// M14 negative fixture: layernorm on rank-1 input must be rejected at IR
+/// build with a ShapeMismatch error (detail contains "rank too low").
+///
+/// Mirrors the Softmax precedent: rank check fires before any profile sees
+/// the node, so this test lives in compiler/tests/ (not profile-negative/).
+#[test]
+fn layernorm_rank_too_low_rejected_at_ir_build() {
+    let src = fs::read_to_string("../tests/fixtures/negative/layernorm_rank_too_low.nfl")
+        .expect("layernorm_rank_too_low.nfl fixture missing");
+
+    let ast = compiler::parse(&src).expect("parse must succeed (syntax is valid)");
+    let err = compiler::ir::build(&ast).expect_err("rank-1 layernorm must be rejected at IR build");
+
+    let err_str = format!("{err}");
+    assert!(
+        err_str.contains("rank too low"),
+        "expected error message to contain 'rank too low'; got: {err_str}"
+    );
+}

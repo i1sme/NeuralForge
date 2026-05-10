@@ -68,6 +68,7 @@ NeuralForge/
 │   │   │   ├── ops/
 │   │   │   │   ├── mod.rs        ← per-op submodule entry + re-exports
 │   │   │   │   ├── add.rs        ← emit_add (elementwise tensor add, M13)
+│   │   │   │   ├── layernorm.rs  ← emit_layernorm (3-pass mean/var/normalize, optional affine, native fsqrt; M14)
 │   │   │   │   ├── linear.rs     ← emit_linear (matmul ± bias) + materialise_ptr
 │   │   │   │   ├── matmul.rs     ← emit_matmul (rank ≥ 2, optional transpose_b, M10; scratch rework M12)
 │   │   │   │   ├── mulscalar.rs  ← emit_mulscalar (scalar pre-load + flat loop, M10)
@@ -81,7 +82,7 @@ NeuralForge/
 │   └── x86_64/             ← Linux ELF scalar SSE2 codegen profile, M9
 │       └── src/
 │           ├── abi.rs      ← AbiContext (SysV AMD64 variant, M12)
-│           └── ops/        ← add.rs (M13), linear.rs, matmul.rs (M10; callee-saved scratch rework M12; %rbp j-counter fix M13), mulscalar.rs (M10), relu.rs, softmax.rs, dropout.rs
+│           └── ops/        ← add.rs (M13), layernorm.rs (M14; 3-pass SysV native sqrtss, op-local %r12/%r13 for affine), linear.rs, matmul.rs (M10; callee-saved scratch rework M12; %rbp j-counter fix M13), mulscalar.rs (M10), relu.rs, softmax.rs, dropout.rs
 │
 ├── language/
 │   ├── grammar.ebnf        ← formal NFL grammar
@@ -177,13 +178,13 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-**Milestone 13 complete. 400 tests passing on macOS arm64 (~404 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean
+**Milestone 14 complete. 441 tests passing on macOS arm64 (~444 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean
 (`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo fmt --all -- --check`, `cargo test --workspace`).
 
-M13 closed the x86_64 N=4 + matmul gap (j-counter relocated from `%r9` to `%rbp`) and shipped `StdOp::Add` (first A2 brick — residual connections). NFL surface `a -> add[skip]`. Both profiles ship `emit_add` (flat elementwise loop) reusing the `%rbp` scratch trick. Pre-Task-5 fix also closed an arm64 `emit_linear` ABI register clobber for N≥2 (stp/ldp save/restore of x3/x4/x5). Three new fixtures.
+M14 closed the A2 second brick (`StdOp::LayerNorm`) and the LH-1/2/3 latent hazard cleanup in x86_64 `emit_linear` (opener commit `916e9c7`). LayerNorm is a single StdOp variant with internal 3-pass codegen (mean → variance + inv_std → normalize + optional affine). Native `fsqrt`/`sqrtss` — no libm dependency added. NFL surface `x -> layernorm` or `x -> layernorm[affine=true]`. LH-4 logged for x86_64 N=3..4 deferral. Four new fixtures including `pre_ln_block.nfl` (N=2 transformer block, validates LH-1 closure end-to-end).
 
-Strategic direction: see `PROJECT_SPEC.md` §"Strategic Roadmap" — A1 closed M12, A2 first brick (`add`) closed M13; A2 LayerNorm + FFN remain in M14+. Trigger-driven cleanup (OQ-7, OQ-8, OQ-9, M5c OQ-4) stays dormant.
+Strategic direction: see `PROJECT_SPEC.md` §"Strategic Roadmap" — A1 closed M12, A2 first brick (`add`) closed M13, A2 second brick (`layernorm`) closed M14. A2 third brick FFN (`linear → relu → linear`) remains in M15+. Trigger-driven cleanup (OQ-7, OQ-8, OQ-9, M5c OQ-4) stays dormant.
 
 ---
 

@@ -50,13 +50,22 @@ pub struct ParamSlot {
 }
 
 /// Type tag for a `ParamSlot`. `#[non_exhaustive]` keeps the door open
-/// for future kinds (e.g. `LayerNormScale`) without breaking match arms
-/// in downstream crates.
+/// for future kinds without breaking match arms in downstream crates.
+/// (M14 added LayerNormScale + LayerNormBias.)
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamKind {
     LinearWeight,
     LinearBias,
+    /// M14: LayerNorm γ scale parameter, shape `[input.last_dim]`.
+    /// MUST be pushed before LayerNormBias in `params_layout` — order
+    /// is contract; Pass 3 emitter reads γ then β by `find` on
+    /// `(kind, origin_node)`. Mirror of LinearWeight / LinearBias
+    /// ordering.
+    LayerNormScale,
+    /// M14: LayerNorm β bias parameter, shape `[input.last_dim]`.
+    /// MUST be pushed AFTER LayerNormScale (see LayerNormScale doc).
+    LayerNormBias,
 }
 
 /// Errors that can occur during lowering.

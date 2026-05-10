@@ -16,7 +16,7 @@ mod tests;
 pub(crate) mod test_utils;
 
 pub use error::{BuildError, BuildErrorKind};
-pub use stdlib::{linear_has_bias, ArgSlot, ArgType, Signature, StdOp};
+pub use stdlib::{layernorm_has_affine, linear_has_bias, ArgSlot, ArgType, Signature, StdOp};
 pub use types::{AttrValue, Node, NodeId, NodeKind, OpAttr, PostOp, Shape, Type, Uir, UirModel};
 
 pub use build::build;

@@ -1,0 +1,13 @@
+# layernorm_no_affine.nfl — minimal N=1 no-affine LayerNorm fixture.
+#
+# N=1 minimal sanity: single input, no affine. Validates the bare
+# `layernorm` surface form (no params allocated for γ/β).
+#
+# ABI slot layout (declaration order):
+#   N=1: x (x0/%rdi), params (x1/%rsi, empty), out (x2/%rdx).
+#   Params blob is zero floats — pointer passed but never read.
+
+model LayerNormNoAffine [batch=2, dim=4]:
+    x: Tensor[batch, dim]
+
+    x -> layernorm

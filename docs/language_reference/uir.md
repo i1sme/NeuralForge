@@ -119,14 +119,17 @@ n1: linear           :: Tensor[8, 16]    operands=[n0]    attrs=[out_dim=16, bia
 
 ## 4. Stdlib operations (v0.1)
 
-Four operations are recognised:
+Six operations are recognised:
 
-| StdOp     | Signature                                                                | Output shape                       |
-|-----------|--------------------------------------------------------------------------|-------------------------------------|
-| `Linear`  | positional `out_dim: Integer` (required), named `bias: Symbol` (optional) | `Tensor[input.batch, out_dim]`     |
-| `Relu`    | no args                                                                  | input shape (elementwise)          |
-| `Dropout` | named `rate: Float` (required, must be `0..=1`)                          | input shape (elementwise)          |
-| `Softmax` | no args                                                                  | input shape (elementwise)          |
+| StdOp       | Signature                                                                | Output shape                       |
+|-------------|--------------------------------------------------------------------------|-------------------------------------|
+| `Linear`    | positional `out_dim: Integer` (required), named `bias: Symbol` (optional) | `Tensor[input.batch, out_dim]`    |
+| `Relu`      | no args                                                                  | input shape (elementwise)          |
+| `Dropout`   | named `rate: Float` (required, must be `0..=1`)                          | input shape (elementwise)          |
+| `Softmax`   | no args                                                                  | input shape (elementwise)          |
+| `Matmul`    | positional `other: Tensor` (required), named `transpose_b: Symbol` (optional) | `Tensor[..., M, N]` (see §8) |
+| `Add`       | positional `other: Tensor` (required); no named args                     | input shape (strict equality check) |
+| `LayerNorm` | named `affine: Symbol` (optional)                                        | input shape (identity)             |
 
 Adding a new op = new `StdOp` variant + new arms in `signature()` and
 `infer_output_shape()` in `compiler/src/ir/stdlib.rs`.
@@ -287,7 +290,55 @@ any per-op hardcoding of register names.
 
 ---
 
-## 9. What v0.1 doesn't have
+## 9. StdOp::LayerNorm (M14)
+
+Layer normalization added in M14. UIR-level description:
+
+**Input arity:** 1 (the tensor to normalize).
+
+**Attrs:** optional `affine: Symbol`. `Symbol("true")` enables learnable
+affine transform (γ scale + β bias). Any other value, or absent, gives
+no-affine. Resolved by `compiler::ir::layernorm_has_affine(attrs)`.
+
+**Output shape:** identity — same shape as input. `infer_output_shape`
+returns `input.ty.clone()`.
+
+**Validation:** input rank must be ≥ 2. Fails with `BuildErrorKind::RankTooLow`
+at UIR build time. This is a design constraint mirroring `softmax`, not a
+mathematical limit (`layernorm` over rank-1 is arithmetically meaningful but
+excluded from v0.1 scope to keep the batch-of-rows codegen model uniform).
+
+**Params (when affine=true):** two `ParamSlot` entries are allocated in the
+params blob, in this order:
+
+1. `LayerNormScale` (γ) — size = `last_dim`. Scale applied per-element.
+2. `LayerNormBias` (β) — size = `last_dim`. Bias added per-element.
+
+**γ-before-β order is a contract.** Callers packing a model checkpoint into
+the params blob must write γ at the lower offset and β immediately after.
+The emit_layernorm body on both profiles loads γ first (lower offset) and β
+second (higher offset) — no runtime order negotiation.
+
+**Codegen:** 3-pass per-row kernel on both profiles:
+
+1. **Pass 1 — mean:** `μ = (1/D) · Σ xⱼ` (accumulated sum × hoisted inv_d).
+2. **Pass 2 — variance + inv_std:** `σ² = (1/D) · Σ (xⱼ − μ)²`; then
+   `inv_std = 1.0 / sqrt(σ² + ε)`. The `ε = 1e-5` guard is a compile-time
+   constant; `inv_std` is held in a register across Pass 3 (not recomputed
+   per element).
+3. **Pass 3 — normalize + optional affine:** `yⱼ = (xⱼ − μ) · inv_std`;
+   if affine: `yⱼ = yⱼ · γⱼ + βⱼ`.
+
+Native sqrt (`fsqrt` on arm64, `sqrtss` on x86_64) — no libm call. Leaf
+function on both profiles at N=1..2. See profile guides for register plans.
+
+**Display:** renders as `layernorm` in `--uir` compact form; with
+`attrs=[affine=true]` when the affine attr is present, exactly mirroring the
+`linear` rendering pattern.
+
+---
+
+## 10. What v0.1 doesn't have
 
 Listed here so contributors don't accidentally rely on absent features:
 
@@ -307,3 +358,6 @@ Listed here so contributors don't accidentally rely on absent features:
   hand-rolled formatter is single-line, monochrome. v0.2+ may upgrade.
 - **Custom operations.** No syntax for declaring user-defined ops. v0.2+.
 - **Training syntax** (loss, optimiser). NFL v0.1 is inference-only.
+- **Tunable eps or reduction axis for LayerNorm.** `eps = 1e-5` and
+  last-axis reduction are compile-time constants in v0.1. Tunable variants
+  deferred to quantisation milestones.

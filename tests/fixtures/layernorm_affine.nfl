@@ -1,0 +1,13 @@
+# layernorm_affine.nfl — N=1 LayerNorm with affine (γ/β) fixture.
+#
+# N=1 with affine. Validates γ/β param allocation, Pass 3 affine
+# multiply-add path, ParamSlot order contract (γ before β).
+#
+# ABI slot layout:
+#   N=1 + params: x (x0/%rdi), params (x1/%rsi), out (x2/%rdx).
+#   Params blob: γ (4 floats) followed by β (4 floats) = 8 floats total.
+
+model LayerNormAffine [batch=2, dim=4]:
+    x: Tensor[batch, dim]
+
+    x -> layernorm[affine=true]

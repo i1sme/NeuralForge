@@ -504,3 +504,46 @@ model ResidualBlock [batch=32, dim=512]:
 
 **Codegen:** flat elementwise loop on both `arm64` and `x86_64`
 profiles. No FFI dependency. New in M13.
+
+### `layernorm`
+
+Layer normalization. Two surface forms:
+
+- `x -> layernorm` — normalize without affine. Output shape == input shape.
+- `x -> layernorm[affine=true]` — normalize and apply learnable γ (scale)
+  and β (bias). γ and β shapes are both `[input.last_dim]`, allocated in
+  the params blob automatically.
+
+**Signature:** no positional args; optional named `affine: Symbol`.
+Anything other than `Symbol("true")` (including absent, `affine=false`)
+gives no-affine — per design principle "explicit over implicit".
+
+**Constraints:**
+
+- Input rank must be ≥ 2. Reduction is over the last dimension (per-row).
+  This matches `softmax` — a design constraint, not a mathematical limit.
+- `eps = 1e-5` and reduction axis (last dim) are compile-time constants.
+  Tunable variants are deferred until quantisation milestones.
+
+**Shape inference:** output shape == input shape (identity).
+
+**Default:** no affine (`affine` is opt-in like `linear[bias=true]`).
+
+**Params (when affine=true):** two slots in the params blob in this order —
+`LayerNormScale` (γ, size = `last_dim`) then `LayerNormBias` (β, size =
+`last_dim`). This is a **contract**: callers must pack checkpoint data in
+γ-before-β order.
+
+**Example:**
+
+```nfl
+model TransformerBlock [batch=2, seq=16, dim=64]:
+    x: Tensor[batch, seq, dim]
+    skip: Tensor[batch, seq, dim]
+
+    x -> add[skip] -> layernorm[affine=true]
+```
+
+**Codegen:** 3-pass per-row (mean → variance + inv_std → normalize +
+optional affine). Native `fsqrt` on arm64, `sqrtss` on x86_64. No FFI
+dependency — leaf function on both profiles (at N=1..2). New in M14.

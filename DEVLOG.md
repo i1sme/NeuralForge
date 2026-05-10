@@ -14,6 +14,123 @@ Format for each entry:
 
 ---
 
+## 2026-05-10 — Milestone 14 closed: A2 second brick — LayerNorm + LH-1/2/3 cleanup + LH-4 entry
+
+### What was done
+
+- **Plan 1 — LH-1/2/3 cleanup in x86_64 emit_linear (commit `916e9c7`, PR#31).**
+  Uniform ABI-register relocation: j-counter `%rcx` → `%rbp` (LH-1, same
+  `%rbp` precedent as M13 Task 1 emit_matmul), src-ptr scratch `%r8` →
+  op-local `pushq %r14` / `popq %r14` (LH-2), weight-ptr scratch `%r9` →
+  op-local `pushq %r15` / `popq %r15` (LH-3). Three ABI-invariant unit tests
+  + golden file regen. `compute_callee_saved` unchanged.
+
+- **Plan 2 — 6-commit series (PR#32), Task 0–5.**
+  - **Task 0 — PR#31 review carryover** (`6b21f8c`): fixed module doc-comment
+    scope ambiguity in x86_64 `linear.rs` (N≥2-only qualifier scoped
+    correctly to `%rdi`/`%rsi` saves); removed stale `(N≥2 only)` from
+    op-local `%r14`/`%r15` saves which are unconditional at all N.
+  - **Task 1 — StdOp::LayerNorm foundation** (`366d5de`): new `StdOp::LayerNorm`
+    variant with `signature()` (no positional, optional named `affine: Symbol`),
+    `infer_output_shape` (identity, rank ≥ 2 design constraint), `validate_attrs`,
+    `Display for StdOp` arm, and `layernorm_has_affine(attrs)` helper (parallel to
+    `linear_has_bias`). `ParamKind` extended with `LayerNormScale` and
+    `LayerNormBias` (γ-before-β contract). Both profiles get stub
+    `emit_layernorm`, `walk_model` dispatch arm, `classify_op` arm, and
+    `ParamSlot` allocation logic gated on `layernorm_has_affine`. 5 IR unit tests.
+  - **Task 2 — arm64 emit_layernorm** (`7298f88`): 3-pass AAPCS64 native
+    `fsqrt` + optional affine. Leaf function (no FFI). Scratch in x6/x9–x17 +
+    s0–s7 (s8–s15 intentionally avoided — AAPCS64 callee-saved per §6.1.2).
+    `s_b` reuses `s2` after `s_inv_d` consumption (strategy (b) per spec
+    §11.8 — only s_inv_d reloads per row). Constants in `.rodata` pool via
+    `adrp/add` once at function start. 4 unit tests.
+  - **Task 3 — x86_64 emit_layernorm** (`ec0659f`): 3-pass SysV native
+    `sqrtss` + optional affine. Op-local `pushq %r12` / `pushq %r13` inside
+    emit body only when `has_affine == true`; `compute_callee_saved`
+    unchanged. LH-4 logged in PROJECT_SPEC §"Known Latent Hazards" for
+    N=3..4 (emit_layernorm uses `%r8`/`%r9` as per-row scratch — clobbers
+    output_reg / input(N-1) at N≥3). 4 unit tests.
+  - **Task 4 — fixtures + FFI tests** (`2be1677`): 3 positive fixtures
+    (`layernorm_no_affine.nfl` N=1, `layernorm_affine.nfl` N=1,
+    `pre_ln_block.nfl` N=2), 1 negative (`layernorm_rank_too_low.nfl` — IR
+    reject), `layernorm_ref` Rust reference impl (duplicated per profile per
+    isolation principle). 6 FFI integration tests (3 arm64 run on macOS;
+    3 x86_64 skipped on macOS, run on Linux CI). `pre_ln_block.nfl` bit-exact
+    validates LH-1 closure end-to-end.
+  - **Task 5 — docs closure** (this commit): DEVLOG, PROJECT_SPEC, CLAUDE.md,
+    grammar.md, uir.md, arm64.md, x86_64.md.
+
+- **Final test count: 441** (macOS arm64); **~444** on Linux x86_64 CI
+  (includes x86_64-only FFI tests).
+
+### Decisions made
+
+- **LayerNorm is a single StdOp variant with internal 3-pass codegen** (not
+  three separate ops). Mirrors the Softmax-as-one-node precedent — the op
+  boundary is the user-visible semantic unit ("layer normalize this tensor"),
+  not the internal algorithmic sub-steps.
+
+- **Native sqrt only — no libm dependency added.** `fsqrt` on arm64,
+  `sqrtss` on x86_64. LayerNorm stays a leaf function on both profiles
+  (no `bl _expf` / `call expf@PLT`). Computes inverse standard deviation as
+  `1.0 / sqrt(var + eps)` using a single divide after the sqrt — avoids an
+  inner-loop divide.
+
+- **Affine optionality via single Symbol toggle** (`layernorm[affine=true]`).
+  Mirrors `linear[bias=true]` — explicit opt-in, per design principle
+  "explicit over implicit". `layernorm_has_affine(attrs)` is the single
+  predicate used by both the codegen dispatcher and the ParamSlot allocator.
+
+- **γ-before-β ParamSlot order.** `LayerNormScale` (γ) is allocated before
+  `LayerNormBias` (β). Documented as a contract in profile-api `ParamKind`
+  doc-comment; callers must pack checkpoints in this order.
+
+- **LH-4 logged, not fixed** (emit_layernorm x86_64 N=3..4 `%r8`/`%r9`
+  reuse). LH process: close in the milestone whose fixture first triggers it.
+  M14 fixtures only exercise N=1..2.
+
+- **`s_b` reuses `s2` (arm64)** after `s_inv_d` consumption in Pass 2,
+  rather than allocating a separate register from the s8–s15 range
+  (callee-saved). Stays within s0–s7. Reload cost: 3 instructions per row
+  (negligible vs O(D) per-row work).
+
+- **Op-local push/pop for affine registers in x86_64** (M13 pre-Task-5 arm64
+  emit_linear precedent). `compute_callee_saved` unchanged — function-level
+  prologue surface preserved.
+
+- **params_layout params-allocation loop merged** into a single linear +
+  LayerNorm loop in codegen.rs (Task 1 correction). A prior plan draft had a
+  separate LayerNorm param-allocation loop which broke the UIR-node-order
+  invariant on which params_layout offset computation depends.
+
+### Problems encountered
+
+- **Test #1 in Task 2 arm64 plan** used `asm.find(".Lln_p3_end_")` which
+  collided with a branch-target substring inside the Pass 3 loop body. Fixed
+  to newline-prefixed search (`\n.Lln_p3_end_`).
+
+- **Test #3 in Task 3 x86_64 plan** (function-level callee-saved unchanged
+  guard) had a wrong region check — emit_layernorm op-local pushes appear
+  before any `.Lln_` label. Replaced with two-pronged approach:
+  `compute_callee_saved` direct check + `pushq %r15` absence check.
+
+- **Task 0 carryover needed.** PR#31 review deferred 5 items "to next
+  milestone touching linear.rs". Plan 2 creates a `layernorm.rs` neighbour,
+  not an edit to `linear.rs`, so the items would have orphaned without an
+  explicit pre-Task-1 carryover commit. Plan 2 was amended to add Task 0
+  before tasks were executed.
+
+### Next step
+
+M15+ ships A2 third brick: FFN (`linear → relu → linear`). Compositional op,
+no new codegen pattern — composes existing emit_linear, emit_relu. Plus N=3..4
+`%r8`/`%r9` LH-4 closure in emit_layernorm x86_64 when a fixture surfaces it.
+
+Trigger-driven cleanup status: OQ-7/8/9 + M5c OQ-4 still dormant through M14
+(no triggers fired).
+
+---
+
 ## 2026-05-09 — Milestone 13 closed: N=4 + matmul fix + add op (A2 first brick)
 
 ### What was done

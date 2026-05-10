@@ -1000,6 +1000,94 @@ fn softmax_rank_too_low_caught_at_uir() {
     );
 }
 
+// M14: StdOp::LayerNorm IR foundation tests.
+
+#[test]
+fn layernorm_resolves_and_has_no_positional_one_optional_named() {
+    use crate::ir::stdlib::{resolve, signature, ArgType, StdOp};
+
+    let op = resolve("layernorm").expect("layernorm should resolve");
+    assert_eq!(op, StdOp::LayerNorm);
+
+    let sig = signature(StdOp::LayerNorm);
+    assert_eq!(sig.positional.len(), 0, "layernorm has no positional args");
+    assert_eq!(
+        sig.named.len(),
+        1,
+        "layernorm has exactly one named arg (affine)"
+    );
+    assert_eq!(sig.named[0].name, "affine");
+    assert_eq!(sig.named[0].ty, ArgType::Symbol);
+    assert!(
+        !sig.named[0].required,
+        "affine is opt-in (default = no affine)"
+    );
+}
+
+#[test]
+fn layernorm_infer_shape_is_identity_at_rank_2_and_3() {
+    use crate::ir::stdlib::{infer_output_shape, StdOp};
+    use crate::ir::types::Shape;
+
+    // Rank 2: [B, D]
+    let inputs_2d = vec![Shape(vec![8, 32])];
+    let out =
+        infer_output_shape(StdOp::LayerNorm, &inputs_2d, &[]).expect("rank-2 input should succeed");
+    assert_eq!(out, Shape(vec![8, 32]), "shape should be identity");
+
+    // Rank 3: [B, S, D] — common in transformer use
+    let inputs_3d = vec![Shape(vec![2, 16, 64])];
+    let out =
+        infer_output_shape(StdOp::LayerNorm, &inputs_3d, &[]).expect("rank-3 input should succeed");
+    assert_eq!(out, Shape(vec![2, 16, 64]));
+}
+
+#[test]
+fn layernorm_infer_shape_rejects_rank_below_2() {
+    use crate::ir::stdlib::{infer_output_shape, ShapeError, StdOp};
+    use crate::ir::types::Shape;
+
+    let inputs_1d = vec![Shape(vec![32])];
+    let err = infer_output_shape(StdOp::LayerNorm, &inputs_1d, &[])
+        .expect_err("rank-1 input should be rejected");
+
+    match err {
+        ShapeError::RankTooLow { required, actual } => {
+            assert_eq!(required, 2);
+            assert_eq!(actual, 1);
+        }
+        other => panic!("expected RankTooLow, got {other:?}"),
+    }
+}
+
+#[test]
+fn layernorm_has_affine_recognises_affine_true() {
+    use crate::ir::stdlib::layernorm_has_affine;
+    use crate::ir::types::{AttrValue, OpAttr};
+    let attrs = vec![OpAttr {
+        name: "affine".to_string(),
+        value: AttrValue::Symbol("true".to_string()),
+    }];
+    assert!(layernorm_has_affine(&attrs));
+}
+
+#[test]
+fn layernorm_has_affine_rejects_absent_or_false() {
+    use crate::ir::stdlib::layernorm_has_affine;
+    use crate::ir::types::{AttrValue, OpAttr};
+    assert!(!layernorm_has_affine(&[]));
+    let false_attrs = vec![OpAttr {
+        name: "affine".to_string(),
+        value: AttrValue::Symbol("false".to_string()),
+    }];
+    assert!(!layernorm_has_affine(&false_attrs));
+    let other_name = vec![OpAttr {
+        name: "bias".to_string(),
+        value: AttrValue::Symbol("true".to_string()),
+    }];
+    assert!(!layernorm_has_affine(&other_name));
+}
+
 // M13 Group B: StdOp::Add IR foundation tests.
 
 #[test]

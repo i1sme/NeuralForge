@@ -1498,3 +1498,232 @@ fn four_input_matmul_match_numerically() {
 
     drop(lib);
 }
+
+// ---------------------------------------------------------------------------
+// M14 Group F: LayerNorm FFI tests (x86_64).
+//
+// F.1: layernorm_no_affine_match_numerically — N=1, no γ/β. Validates bare
+//      `layernorm` emitter path bit-exactly against layernorm_ref.
+// F.2: layernorm_affine_match_numerically — N=1, γ/β params. Validates
+//      Pass 3 affine multiply-add and γ-before-β ParamSlot order.
+// F.3: pre_ln_block_match_numerically — N=2 transformer block. Validates
+//      LH-1 closure (PR#31 fix) end-to-end: pre-fix, linear[w,b] at N=2
+//      would produce silent corruption; post-fix, bit-exact green.
+//
+// Note: x86_64 matmul uses separate mulss+addss (NOT FMA) — pre_ln_block
+// reference uses separate mul+add to match.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn layernorm_no_affine_match_numerically() {
+    if !common::cc_available() {
+        eprintln!("skip: integration test requires `cc` on PATH");
+        return;
+    }
+
+    let src = std::fs::read_to_string("../../tests/fixtures/layernorm_no_affine.nfl")
+        .expect("fixture readable");
+    let nfl = compiler::parse(&src).expect("parse");
+    let uir = compiler::ir::build(&nfl).expect("ir::build");
+    let asm = profiles_x86_64::lower(&uir).expect("lower");
+
+    let sig = &asm.functions[0];
+    assert_eq!(sig.name, "nfl_forward_LayerNormNoAffine");
+    assert_eq!(sig.inputs_floats, vec![8], "x is [2,4]=8 floats");
+    assert_eq!(sig.params_floats, 0, "no-affine: no params");
+    assert_eq!(sig.output_floats, 8, "output is [2,4]=8 floats");
+
+    let so_path = common::compile_to_so(&asm.source, "layernorm_no_affine");
+    let lib = unsafe { libloading::Library::new(&so_path) }.expect("dlopen");
+
+    // SysV ABI: x (%rdi), params (%rsi, empty), out (%rdx).
+    type ForwardFn = unsafe extern "C" fn(*const f32, *const f32, *mut f32);
+    let forward: libloading::Symbol<ForwardFn> =
+        unsafe { lib.get(b"nfl_forward_LayerNormNoAffine") }.expect("dlsym");
+
+    // Deterministic input: sin-based values give non-trivial mean/var.
+    let input: Vec<f32> = (0..8).map(|i| ((i as f32) * 0.7 + 1.0).sin()).collect();
+    let params: Vec<f32> = vec![]; // no params
+    let mut output = vec![0.0_f32; 8];
+
+    unsafe {
+        forward(input.as_ptr(), params.as_ptr(), output.as_mut_ptr());
+    }
+
+    let expected = common::layernorm_ref(&input, &[2, 4], None, None);
+
+    for (i, (got, exp)) in output.iter().zip(expected.iter()).enumerate() {
+        assert_eq!(
+            got.to_bits(),
+            exp.to_bits(),
+            "bit-exact mismatch at idx {i}: got={got} ({:#010x}), expected={exp} ({:#010x})",
+            got.to_bits(),
+            exp.to_bits()
+        );
+    }
+
+    drop(lib);
+}
+
+#[test]
+fn layernorm_affine_match_numerically() {
+    if !common::cc_available() {
+        eprintln!("skip: integration test requires `cc` on PATH");
+        return;
+    }
+
+    let src = std::fs::read_to_string("../../tests/fixtures/layernorm_affine.nfl")
+        .expect("fixture readable");
+    let nfl = compiler::parse(&src).expect("parse");
+    let uir = compiler::ir::build(&nfl).expect("ir::build");
+    let asm = profiles_x86_64::lower(&uir).expect("lower");
+
+    let sig = &asm.functions[0];
+    assert_eq!(sig.name, "nfl_forward_LayerNormAffine");
+    assert_eq!(sig.inputs_floats, vec![8], "x is [2,4]=8 floats");
+    assert_eq!(sig.params_floats, 8, "affine: γ(4) + β(4) = 8 floats");
+    assert_eq!(sig.output_floats, 8, "output is [2,4]=8 floats");
+
+    // Verify γ-before-β ParamSlot order contract.
+    assert_eq!(sig.params_layout.len(), 2);
+    assert_eq!(
+        sig.params_layout[0].kind,
+        profiles_x86_64::ParamKind::LayerNormScale
+    );
+    assert_eq!(sig.params_layout[0].offset, 0);
+    assert_eq!(sig.params_layout[0].size, 4);
+    assert_eq!(
+        sig.params_layout[1].kind,
+        profiles_x86_64::ParamKind::LayerNormBias
+    );
+    assert_eq!(sig.params_layout[1].offset, 4);
+    assert_eq!(sig.params_layout[1].size, 4);
+
+    let so_path = common::compile_to_so(&asm.source, "layernorm_affine");
+    let lib = unsafe { libloading::Library::new(&so_path) }.expect("dlopen");
+
+    // SysV ABI: x (%rdi), params (%rsi), out (%rdx).
+    type ForwardFn = unsafe extern "C" fn(*const f32, *const f32, *mut f32);
+    let forward: libloading::Symbol<ForwardFn> =
+        unsafe { lib.get(b"nfl_forward_LayerNormAffine") }.expect("dlsym");
+
+    let input: Vec<f32> = (0..8).map(|i| ((i as f32) * 0.7 + 1.0).sin()).collect();
+    // Params: γ (4 floats) then β (4 floats).
+    let gamma: Vec<f32> = vec![1.5, 0.8, 1.2, 0.5];
+    let beta: Vec<f32> = vec![0.1, -0.2, 0.3, -0.1];
+    let params: Vec<f32> = gamma.iter().chain(beta.iter()).copied().collect();
+    let mut output = vec![0.0_f32; 8];
+
+    unsafe {
+        forward(input.as_ptr(), params.as_ptr(), output.as_mut_ptr());
+    }
+
+    let expected = common::layernorm_ref(&input, &[2, 4], Some(&params[0..4]), Some(&params[4..8]));
+
+    for (i, (got, exp)) in output.iter().zip(expected.iter()).enumerate() {
+        assert_eq!(
+            got.to_bits(),
+            exp.to_bits(),
+            "bit-exact mismatch at idx {i}: got={got} ({:#010x}), expected={exp} ({:#010x})",
+            got.to_bits(),
+            exp.to_bits()
+        );
+    }
+
+    drop(lib);
+}
+
+#[test]
+fn pre_ln_block_match_numerically() {
+    if !common::cc_available() {
+        eprintln!("skip: integration test requires `cc` on PATH");
+        return;
+    }
+
+    let src =
+        std::fs::read_to_string("../../tests/fixtures/pre_ln_block.nfl").expect("fixture readable");
+    let nfl = compiler::parse(&src).expect("parse");
+    let uir = compiler::ir::build(&nfl).expect("ir::build");
+    let asm = profiles_x86_64::lower(&uir).expect("lower");
+
+    let sig = &asm.functions[0];
+    assert_eq!(sig.name, "nfl_forward_PreLnBlock");
+    assert_eq!(sig.inputs_floats.len(), 2, "N=2: x + skip");
+    assert_eq!(sig.inputs_floats[0], 2 * 4, "x is [2,4]=8 floats");
+    assert_eq!(sig.inputs_floats[1], 2 * 4, "skip is [2,4]=8 floats");
+    // Params: γ(4) + β(4) + W(4×8=32) + b(8) = 48 floats.
+    assert_eq!(sig.params_floats, 48, "γ(4)+β(4)+W(32)+b(8)=48");
+    assert_eq!(sig.output_floats, 2 * 8, "output is [2,8]=16 floats");
+
+    let so_path = common::compile_to_so(&asm.source, "pre_ln_block");
+    let lib = unsafe { libloading::Library::new(&so_path) }.expect("dlopen");
+
+    // SysV ABI (N=2 + params): x (%rdi), skip (%rsi), params (%rdx), out (%rcx).
+    type ForwardFn = unsafe extern "C" fn(*const f32, *const f32, *const f32, *mut f32);
+    let forward: libloading::Symbol<ForwardFn> =
+        unsafe { lib.get(b"nfl_forward_PreLnBlock") }.expect("dlsym");
+
+    let batch = 2usize;
+    let dim = 4usize;
+    let out_dim = 8usize;
+    let x: Vec<f32> = (0..batch * dim).map(|i| (i as f32) * 0.15 + 0.5).collect();
+    let skip: Vec<f32> = (0..batch * dim).map(|i| (i as f32) * 0.07 - 0.3).collect();
+    // Params layout (traversal order): γ(4), β(4), W(4×8=32 row-major), b(8).
+    let gamma: Vec<f32> = vec![1.2, 0.9, 1.1, 0.8];
+    let beta: Vec<f32> = vec![0.05, -0.1, 0.15, -0.05];
+    let weights: Vec<f32> = (0..dim * out_dim)
+        .map(|i| (i as f32) * 0.03 - 0.5)
+        .collect();
+    let bias: Vec<f32> = (0..out_dim).map(|i| (i as f32) * 0.02 - 0.07).collect();
+    let params: Vec<f32> = gamma
+        .iter()
+        .chain(beta.iter())
+        .chain(weights.iter())
+        .chain(bias.iter())
+        .copied()
+        .collect();
+    assert_eq!(params.len(), 48);
+    let mut out = vec![0.0_f32; batch * out_dim];
+
+    unsafe {
+        forward(x.as_ptr(), skip.as_ptr(), params.as_ptr(), out.as_mut_ptr());
+    }
+
+    // Rust reference: add → layernorm[affine] → linear[bias].
+    // Step 1: residual add.
+    let added: Vec<f32> = x.iter().zip(skip.iter()).map(|(a, b)| a + b).collect();
+    // Step 2: layernorm with affine (γ-before-β matches ParamSlot order).
+    let normalized = common::layernorm_ref(
+        &added,
+        &[batch, dim],
+        Some(&params[0..4]),
+        Some(&params[4..8]),
+    );
+    // Step 3: linear with bias (4 → 8). x86_64 uses separate mulss+addss
+    // (NOT FMA); reference uses separate mul+add to match.
+    let w = &params[8..40]; // 4×8 = 32 floats
+    let b = &params[40..48]; // 8 floats
+    let mut expected = vec![0.0_f32; batch * out_dim];
+    for row in 0..batch {
+        for j in 0..out_dim {
+            let mut acc = 0.0_f32;
+            for kk in 0..dim {
+                acc += normalized[row * dim + kk] * w[kk * out_dim + j];
+            }
+            expected[row * out_dim + j] = acc + b[j];
+        }
+    }
+
+    for (i, (got, want)) in out.iter().zip(expected.iter()).enumerate() {
+        assert_eq!(
+            got.to_bits(),
+            want.to_bits(),
+            "bit-exact mismatch at idx {i}: got={got} ({:#010x}), want={want} ({:#010x})\n\
+             (pre_ln_block validates LH-1 closure — bit mismatch may indicate a regression)",
+            got.to_bits(),
+            want.to_bits()
+        );
+    }
+
+    drop(lib);
+}

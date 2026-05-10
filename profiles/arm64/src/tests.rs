@@ -1532,3 +1532,210 @@ fn emit_linear_arm64_save_block_balances_at_all_n() {
         }
     }
 }
+
+// ---- M14 Task 2: emit_layernorm arm64 unit tests ----------------------------
+
+#[test]
+fn layernorm_with_affine_allocates_scale_before_bias_in_params_layout() {
+    // Build a minimal UIR with one LayerNorm[affine=true] op, lower it
+    // through the arm64 profile, and verify the resulting FnSig.params_layout
+    // has LayerNormScale at a lower index than LayerNormBias for the same origin_node.
+    //
+    // This test lives in arm64/src/tests.rs (not compiler/ir/tests.rs) because
+    // it requires lowering through a profile — importing profiles-arm64 into the
+    // compiler crate would create a circular dependency.
+    let nfl_src = "model M [b=2, d=4]:\n    x: Tensor[b, d]\n    x -> layernorm[affine=true]\n";
+    let ast = compiler::parse(nfl_src).expect("parse should succeed");
+    let uir = compiler::ir::build(&ast).expect("ir::build should succeed");
+
+    let asm = crate::Arm64Profile
+        .lower(&uir)
+        .expect("lower should succeed");
+
+    let sig = &asm.functions[0];
+    // params_layout should contain exactly one Scale + one Bias entry (one
+    // LayerNorm node, affine=true).
+    let scale_idx = sig
+        .params_layout
+        .iter()
+        .position(|s| s.kind == ParamKind::LayerNormScale)
+        .expect("LayerNormScale must be in params_layout when affine=true");
+    let bias_idx = sig
+        .params_layout
+        .iter()
+        .position(|s| s.kind == ParamKind::LayerNormBias)
+        .expect("LayerNormBias must be in params_layout when affine=true");
+
+    assert!(
+        scale_idx < bias_idx,
+        "Contract violation: γ (LayerNormScale at idx {scale_idx}) must come before \
+         β (LayerNormBias at idx {bias_idx}) in params_layout. Layout: {:?}",
+        sig.params_layout
+    );
+}
+
+#[test]
+fn emit_layernorm_no_affine_emits_three_passes_with_native_fsqrt() {
+    use crate::abi::AbiContext;
+    use crate::buffer::BufferLoc;
+    use compiler::ast::Span;
+
+    let abi = AbiContext { n_inputs: 1 };
+    let asm = crate::ops::emit_layernorm(
+        &abi,
+        /* b = */ 8,
+        /* d = */ 32,
+        /* model_idx = */ 0,
+        /* layernorm_idx = */ 0,
+        BufferLoc::InputReg(0),
+        BufferLoc::OutputReg,
+        /* gamma_offset = */ None,
+        /* beta_offset = */ None,
+        Span::new(1, 1),
+    )
+    .expect("no-affine emit should succeed");
+
+    // Three pass labels per row: .Lln_p1_, .Lln_p2_, .Lln_p3_.
+    let p1_count = asm.matches(".Lln_p1_").count();
+    let p2_count = asm.matches(".Lln_p2_").count();
+    let p3_count = asm.matches(".Lln_p3_").count();
+    assert!(p1_count >= 2, "Pass 1 label + jump expected; asm:\n{asm}");
+    assert!(p2_count >= 2);
+    assert!(p3_count >= 2);
+
+    // Native sqrt — exactly one fsqrt (per row, hoisted from Pass 3).
+    assert!(asm.contains("fsqrt"), "must use native fsqrt; asm:\n{asm}");
+    // (`bl _sqrtf` would be a non-leaf libm fallback. The leaf check below
+    // — `asm.contains("    bl  ")` — already guards against any `bl` form.)
+
+    // Exactly one fdiv (1.0 / sqrt(σ²+ε)) per row, hoisted out of Pass 3 hot loop.
+    // Use "\n.Lln_p3_end_" to find the actual end LABEL, not the `b.ge` branch target
+    // that appears inside the loop body (the branch target string appears earlier).
+    let fdiv_count = asm.matches("fdiv").count();
+    let p3_label_idx = asm.find(".Lln_p3_").expect("Pass 3 label must exist");
+    let p3_end_idx = asm
+        .find("\n.Lln_p3_end_")
+        .expect("Pass 3 end label (newline-prefixed to skip branch target)");
+    let p3_body = &asm[p3_label_idx..p3_end_idx];
+    assert!(
+        !p3_body.contains("fdiv"),
+        "Pass 3 hot loop must contain ZERO fdiv (Q4 spec constraint); body:\n{p3_body}"
+    );
+    assert!(
+        fdiv_count >= 1,
+        "fdiv for inv_std must appear OUTSIDE Pass 3"
+    );
+
+    // Leaf function — no `bl` (no FFI calls).
+    assert!(
+        !asm.contains("    bl  "),
+        "must be leaf — no `bl` calls; asm:\n{asm}"
+    );
+
+    // No-affine: no γ/β loads in Pass 3.
+    // (Affine loads use ldr from x13/x14 base pointers — see with-affine test.)
+}
+
+#[test]
+fn emit_layernorm_affine_emits_gamma_beta_loads_in_pass_3() {
+    use crate::abi::AbiContext;
+    use crate::buffer::BufferLoc;
+    use compiler::ast::Span;
+
+    let abi = AbiContext { n_inputs: 1 };
+    let asm = crate::ops::emit_layernorm(
+        &abi,
+        /* b = */ 8,
+        /* d = */ 32,
+        /* model_idx = */ 0,
+        /* layernorm_idx = */ 0,
+        BufferLoc::InputReg(0),
+        BufferLoc::OutputReg,
+        /* gamma_offset = */ Some(0),
+        /* beta_offset = */ Some(32), // β follows γ at offset 32 floats
+        Span::new(1, 1),
+    )
+    .expect("affine emit should succeed");
+
+    // Pass 3 must contain γ and β loads (from x13 and x14).
+    // Use "\n.Lln_p3_end_" to find the actual end LABEL (not the `b.ge`
+    // branch-target substring that appears inside the loop body earlier).
+    let p3_label_idx = asm.find(".Lln_p3_").expect("Pass 3 label");
+    let p3_end_idx = asm
+        .find("\n.Lln_p3_end_")
+        .expect("Pass 3 end label (newline-prefixed to skip branch target)");
+    let p3_body = &asm[p3_label_idx..p3_end_idx];
+
+    assert!(
+        p3_body.contains("ldr     s7, [x13"),
+        "Pass 3 must load γ_j from x13 (γ base ptr); body:\n{p3_body}"
+    );
+    assert!(
+        p3_body.contains("ldr     s") && p3_body.contains(", [x14"),
+        "Pass 3 must load β_j from x14 (β base ptr); body:\n{p3_body}"
+    );
+    assert!(
+        p3_body.contains("fmul"),
+        "Pass 3 affine must include γ multiply"
+    );
+    assert!(p3_body.contains("fadd"), "Pass 3 affine must include β add");
+
+    // Still no fdiv in Pass 3 (Q4 constraint persists).
+    assert!(
+        !p3_body.contains("fdiv"),
+        "Pass 3 hot loop must contain ZERO fdiv"
+    );
+}
+
+#[test]
+fn emit_layernorm_avoids_callee_saved_simd_regs_v8_v15() {
+    use crate::abi::AbiContext;
+    use crate::buffer::BufferLoc;
+    use compiler::ast::Span;
+
+    let abi = AbiContext { n_inputs: 1 };
+    let asm = crate::ops::emit_layernorm(
+        &abi,
+        8,
+        32,
+        0,
+        0,
+        BufferLoc::InputReg(0),
+        BufferLoc::OutputReg,
+        Some(0),
+        Some(32),
+        Span::new(1, 1),
+    )
+    .expect("emit should succeed");
+
+    // AAPCS64 §6.1.2: v8–v15 (= s8–s15, d8–d15) are callee-saved (lower
+    // 64 bits). Writing these in a leaf function without stp/ldp d8/d9...
+    // save would silently corrupt caller's v8–v15 — same class of bug as
+    // LH-1/2/3 but in the float register file. emit_layernorm intentionally
+    // stays in s0–s7 by reusing s2 for s_b in Pass 3.
+    for n in 8..16 {
+        let s_token = format!("s{n},");
+        // Allow READING s8–s15 if needed (rare but possible); FORBID writing.
+        // Detection heuristic: any instruction with `s8,` etc. as the FIRST
+        // register operand is a write. This is approximate but sufficient.
+        let problematic_writes: Vec<&str> = asm
+            .lines()
+            .filter(|line| {
+                line.contains(&format!("    fmov    {s_token}"))
+                    || line.contains(&format!("    ldr     {s_token}"))
+                    || line.contains(&format!("    fmul    {s_token}"))
+                    || line.contains(&format!("    fadd    {s_token}"))
+                    || line.contains(&format!("    fsub    {s_token}"))
+                    || line.contains(&format!("    fdiv    {s_token}"))
+                    || line.contains(&format!("    fsqrt   {s_token}"))
+                    || line.contains(&format!("    str     {s_token}"))
+            })
+            .collect();
+        assert!(
+            problematic_writes.is_empty(),
+            "AAPCS64 violation: {s_token} (callee-saved) is written in emit_layernorm. \
+             Lines:\n{}\nFull asm:\n{asm}",
+            problematic_writes.join("\n")
+        );
+    }
+}
