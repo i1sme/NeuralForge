@@ -82,7 +82,7 @@ NeuralForge/
 │   └── x86_64/             ← Linux ELF scalar SSE2 codegen profile, M9
 │       └── src/
 │           ├── abi.rs      ← AbiContext (SysV AMD64 variant, M12)
-│           └── ops/        ← add.rs (M13), layernorm.rs (M14; 3-pass SysV native sqrtss, op-local %r12/%r13 for affine), linear.rs, matmul.rs (M10; callee-saved scratch rework M12; %rbp j-counter fix M13), mulscalar.rs (M10), relu.rs, softmax.rs, dropout.rs
+│           └── ops/        ← add.rs (M13), layernorm.rs (M14; 3-pass SysV native sqrtss, op-local %r12/%r13 for affine; M15 LH-4 closed — %r15/%rbp scratch), linear.rs, matmul.rs (M10; callee-saved scratch rework M12; %rbp j-counter fix M13), mulscalar.rs (M10), relu.rs, softmax.rs, dropout.rs
 │
 ├── language/
 │   ├── grammar.ebnf        ← formal NFL grammar
