@@ -1,0 +1,25 @@
+# pre_ln_block.nfl — N=2 transformer pre-LN block integration fixture.
+#
+# N=2 transformer-block-style integration. The fixture is the smallest
+# realistic combination that exercises ALL of:
+#   - StdOp::Add at N=2 (residual connection — M13 closed)
+#   - StdOp::LayerNorm with affine (M14 second brick)
+#   - StdOp::Linear with bias at N=2 (M14 LH-1 trigger — closed by
+#     Plan 1 of M14)
+#
+# Pre-Plan-1: silent corruption from LH-1 at the linear[w, b] step.
+# Post-Plan-1 + Plan-2: bit-exact match against Rust reference.
+#
+# ABI slot layout (declaration order):
+#   N=2: x (x0/%rdi), skip (x1/%rsi), params (x2/%rdx), out (x3/%rcx).
+#
+# Params blob layout (compute_offsets traversal order):
+#   LayerNormScale (4 floats), LayerNormBias (4 floats),  <- from layernorm[affine=true]
+#   LinearWeight (4x8 = 32 floats), LinearBias (8 floats) <- from linear[8, bias=true]
+#   Total: 4 + 4 + 32 + 8 = 48 floats.
+
+model PreLnBlock [batch=2, dim=4]:
+    x: Tensor[batch, dim]
+    skip: Tensor[batch, dim]
+
+    x -> add[skip] -> layernorm[affine=true] -> linear[8, bias=true]

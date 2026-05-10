@@ -1,0 +1,12 @@
+# layernorm_rank_too_low.nfl — M14 negative fixture.
+#
+# Rank-1 input. Expects ShapeError::RankTooLow at IR build (compiler-
+# level reject, mirrors Softmax precedent). Lives in
+# tests/fixtures/negative/ (NOT profile-negative/) because the rejection
+# fires before any profile sees the node — same distinction as M13's
+# add_shape_mismatch.nfl.
+
+model LayerNormRankTooLow [d=32]:
+    x: Tensor[d]
+
+    x -> layernorm
