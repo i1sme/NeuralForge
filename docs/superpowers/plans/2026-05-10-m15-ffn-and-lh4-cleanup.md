@@ -691,9 +691,46 @@ pub fn ffn_ref(
 }
 ```
 
-### Step 1.4: Same promotion for `profiles/x86_64/tests/common/mod.rs`
+### Step 1.4: Same promotion for `profiles/x86_64/tests/common/mod.rs` — **with one divergent body**
 
-Open `profiles/x86_64/tests/common/mod.rs`. After `pub fn layernorm_ref(...)`, append the **identical** four functions from Step 1.3 (verbatim copy — separate per-profile copy per design principle 3, NOT a shared module).
+Open `profiles/x86_64/tests/common/mod.rs`. After `pub fn layernorm_ref(...)`, append `reference_bias_add`, `reference_relu`, and `ffn_ref` **verbatim** from Step 1.3 (those three functions perform single-rounding ops or compositions — bit-exact-identical between profiles).
+
+For `reference_matmul`, use a **divergent body** that matches the x86_64 SSE2 emitter's two-rounding `mulss + addss` pattern (NOT the arm64 `fmadd` single-rounding):
+
+```rust
+/// Reference matmul — naive `b × k` @ `k × n` → `b × n` with **non-FMA**
+/// (`+= a * b`) reduction matching the x86_64 SSE2 emitter's `mulss + addss`
+/// two-rounding pattern. Promoted from integration.rs file-local in M15
+/// with x86_64-specific divergence from arm64 (which uses `f32::mul_add`
+/// matching its `fmadd` single-rounding emitter).
+///
+/// Bit-exact equivalence with x86_64 `emit_linear` body (`mulss %xmm2, %xmm1;
+/// addss %xmm1, %xmm0` per inner k-iteration) requires non-FMA reduction.
+/// Using `f32::mul_add` here would produce ≤0.5 ULP per-element divergence
+/// from the emitter and break `to_bits()` comparison in FFI tests.
+///
+/// Rust's `+`/`*` operators do NOT contract to FMA at default codegen
+/// settings — strict IEEE 754 with two roundings, matching the SSE2 emitter.
+pub fn reference_matmul(input: &[f32], weights: &[f32], b: usize, k: usize, n: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; b * n];
+    for i in 0..b {
+        for j in 0..n {
+            let mut sum = 0.0f32;
+            for kk in 0..k {
+                sum += input[i * k + kk] * weights[kk * n + j];
+            }
+            out[i * n + j] = sum;
+        }
+    }
+    out
+}
+```
+
+**Verification (mandatory after editing):** confirm the per-profile semantic divergence is intentional and documented:
+- `profiles/arm64/tests/common/mod.rs::reference_matmul` uses `f32::mul_add` (matches `fmadd`)
+- `profiles/x86_64/tests/common/mod.rs::reference_matmul` uses `sum += a * b` (matches `mulss + addss`)
+
+Both yield bit-exact-equivalent FFI test outputs against their respective emitters. The ASYMMETRY is the correctness property — verbatim copy would break bit-exact testing on x86_64.
 
 ### Step 1.5: Update `profiles/arm64/tests/integration.rs` — remove file-local helpers, switch to `common::*`
 
@@ -797,10 +834,15 @@ fn ffn_ffi() {
 
     let expected = common::ffn_ref(&input, w1, b1, w2, b2, 2, 4, 8);
 
+    // Bit-exact comparison: arm64 reference_matmul uses f32::mul_add
+    // (single rounding) matching the emitter's `fmadd` instruction.
+    // M14 layernorm test precedent — same to_bits() discipline.
     for (i, (a, b)) in output.iter().zip(expected.iter()).enumerate() {
         assert!(
-            (a - b).abs() < 1e-3,
-            "ffn[{i}]: asm got {a}, ref got {b}"
+            a.to_bits() == b.to_bits(),
+            "ffn[{i}]: asm got {a} (bits 0x{:08x}), ref got {b} (bits 0x{:08x})",
+            a.to_bits(),
+            b.to_bits()
         );
     }
 }
@@ -862,10 +904,15 @@ fn ffn_ffi() {
 
     let expected = common::ffn_ref(&input, w1, b1, w2, b2, 2, 4, 8);
 
+    // Bit-exact comparison: x86_64 reference_matmul uses non-FMA `+= a * b`
+    // (two roundings) matching the emitter's `mulss + addss` pattern.
+    // M14 layernorm test precedent — same to_bits() discipline.
     for (i, (a, b)) in output.iter().zip(expected.iter()).enumerate() {
         assert!(
-            (a - b).abs() < 1e-3,
-            "ffn[{i}]: asm got {a}, ref got {b}"
+            a.to_bits() == b.to_bits(),
+            "ffn[{i}]: asm got {a} (bits 0x{:08x}), ref got {b} (bits 0x{:08x})",
+            a.to_bits(),
+            b.to_bits()
         );
     }
 }
@@ -915,9 +962,20 @@ relu emitters already exist on both profiles since M3 (arm64) and M9 (x86_64).
 Helper promotion (per profile, separate copies per design principle 3 —
 isolation, no cross-profile sharing): `reference_matmul`, `reference_bias_add`,
 `reference_relu` moved from integration.rs file-local to common/mod.rs as
-`pub fn`. Verbatim signatures (clean, generic on shapes — no test-specific
-quirks). New `pub fn ffn_ref` composes the promoted primitives — must NOT
-reimplement matmul/bias/relu (helper-reuse rule, design spec §3.4).
+`pub fn`. Identical signatures across profiles. `reference_bias_add` and
+`reference_relu` bodies are bit-exact-identical between profiles (single-rounding
+ops). `reference_matmul` body INTENTIONALLY DIVERGES per profile to match
+emitter rounding semantics: arm64 uses `f32::mul_add` matching `fmadd`
+single-rounding; x86_64 uses `+= a * b` matching `mulss + addss` two-rounding.
+Same per-profile-isolation principle that motivated the M14 layernorm_ref
+duplication. New `pub fn ffn_ref` composes the promoted primitives — must
+NOT reimplement matmul/bias/relu (helper-reuse rule, design spec §3.4).
+
+FFI tests use `to_bits()` bit-exact comparison (M14 layernorm test
+precedent), not tolerance — both profiles are deterministic given matched
+reference rounding semantics. Non-FMA operations (`+`, `*`, `max`) and
+deterministic instructions (`fmadd`, `mulss`, `addss`, `sqrtss`, `fsqrt`)
+guarantee per-platform bit-stability without `expf`-induced libm slack.
 
 Two new FFI integration tests (ffn_ffi on arm64 + x86_64). x86_64 test is
 gated by file-level #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -1130,10 +1188,16 @@ fn transformer_block_ffi() {
         &input, &skip1, &skip2, gamma, beta, w1, b1, w2, b2, 2, 4, 8,
     );
 
+    // Bit-exact comparison: composition of layernorm_ref (M14 verified
+    // bit-exact) + ffn_ref (uses arm64's f32::mul_add reference_matmul
+    // matching `fmadd`) + element-wise add. Determinism preserved through
+    // the chain.
     for (i, (a, b)) in output.iter().zip(expected.iter()).enumerate() {
         assert!(
-            (a - b).abs() < 1e-3,
-            "transformer_block[{i}]: asm got {a}, ref got {b}"
+            a.to_bits() == b.to_bits(),
+            "transformer_block[{i}]: asm got {a} (bits 0x{:08x}), ref got {b} (bits 0x{:08x})",
+            a.to_bits(),
+            b.to_bits()
         );
     }
 }
@@ -1213,10 +1277,20 @@ fn transformer_block_ffi() {
         &input, &skip1, &skip2, gamma, beta, w1, b1, w2, b2, 2, 4, 8,
     );
 
+    // Bit-exact comparison: composition of layernorm_ref (M14 verified
+    // bit-exact) + ffn_ref (uses x86_64's non-FMA `+= a * b` reference_matmul
+    // matching `mulss + addss`) + element-wise add. Determinism preserved
+    // through the chain.
+    //
+    // THIS IS THE LH-4 RUNTIME EVIDENCE TEST. Pre-T0: layernorm body
+    // clobbers output_reg=%r8 → segfault or bit-mismatch here. Post-T0:
+    // %r8 untouched → bit-exact match.
     for (i, (a, b)) in output.iter().zip(expected.iter()).enumerate() {
         assert!(
-            (a - b).abs() < 1e-3,
-            "transformer_block[{i}]: asm got {a}, ref got {b}"
+            a.to_bits() == b.to_bits(),
+            "transformer_block[{i}]: asm got {a} (bits 0x{:08x}), ref got {b} (bits 0x{:08x})",
+            a.to_bits(),
+            b.to_bits()
         );
     }
 }
@@ -1645,17 +1719,23 @@ Expected output (in order, newest first):
 <sha> docs(m15): brainstorm spec — A2 third brick (FFN) + LH-4 cleanup
 ```
 
-- [ ] **Step 4.2: Each commit independently passes gates** (sanity verify with `git rebase -x` style check if desired):
+- [ ] **Step 4.2: Per-commit gate verification (CI authoritative; local optional)**
+
+CI on PR push runs `cargo test --workspace` per commit on both macOS arm64 and Linux x86_64 — this is the authoritative per-commit verification. Local check is optional and **must use `cargo clean` between iterations** to avoid incremental-build artifact leakage masking compilation errors:
 
 ```bash
-for sha in $(git log --oneline -4 --format=%H); do
-    git checkout "$sha" -- .
-    cargo test --workspace 2>&1 | tail -3
+# Optional pre-push local verification — invasive, requires clean tree.
+git stash --include-untracked  # if you have local modifications
+for sha in $(git log --format=%H -4 main..HEAD | tac); do  # T0 → T1 → T2 → T3
+    git checkout "$sha"
+    cargo clean
+    cargo test --workspace 2>&1 | tail -3 || break
 done
-git checkout HEAD -- .
+git checkout claude/stupefied-zhukovsky-59aaaf  # return to branch tip
+git stash pop  # if you stashed
 ```
 
-(Optional but recommended pre-push verification.)
+Note: this is much slower than relying on CI (each `cargo clean` + rebuild ~3-5 min). Skip unless there's a specific reason to suspect a non-tip commit broke. The bisectability **claim** in T2's commit message stands on the design-level argument (T0 closes LH-4; T2 exercises it; reverting T0 in isolation breaks T2 on Linux x86_64) — it doesn't require a local mechanical re-verification of every commit to be true.
 
 - [ ] **Step 4.3: Final full test pass**
 
