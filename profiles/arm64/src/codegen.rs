@@ -68,6 +68,8 @@ fn walk_model(
 
     let mut params_layout: Vec<ParamSlot> = Vec::new();
     let mut params_floats: usize = 0;
+    // Single pass in UIR-node order — preserves params_layout contract
+    // (one entry per parameter slot in node-index order).
     for (node_idx, node) in model.nodes.iter().enumerate() {
         if let NodeKind::Op {
             op: StdOp::Linear,
@@ -102,6 +104,44 @@ fn walk_model(
                 params_floats += n;
             }
         }
+        // LayerNorm ParamSlot allocation — in the same loop to preserve
+        // UIR-node order in params_layout. Order is contract: γ (Scale)
+        // BEFORE β (Bias). See ParamKind doc.
+        if let NodeKind::Op {
+            op: StdOp::LayerNorm,
+            attrs,
+            ..
+        } = &node.kind
+        {
+            if compiler::ir::layernorm_has_affine(attrs) {
+                let last_dim = node
+                    .ty
+                    .shape
+                    .0
+                    .last()
+                    .copied()
+                    .expect("LayerNorm input rank ≥ 2 enforced at IR build")
+                    as usize;
+
+                // γ — pushed FIRST (contract).
+                params_layout.push(ParamSlot {
+                    kind: ParamKind::LayerNormScale,
+                    origin_node: node_idx,
+                    offset: params_floats,
+                    size: last_dim,
+                });
+                params_floats += last_dim;
+
+                // β — pushed SECOND (contract).
+                params_layout.push(ParamSlot {
+                    kind: ParamKind::LayerNormBias,
+                    origin_node: node_idx,
+                    offset: params_floats,
+                    size: last_dim,
+                });
+                params_floats += last_dim;
+            }
+        }
     }
 
     let sig = FnSig {
@@ -134,6 +174,7 @@ fn walk_model(
 
     // Per-op emission (Tasks 5-8 refactor this dispatch into ops/*).
     let mut add_idx = 0usize;
+    let mut layernorm_idx = 0usize;
     let mut linear_idx = 0usize;
     let mut relu_idx = 0usize;
     let mut softmax_idx = 0usize;
@@ -331,6 +372,60 @@ fn walk_model(
                     ));
                     add_idx += 1;
                 }
+                StdOp::LayerNorm => {
+                    let attrs = match &node.kind {
+                        NodeKind::Op { attrs, .. } => attrs,
+                        _ => unreachable!("matched NodeKind::Op above"),
+                    };
+                    let affine = compiler::ir::layernorm_has_affine(attrs);
+
+                    // Shape is identity ([..., D]). B = product of leading dims; D = last dim.
+                    let shape = &node.ty.shape.0;
+                    let d = *shape
+                        .last()
+                        .expect("LayerNorm input rank ≥ 2 enforced at IR build");
+                    let b: u64 = shape[..shape.len() - 1].iter().product();
+
+                    let src_loc = resolve_loc(&assignment.locs, operands[0]);
+                    let dst_loc = resolve_loc(&assignment.locs, node_idx);
+
+                    // γ/β param offsets — only Some when affine. Looked up from
+                    // params_layout by (kind, origin_node) — same pattern as
+                    // LinearWeight/LinearBias resolution above.
+                    let (gamma_offset, beta_offset) = if affine {
+                        let g = sig
+                            .params_layout
+                            .iter()
+                            .find(|s| {
+                                s.kind == ParamKind::LayerNormScale && s.origin_node == node_idx
+                            })
+                            .map(|s| s.offset);
+                        let bb = sig
+                            .params_layout
+                            .iter()
+                            .find(|s| {
+                                s.kind == ParamKind::LayerNormBias && s.origin_node == node_idx
+                            })
+                            .map(|s| s.offset);
+                        (g, bb)
+                    } else {
+                        (None, None)
+                    };
+
+                    body.push_str(&crate::ops::emit_layernorm(
+                        &abi,
+                        b,
+                        d,
+                        model_idx,
+                        layernorm_idx,
+                        src_loc,
+                        dst_loc,
+                        gamma_offset,
+                        beta_offset,
+                        node.source_span,
+                    )?);
+                    layernorm_idx += 1;
+                }
                 // M5c: #[non_exhaustive] on StdOp requires a wildcard
                 // arm. Future ops (e.g. Tanh, Gelu, Embedding) will
                 // route here until codegen learns them. Returning
@@ -385,6 +480,7 @@ fn classify_op(
         StdOp::Matmul => Ok(()),
         StdOp::MulScalar => Ok(()),
         StdOp::Add => Ok(()),
+        StdOp::LayerNorm => Ok(()),
         // M5c: #[non_exhaustive] on StdOp requires a wildcard arm.
         // Future ops are rejected here until codegen learns them.
         #[allow(unreachable_patterns)]

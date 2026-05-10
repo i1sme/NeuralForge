@@ -25,6 +25,14 @@ pub enum StdOp {
     /// equality (no broadcasting per design principle #1). Shape is
     /// preserved. New in M13 — first A2 brick (residual connections).
     Add,
+    /// M14: LayerNorm — per-row mean/variance/normalize with optional
+    /// learnable affine (γ scale + β bias). Surface forms:
+    ///   `x -> layernorm`               (no affine)
+    ///   `x -> layernorm[affine=true]`  (with affine — γ/β allocated as params)
+    /// Reduction over last dim. Input rank ≥ 2 (design constraint mirroring
+    /// Softmax — not a math limit). Output shape == input shape (identity).
+    /// Default = no affine (opt-in like linear[bias=true]).
+    LayerNorm,
 }
 
 pub struct Signature {
@@ -160,6 +168,7 @@ pub fn resolve(name: &str) -> Option<StdOp> {
         "matmul" => Some(StdOp::Matmul),
         "mul_scalar" => Some(StdOp::MulScalar),
         "add" => Some(StdOp::Add),
+        "layernorm" => Some(StdOp::LayerNorm),
         _ => None,
     }
 }
@@ -223,6 +232,14 @@ pub fn signature(op: StdOp) -> Signature {
             }],
             named: &[],
         },
+        StdOp::LayerNorm => Signature {
+            positional: &[],
+            named: &[ArgSlot {
+                name: "affine",
+                ty: Symbol,
+                required: false,
+            }],
+        },
     }
 }
 
@@ -274,6 +291,18 @@ pub fn infer_output_shape(
                 });
             }
             Ok(inputs[0].clone())
+        }
+        StdOp::LayerNorm => {
+            let input = single_input(inputs)?;
+            // Design constraint: rank-1 is mathematically valid but excluded by
+            // project convention — all NFL use cases are 2D+. Mirrors Softmax.
+            if input.rank() < 2 {
+                return Err(ShapeError::RankTooLow {
+                    required: 2,
+                    actual: input.rank(),
+                });
+            }
+            Ok(input.clone())
         }
     }
 }
@@ -432,7 +461,8 @@ pub fn validate_attrs(op: StdOp, attrs: &[OpAttr]) -> Result<(), AttrError> {
         | StdOp::Softmax
         | StdOp::Matmul
         | StdOp::MulScalar
-        | StdOp::Add => Ok(()),
+        | StdOp::Add
+        | StdOp::LayerNorm => Ok(()),
     }
 }
 
@@ -457,6 +487,7 @@ impl std::fmt::Display for StdOp {
             StdOp::Matmul => "matmul",
             StdOp::MulScalar => "mul_scalar",
             StdOp::Add => "add",
+            StdOp::LayerNorm => "layernorm",
         };
         write!(f, "{}", name)
     }
@@ -470,6 +501,16 @@ pub fn linear_has_bias(attrs: &[OpAttr]) -> bool {
     attrs
         .iter()
         .any(|a| a.name == "bias" && matches!(&a.value, AttrValue::Symbol(s) if s == "true"))
+}
+
+/// True iff the op's attribute list includes `affine=true`. Mirrors
+/// `linear_has_bias` semantics (Symbol-equals-"true" check). Anything
+/// other than `Symbol("true")` — absent, `Symbol("false")`, other
+/// type — returns false (= no affine).
+pub fn layernorm_has_affine(attrs: &[OpAttr]) -> bool {
+    attrs
+        .iter()
+        .any(|a| a.name == "affine" && matches!(&a.value, AttrValue::Symbol(s) if s == "true"))
 }
 
 /// True iff the op's attribute list includes `transpose_b=true`.
