@@ -2261,12 +2261,16 @@ fn emit_layernorm_x86_64_does_not_extend_function_level_callee_saved_set() {
     // The function header is everything before the outer row loop. The op-local
     // pushes appear between the function entry and .Lln_row_ — that is expected
     // and correct. What must NOT appear: "pushq   %rbx\n    pushq   %r12\n" as
-    // the function-level 5-register block. Check absence of the %r15 push
-    // (last in the 5-reg block) in the header section.
+    // the function-level 5-register block (pushq %rbx is the first push in the
+    // function-level callee-saved block per asm.rs:70; op-local block starts
+    // with pushq %r15 instead). Post-M15 the op-local block DOES push %r15, so
+    // checking for %r15 alone would false-positive — check the function-level
+    // sentinel pattern instead.
     let header = &asm[..body_start];
     assert!(
-        !header.contains("    pushq   %r15\n"),
-        "Function-level prologue must NOT push %r15 (callee-saved 5-reg block absent). \
+        !header.contains("    pushq   %rbx\n    pushq   %r12\n"),
+        "Function-level prologue must NOT push the 5-register callee-saved block \
+         (%rbx/%r12-%r15 sequence — signals compute_callee_saved returned true). \
          Header:\n{header}"
     );
 }
@@ -2302,4 +2306,143 @@ fn emit_layernorm_x86_64_affine_allocates_scale_before_bias_in_params_layout() {
          β (LayerNormBias at idx {bias_idx}) in params_layout. Layout: {:?}",
         sig.params_layout
     );
+}
+
+// ---- M15 LH-4 cleanup tests: emit_layernorm at N=2/3/4 -----------------------
+//
+// Mirrors the emit_linear_n{2,3,4}_does_not_clobber_output_reg pattern
+// (M14 commit 916e9c7). Validates LH-4 closure: %r8 and %r9 must NOT
+// appear as scratch destinations in the per-row body at N=3 (output_reg=%r8)
+// or N=4 (output_reg=%r9). Post-fix expectation: per-row src ptr lives in
+// %r15 (op-local pushq/popq); per-row dst ptr lives in %rbp (function-level
+// prologue handles).
+
+#[test]
+fn emit_layernorm_n2_does_not_clobber_output_reg() {
+    // Parametric guard. At N=2, output_reg=%rcx, never aliased by per-row
+    // ptrs in any era (passes pre- and post-fix). Kept for coverage parity
+    // across the supported N range, mirroring emit_linear pattern.
+    use crate::abi::AbiContext;
+    let abi = AbiContext { n_inputs: 2 };
+    let asm = emit_layernorm_x86_64_at(2, false);
+    assert_emit_abi_clean("emit_layernorm", &asm, &abi);
+}
+
+#[test]
+fn emit_layernorm_n3_does_not_clobber_output_reg() {
+    // Primary LH-4 unit test. At N=3, output_reg = %r8 (INPUT_REGS[4]).
+    //
+    // Pre-fix: emit_layernorm wrote per-row src ptr to %r8 inside the outer
+    // row loop:
+    //     leaq    (%rbx, %rax, 1), %r8       ← clobbers output_reg
+    // and used it as src base in the three Pass loops:
+    //     movss   (%r8, %rax, 4), %xmm6
+    // Subsequent ops in the same function would see a corrupted output_reg.
+    //
+    // Post-fix: src ptr scratch relocated to %r15 (callee-saved per SysV;
+    // op-local pushq %r15 / popq %r15 inside emit_layernorm body — function-
+    // level prologue unchanged). Dst ptr scratch relocated to %rbp (function-
+    // level prologue handles).
+
+    let asm = emit_layernorm_x86_64_at(3, false);
+
+    // Pre-fix marker — must NOT appear:
+    assert!(
+        !asm.contains(", %r8\n"),
+        "src ptr scratch must not write to %r8 at N=3 (output_reg alias). Asm:\n{asm}"
+    );
+    assert!(
+        !asm.contains("(%r8,"),
+        "src ptr scratch must not be used as base in indexed load at N=3. Asm:\n{asm}"
+    );
+    assert!(
+        !asm.contains(", %r9\n"),
+        "dst ptr scratch must not write to %r9 at N=3 (params_reg alias for next op). Asm:\n{asm}"
+    );
+    assert!(
+        !asm.contains("(%r9,"),
+        "dst ptr scratch must not be used as base in indexed store at N=3. Asm:\n{asm}"
+    );
+
+    // Post-fix expectations: src ptr in %r15 (op-local push/pop), dst ptr in %rbp.
+    assert!(
+        asm.contains("    pushq   %r15\n"),
+        "op-local pushq %r15 must appear (callee-saved op-local save for src ptr). Asm:\n{asm}"
+    );
+    assert!(
+        asm.contains("    popq    %r15\n"),
+        "op-local popq %r15 must appear (matching restore). Asm:\n{asm}"
+    );
+    assert!(
+        asm.contains("(%r15,"),
+        "src ptr should be %r15 (indexed load base). Asm:\n{asm}"
+    );
+    assert!(
+        asm.contains("(%rbp,"),
+        "dst ptr should be %rbp (indexed store base). Asm:\n{asm}"
+    );
+
+    // Push count check: no-affine path = 3 op-local pushes (%r15, %rbx, %r14).
+    let pushq_count = asm.matches("    pushq   ").count();
+    let popq_count = asm.matches("    popq    ").count();
+    assert!(
+        pushq_count >= 3,
+        "expected at least 3 op-local pushq in no-affine layernorm body, got {pushq_count}. Asm:\n{asm}"
+    );
+    assert_eq!(
+        pushq_count, popq_count,
+        "push/pop count mismatch — LIFO discipline broken. Asm:\n{asm}"
+    );
+}
+
+#[test]
+fn emit_layernorm_n4_does_not_clobber_output_reg() {
+    // Secondary LH-4 unit test. At N=4, output_reg = %r9 (INPUT_REGS[5])
+    // AND params_reg = %r8 (INPUT_REGS[4]). Both registers are ABI-occupied;
+    // pre-fix, layernorm clobbered both. Post-fix, neither appears as
+    // scratch destination in body.
+    //
+    // No N=4 runtime fixture in M15 (transformer_block.nfl is N=3).
+    // Asm-shape closure follows M14 LH-2/3 precedent for emit_linear N=4
+    // (four_input_matmul.nfl has no linear op, so emit_linear N=4 closure
+    // was also asm-only).
+
+    let asm = emit_layernorm_x86_64_at(4, true); // affine: 5 op-local pushes
+
+    // Pre-fix markers — must NOT appear:
+    assert!(
+        !asm.contains(", %r8\n"),
+        "no scratch may write to %r8 at N=4 (params_reg alias). Asm:\n{asm}"
+    );
+    assert!(
+        !asm.contains("(%r8,"),
+        "no scratch may use %r8 as base at N=4. Asm:\n{asm}"
+    );
+    assert!(
+        !asm.contains(", %r9\n"),
+        "no scratch may write to %r9 at N=4 (output_reg alias). Asm:\n{asm}"
+    );
+    assert!(
+        !asm.contains("(%r9,"),
+        "no scratch may use %r9 as base at N=4. Asm:\n{asm}"
+    );
+
+    // Post-fix: %r15 + %rbp scratch present in affine path.
+    assert!(
+        asm.contains("    pushq   %r15\n") && asm.contains("    popq    %r15\n"),
+        "op-local pushq/popq %r15 must bracket affine body. Asm:\n{asm}"
+    );
+    assert!(
+        asm.contains("(%r15,") && asm.contains("(%rbp,"),
+        "src/dst ptrs should be %r15/%rbp. Asm:\n{asm}"
+    );
+
+    // Affine path = 5 op-local pushes (%r15, %r12, %r13, %rbx, %r14).
+    let pushq_count = asm.matches("    pushq   ").count();
+    let popq_count = asm.matches("    popq    ").count();
+    assert!(
+        pushq_count >= 5,
+        "expected at least 5 op-local pushq in affine layernorm body, got {pushq_count}. Asm:\n{asm}"
+    );
+    assert_eq!(pushq_count, popq_count, "push/pop LIFO. Asm:\n{asm}");
 }

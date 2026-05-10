@@ -3,11 +3,11 @@
 //! LayerNorm codegen — x86_64 SSE2 (M14).
 //!
 //! Per-row 3-pass: mean → variance + inv_std → normalize + optional affine.
-//! Native `sqrtss` — no libm call. No-affine path: 2 op-local callee-saved
-//! pushes (%rbx, %r14 for src/dst base ptrs). With-affine adds 2 more
-//! (%r12, %r13 for γ/β base ptrs). All op-local — function-level
-//! `compute_callee_saved` unchanged (M13 pre-Task-5 arm64 precedent). No
-//! FFI calls (native `sqrtss`).
+//! Native `sqrtss` — no libm call. No-affine path: 3 op-local callee-saved
+//! pushes (%r15, %rbx, %r14 — M15 LH-4 adds %r15 for per-row src ptr). With-
+//! affine adds 2 more (%r12, %r13 for γ/β base ptrs) → 5 total. All op-local —
+//! function-level `compute_callee_saved` unchanged (M13 pre-Task-5 arm64
+//! precedent). No FFI calls (native `sqrtss`).
 //!
 //! Pointer materialisation order (M14 bugfix): the op-local `pushq` block
 //! comes FIRST (saves caller's callee-saved values), then base pointers are
@@ -25,12 +25,12 @@
 //! FFI test failure when the caller's %rbx/%r12/%r14 hold loop state. The
 //! current order is the correct fix.
 //!
-//! Register plan (M14 spec §8, N=1..2 scope, finalized):
+//! Register plan (M15 LH-4 closed, N=1..4 scope, finalized):
 //!   %rax  = x_j (inner counter); also temp for byte-offset compute before counter use
 //!   %r10  = bound scratch (clobbered every emit_imm32_to_r10 call)
 //!   %r11  = x_i (outer counter)
-//!   %r8   = x_in  (per-row input ptr;  recomputed per row) — free at N≤2
-//!   %r9   = x_out (per-row output ptr; recomputed per row) — free at N≤2
+//!   %r15  = x_in  (per-row input ptr;  recomputed per row) — callee-saved + op-local push/pop (M15 LH-4 — was %r8 pre-M15)
+//!   %rbp  = x_out (per-row output ptr; recomputed per row) — callee-saved + function-level prologue handles (M15 LH-4 — was %r9 pre-M15)
 //!   %rbx  = src_base (set ONCE; callee-saved + op-local push/pop)
 //!   %r14  = dst_base (set ONCE; callee-saved + op-local push/pop)
 //!   %r12  = x_gamma (γ base ptr) — affine only, callee-saved + op-local push/pop
@@ -45,21 +45,21 @@
 //!   %xmm7 = s_g (γ_j load — affine only)
 //!   %xmm8 = s_b (β_j load — affine only; xmm8 caller-saved on SysV, no AAPCS-style concern)
 //!
-//! All scratch in non-INPUT_REGS scope at N=1..2 (the M14 fixture range).
-//! Higher-N (N=3..4) not validated; spec §8.7 documents the deferral.
+//! All scratch in non-INPUT_REGS scope at N=1..4 (M15 closes LH-4 with
+//! transformer_block.nfl runtime evidence at N=3; N=4 closure is asm-only,
+//! mirroring M14 LH-2/3 precedent for emit_linear N=4).
 //!
 //! Why %rax for the inner counter (not %r10): emit_imm32_to_r10 clobbers
 //! %r10 every call, so %r10 cannot hold a long-lived counter. %rax is
 //! caller-saved scratch (free for op use without save/restore) and is
 //! NOT touched by emit_imm32_to_r10.
 //!
-//! Stack alignment invariant (M-future foot-gun): always-pushed %rbx +
-//! %r14 add +16 bytes (pair preserves alignment), conditional %r12 + %r13
-//! add +16 (pair preserves). `pushq %rbp` in function prologue is +8 → odd.
-//! M14 fixtures never co-locate LayerNorm with Softmax (the only op
-//! emitting `call expf@PLT`), so misalignment never reaches a `call` site.
-//! If a future fixture combines them, add a one-time `subq $8, %rsp`
-//! adjustment outside the inner body.
+//! Stack alignment invariant (M-future foot-gun): unconditional pushes
+//! %r15 + %rbx + %r14 add +24 bytes (3 pushes, no-affine path). Affine
+//! path adds %r12 + %r13 → +40 bytes total (5 pushes). Both totals are
+//! ≡ 8 mod 16 (odd-by-8). `pushq %rbp` in function prologue is also +8.
+//! Inside-body %rsp is therefore NOT 16-byte aligned — OK because
+//! emit_layernorm is leaf (native sqrtss, no `call` site in body).
 
 use crate::abi::AbiContext;
 use crate::asm::emit_imm32_to_r10;
@@ -68,18 +68,18 @@ use compiler::ast::Span;
 use profile_api::LowerError;
 
 /// Bytes pushed to stack by the op-local callee-saved save block when affine
-/// is enabled (4 pushq: %r12, %r13, %rbx, %r14).
+/// is enabled (5 pushq: %r15, %r12, %r13, %rbx, %r14).
 ///
 /// MUST equal 8 × number of `pushq` instructions emitted in the affine save
 /// block of `emit_layernorm`. If a future change adds/removes a pushq without
 /// updating this constant, `materialise_ptr_with_rsp_bias`'s debug_assert will
 /// fire — the address compensation depends on this number being exact.
-const OP_LOCAL_PUSH_BYTES_AFFINE: usize = 4 * 8;
+const OP_LOCAL_PUSH_BYTES_AFFINE: usize = 5 * 8;
 
 /// Bytes pushed to stack by the op-local callee-saved save block when affine
-/// is disabled (2 pushq: %rbx, %r14). Same invariant as the affine const —
+/// is disabled (3 pushq: %r15, %rbx, %r14). Same invariant as the affine const —
 /// keep in sync with the actual push count in `emit_layernorm`.
-const OP_LOCAL_PUSH_BYTES_NO_AFFINE: usize = 2 * 8;
+const OP_LOCAL_PUSH_BYTES_NO_AFFINE: usize = 3 * 8;
 
 /// Materialise a `BufferLoc` into `dst_reg`, with `rsp_bias_bytes` added to
 /// stack-relative offsets to compensate for op-local `pushq` instructions
@@ -164,6 +164,7 @@ pub fn emit_layernorm(
     } else {
         OP_LOCAL_PUSH_BYTES_NO_AFFINE
     };
+    s.push_str("    pushq   %r15\n");
     if has_affine {
         s.push_str("    pushq   %r12\n");
         s.push_str("    pushq   %r13\n");
@@ -222,14 +223,18 @@ pub fn emit_layernorm(
     s.push_str("    cmpq    %r10, %r11\n");
     s.push_str(&format!("    jge     .Lln_row_end_{lid}\n"));
 
-    // Compute per-row pointers: %r8 = src_base + i*d*4; %r9 = dst_base + i*d*4.
+    // Compute per-row pointers: %r15 = src_base + i*d*4; %rbp = dst_base + i*d*4.
     // Use %rax as transient byte-offset accumulator (then re-zeroed for Pass 1
     // counter use below — emit_imm32_to_r10 doesn't touch %rax).
+    //
+    // M15 LH-4: per-row scratch was %r8/%r9 pre-M15; relocated to %r15 (op-local
+    // pushq/popq) and %rbp (function-level prologue handles) to avoid clobbering
+    // output_reg at N=3 (=%r8) and params_reg/output_reg at N=4 (=%r8/%r9).
     s.push_str(&emit_imm32_to_r10((d * 4) as u32));
     s.push_str("    movq    %r11, %rax\n");
     s.push_str("    imulq   %r10, %rax\n"); // %rax = i * d * 4 (byte offset)
-    s.push_str("    leaq    (%rbx, %rax, 1), %r8\n");
-    s.push_str("    leaq    (%r14, %rax, 1), %r9\n");
+    s.push_str("    leaq    (%rbx, %rax, 1), %r15\n");
+    s.push_str("    leaq    (%r14, %rax, 1), %rbp\n");
 
     // === Pass 1: μ = (1/D) · Σ x_j ===
     s.push_str("    xorps   %xmm0, %xmm0\n"); // s_acc = 0
@@ -238,7 +243,7 @@ pub fn emit_layernorm(
     s.push_str(&emit_imm32_to_r10(d as u32)); // bound = d → %r10
     s.push_str("    cmpq    %r10, %rax\n");
     s.push_str(&format!("    jge     .Lln_p1_end_{lid}\n"));
-    s.push_str("    movss   (%r8, %rax, 4), %xmm6\n");
+    s.push_str("    movss   (%r15, %rax, 4), %xmm6\n");
     s.push_str("    addss   %xmm6, %xmm0\n");
     s.push_str("    incq    %rax\n");
     s.push_str(&format!("    jmp     .Lln_p1_{lid}\n"));
@@ -253,7 +258,7 @@ pub fn emit_layernorm(
     s.push_str(&emit_imm32_to_r10(d as u32));
     s.push_str("    cmpq    %r10, %rax\n");
     s.push_str(&format!("    jge     .Lln_p2_end_{lid}\n"));
-    s.push_str("    movss   (%r8, %rax, 4), %xmm6\n");
+    s.push_str("    movss   (%r15, %rax, 4), %xmm6\n");
     s.push_str("    subss   %xmm1, %xmm6\n"); // %xmm6 -= mean
     s.push_str("    mulss   %xmm6, %xmm6\n"); // %xmm6 = (x − μ)²
     s.push_str("    addss   %xmm6, %xmm0\n");
@@ -274,7 +279,7 @@ pub fn emit_layernorm(
     s.push_str(&emit_imm32_to_r10(d as u32));
     s.push_str("    cmpq    %r10, %rax\n");
     s.push_str(&format!("    jge     .Lln_p3_end_{lid}\n"));
-    s.push_str("    movss   (%r8, %rax, 4), %xmm6\n");
+    s.push_str("    movss   (%r15, %rax, 4), %xmm6\n");
     s.push_str("    subss   %xmm1, %xmm6\n"); // %xmm6 -= mean
     s.push_str("    mulss   %xmm5, %xmm6\n"); // %xmm6 *= s_inv_std (NOT divss — Q4)
     if has_affine {
@@ -283,7 +288,7 @@ pub fn emit_layernorm(
         s.push_str("    movss   (%r13, %rax, 4), %xmm8\n"); // β_j → %xmm8
         s.push_str("    addss   %xmm8, %xmm6\n");
     }
-    s.push_str("    movss   %xmm6, (%r9, %rax, 4)\n");
+    s.push_str("    movss   %xmm6, (%rbp, %rax, 4)\n");
     s.push_str("    incq    %rax\n");
     s.push_str(&format!("    jmp     .Lln_p3_{lid}\n"));
     s.push_str(&format!(".Lln_p3_end_{lid}:\n"));
@@ -299,6 +304,7 @@ pub fn emit_layernorm(
         s.push_str("    popq    %r13\n");
         s.push_str("    popq    %r12\n");
     }
+    s.push_str("    popq    %r15\n");
 
     // Per-function .rodata constants pool. The `.text` directive after the
     // constants restores the assembler to the .text section before
