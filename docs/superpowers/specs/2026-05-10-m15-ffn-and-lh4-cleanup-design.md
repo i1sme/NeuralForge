@@ -246,11 +246,13 @@ The affine path triggers the **full 5-push block** (`%r15`/`%r12`/`%r13`/`%rbx`/
 
 Currently in the workspace:
 - `profiles/{arm64,x86_64}/tests/common/mod.rs` exports `cc_available`, `compile_to_dylib`/`compile_to_so`, **`layernorm_ref`** (M14 addition).
-- `profiles/{arm64,x86_64}/tests/integration.rs` defines **file-local** `reference_matmul` (line 11/15) and `reference_bias_add` (line 25/29).
+- `profiles/{arm64,x86_64}/tests/integration.rs` defines **file-local** `reference_matmul` (line 11/15), `reference_bias_add` (line 25/29), **and `reference_relu`** (line 36/40).
 
-For M15, `ffn_ref` and `transformer_block_ref` need to compose `reference_matmul` + `reference_bias_add` + `layernorm_ref`. Therefore `reference_matmul` and `reference_bias_add` must be **promoted** from `integration.rs` file-local to `common/mod.rs` `pub fn` — per profile, separate copies (CLAUDE.md design principle 3 — profile isolation; no cross-profile sharing).
+For M15, `ffn_ref` and `transformer_block_ref` need to compose all three primitives plus `layernorm_ref`. Therefore **all three** (`reference_matmul`, `reference_bias_add`, `reference_relu`) must be **promoted** from `integration.rs` file-local to `common/mod.rs` `pub fn` — per profile, separate copies (CLAUDE.md design principle 3 — profile isolation; no cross-profile sharing).
 
-**Promotion caveat (mandatory for implementer):** before moving the function bodies verbatim, **inspect the existing signatures for test-specific quirks** (hardcoded shape assumptions, baked-in stride invariants, undocumented argument-order assumptions). If any quirk surfaces, generalise during the move — do **not** blindly copy. The promoted functions must work correctly for the new M15 shapes (`(B=2, K=4, N=8)` for FFN's first matmul; `(B=2, K=8, N=4)` for the second), not just the existing call-site shapes.
+(Note: original spec body said "matmul + bias_add" — corrected during plan-writing when actual `integration.rs` contents revealed `reference_relu` was also file-local. Promotion is unified across all three for symmetry and `ffn_ref`/`transformer_block_ref` reuse.)
+
+**Promotion caveat (mandatory for implementer):** before moving the function bodies verbatim, **inspect the existing signatures for test-specific quirks** (hardcoded shape assumptions, baked-in stride invariants, undocumented argument-order assumptions). If any quirk surfaces, generalise during the move — do **not** blindly copy. The promoted functions must work correctly for the new M15 shapes (`(B=2, K=4, N=8)` for FFN's first matmul; `(B=2, K=8, N=4)` for the second), not just the existing call-site shapes. (Verification during plan-writing: signatures are clean — generic on `b/k/n` parameters, no test-specific quirks; verbatim move is safe.)
 
 ### 3.4 Per-profile reference impls
 
@@ -268,10 +270,10 @@ pub fn ffn_ref(
     // 1. linear #1: matmul + bias_add
     let mm1 = reference_matmul(input, w1, batch, dim, hidden);
     let mm1_b = reference_bias_add(&mm1, b1, hidden);
-    // 2. relu (inline)
-    let relu_out: Vec<f32> = mm1_b.iter().map(|&x| x.max(0.0)).collect();
+    // 2. relu (uses promoted reference_relu)
+    let r1 = reference_relu(&mm1_b);
     // 3. linear #2: matmul + bias_add
-    let mm2 = reference_matmul(&relu_out, w2, batch, hidden, dim);
+    let mm2 = reference_matmul(&r1, w2, batch, hidden, dim);
     reference_bias_add(&mm2, b2, dim)
 }
 ```
@@ -297,7 +299,7 @@ pub fn transformer_block_ref(
 }
 ```
 
-**Helper-reuse rule (CRITICAL — load-bearing for both refs):** `ffn_ref` MUST call `reference_matmul` + `reference_bias_add` (after promotion). `transformer_block_ref` MUST call `layernorm_ref` (M14, in `common/mod.rs`) + `ffn_ref` (or its promoted helper components) + inline element-wise add. **Do NOT reimplement matmul reduction loop, bias add, or layernorm normalization.** Divergent reduction order produces 1+ ULP mismatches that fail bit-exact comparison and are deeply painful to debug. Existing helpers are M14-verified bit-exact against emitters — reuse them as-is.
+**Helper-reuse rule (CRITICAL — load-bearing for both refs):** `ffn_ref` MUST call `reference_matmul` + `reference_bias_add` + `reference_relu` (all three promoted). `transformer_block_ref` MUST call `layernorm_ref` (M14, in `common/mod.rs`) + `ffn_ref` (or its promoted helper components) + inline element-wise add. **Do NOT reimplement matmul reduction loop, bias add, relu, or layernorm normalization.** Divergent reduction order produces 1+ ULP mismatches that fail bit-exact comparison and are deeply painful to debug. Existing helpers are M14-verified bit-exact against emitters — reuse them as-is.
 
 ### 3.5 FFI integration tests
 
@@ -365,11 +367,11 @@ Commit order is **strict** for bisectability: each commit independently passes `
 **Edits in this commit:**
 
 1. `tests/fixtures/ffn.nfl` — new file (§3.1 verbatim).
-2. **Helper promotion (per profile, separate copies):**
-   - `profiles/arm64/tests/common/mod.rs`: add `pub fn reference_matmul(...)` + `pub fn reference_bias_add(...)` (move from `integration.rs:11-30`, applying §3.3 caveat about test-specific quirks). Add `pub fn ffn_ref(...)` per §3.4.
-   - `profiles/arm64/tests/integration.rs`: remove file-local `reference_matmul` / `reference_bias_add` definitions; update existing call sites to `common::reference_matmul` / `common::reference_bias_add` via `use common::{reference_matmul, reference_bias_add};` (or fully-qualified). Add `#[test] fn ffn_ffi()` that compiles `ffn.nfl`, FFI-calls, compares against `common::ffn_ref(...)`.
-   - `profiles/x86_64/tests/common/mod.rs`: same promotion + `ffn_ref` (separate copy — NOT shared from arm64).
-   - `profiles/x86_64/tests/integration.rs`: same removal/refactor + `#[test] fn ffn_ffi()` with `#[cfg]` skip-on-macOS pattern from M9.
+2. **Helper promotion (per profile, separate copies — all 3 helpers):**
+   - `profiles/arm64/tests/common/mod.rs`: add `pub fn reference_matmul(...)` + `pub fn reference_bias_add(...)` + `pub fn reference_relu(...)` (move from `integration.rs:11-38`, applying §3.3 caveat). Add `pub fn ffn_ref(...)` per §3.4.
+   - `profiles/arm64/tests/integration.rs`: remove file-local `reference_matmul` / `reference_bias_add` / `reference_relu` definitions; update via `use common::{reference_matmul, reference_bias_add, reference_relu};`. Add `#[test] fn ffn_ffi()` that compiles `ffn.nfl`, FFI-calls, compares against `common::ffn_ref(...)`.
+   - `profiles/x86_64/tests/common/mod.rs`: same promotion (all 3) + `ffn_ref` (separate copy — NOT shared from arm64).
+   - `profiles/x86_64/tests/integration.rs`: same removal/refactor + `#[test] fn ffn_ffi()` (file already has top-level `#![cfg(all(target_os = "linux", target_arch = "x86_64"))]` — no per-test cfg needed).
 
 **CRITICAL implementer requirement:** `ffn_ref` MUST compose existing promoted `reference_matmul` + `reference_bias_add` (do NOT rewrite matmul logic). See §3.4 helper-reuse rule.
 
