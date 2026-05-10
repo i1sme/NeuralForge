@@ -1,23 +1,25 @@
 # `arm64` Profile — AArch64 Scalar Codegen
 
-> **Status:** M13 complete (add op + emit_linear ABI fix). Lowers `linear` (with or without
+> **Status:** M14 complete (LayerNorm + affine). Lowers `linear` (with or without
 > `bias=true`), `relu`, `dropout` (no-op pass-through at inference, or
 > explicit copy-loop when dropout IS model output — see §M8),
 > `softmax` (numerically stable 3-pass via libm `expf`, generalised to
 > rank ≥ 2 in M10), `linear → softmax` fused via `PostOp::SoftmaxRow`,
-> and the two M10 attention-pattern ops `matmul` (multi-dim, optional
-> `transpose_b`) and `mul_scalar` (scalar pre-load + flat loop) to
+> the two M10 attention-pattern ops `matmul` (multi-dim, optional
+> `transpose_b`) and `mul_scalar` (scalar pre-load + flat loop),
+> `add` (elementwise tensor addition, M13), and `layernorm` (3-pass
+> per-row normalization + optional affine, native `fsqrt`, M14) to
 > native AArch64 Mach-O assembly. The compiler runs the default
 > UIR-pass pipeline (`EliminateDropout` + `FuseLinearRelu` +
 > `FuseLinearSoftmax`) before lowering. All 5 M3 positive fixtures +
 > M4a + the M10 self-attention fixture run end-to-end via FFI;
 > bit-exact equivalence (per-profile) proven on classifier,
-> mixed_args, and self_attention integration tests. M8 added
-> dim-immediate uniformity via `asm::emit_imm32` and the
+> mixed_args, self_attention, and M14 LayerNorm integration tests. M8
+> added dim-immediate uniformity via `asm::emit_imm32` and the
 > dropout-as-output copy-loop fix; M10 added the multi-dim matmul
 > outer-loop wrapper and the post-Group-10 softmax FFI-register
 > preservation (`stp/ldp x0/x1/x2`).
-> **Authoritative source:** `profiles/arm64/src/` and the M4a/M4b/M5a/M5b/M6/M7/M8
+> **Authoritative source:** `profiles/arm64/src/` and the M4a/M4b/M5a/M5b/M6/M7/M8/M14
 > specs under `docs/superpowers/specs/`.
 
 The `arm64` profile is the first concrete codegen profile in NeuralForge. It
@@ -115,6 +117,9 @@ downstream `match` consumers.
 | `Relu`                     | ✅        | Standalone (only in `--no-passes` mode, or `--passes` filter excluding `fuse_linear_relu`): separate elementwise loop, copy-with-clamp src→dst (§4.2). Default mode: fused into preceding Linear via `FuseLinearRelu` UIR pass — see §4.9. |
 | `Dropout`                  | ✅        | Standalone (only in `--no-passes` mode, or `--passes` filter excluding `eliminate_dropout`): no asm, `BufferLoc::Alias(operand)` propagation (§4.5). Default mode: removed from UIR by `EliminateDropout` UIR pass before reaching the profile. |
 | `Softmax`                  | ✅        | Numerically stable 3-pass (max → exp → normalise), `bl _expf` from libm. With `--no-passes` or `--passes` filter excluding `fuse_linear_softmax`: emitted as a standalone function via `emit_softmax` (labels `.Lsm_*`; see §4.4). Default pipeline (M6+): fused into the preceding Linear's `emit_linear` via `PostOp::SoftmaxRow` (row-wise tail; labels `.Lfsmx_*`; see §4.10). |
+| `Add`                      | ✅        | Flat elementwise loop (M13). See §M13 ops. |
+| `LayerNorm` (no `affine`)  | ✅        | 3-pass per-row: mean → variance + inv_std → normalize. Native `fsqrt`. Leaf (M14). See §M14 ops. |
+| `LayerNorm` (`affine=true`) | ✅       | 3-pass + per-element γ/β affine transform. `s_b` reuses `s2` (see §M14 ops). |
 | `Input`                    | ✅        | Marker only — `BufferLoc::InputReg` (`x0`).                   |
 
 ### Codegen-decision: `linear[N]` without `bias` attribute
@@ -987,3 +992,87 @@ risk diff.
 Cross-reference: same class of bug as Task 1's x86_64 `emit_matmul`
 fix (j-counter `%r9` collided with output_reg at N=4); resolved on
 x86_64 via register relocation (`%rbp`), on arm64 via save/restore.
+
+---
+
+## M14 ops
+
+### `emit_layernorm` (`profiles/arm64/src/ops/layernorm.rs`)
+
+Layer normalization: per-row 3-pass kernel (mean → variance + inv_std →
+normalize + optional affine). Native `fsqrt` — no FFI dependency. Leaf
+function (no `bl` calls).
+
+**Register plan:**
+
+| Register | Role                                                                    |
+|----------|-------------------------------------------------------------------------|
+| `x6`     | Bound scratch (clobbered by every `emit_imm32` call)                   |
+| `x9`     | Per-row input pointer (`x_in`) — recomputed at top of each row         |
+| `x10`    | Per-row output pointer (`x_out`) — recomputed at top of each row       |
+| `x11`    | Inner loop counter (`x_j`)                                              |
+| `x12`    | Outer loop counter (`x_i`)                                              |
+| `x13`    | γ base pointer (affine only)                                            |
+| `x14`    | β base pointer (affine only)                                            |
+| `x16`    | `src_base` (materialised once via `materialise_ptr`; lives entire function) |
+| `x17`    | `dst_base` (materialised once via `materialise_ptr`; lives entire function) |
+| `s0`     | `s_acc` (accumulator); reused as `s_var` at end of Pass 2              |
+| `s1`     | `s_mean` (live Pass 2 + Pass 3)                                         |
+| `s2`     | `s_inv_d` (1/D constant); **reused as `s_b`** in Pass 3 affine path; rematerialised inline (`movz/movk/fmov`) at end of each row's Pass 3 — 3 instructions/row, identical encoding cost to the entry materialisation |
+| `s3`     | `s_eps` (1e-5; live across outer batch loop)                            |
+| `s4`     | `s_one` (1.0; live across outer batch loop)                             |
+| `s5`     | `s_inv_std` (Q4 constraint — held through Pass 3; not recomputed per element) |
+| `s6`     | `s_t` (per-element temp)                                                |
+| `s7`     | `s_g` (γⱼ load — affine only)                                          |
+
+**AAPCS64 register safety note.** All scratch registers are in the caller-saved
+ranges: `x6`, `x9`–`x17` (GPRs), `s0`–`s7` (FP, lower 32 bits of `v0`–`v7`).
+Registers `s8`–`s15` (lower 32 bits of `v8`–`v15`) are callee-saved per
+AAPCS64 §6.1.2 and are **intentionally avoided** — writing them in a leaf
+function without `stp`/`ldp` save/restore would silently corrupt the caller's
+`v8`–`v15`. The `s_b` slot (β load in affine path) reuses `s2` after
+`s_inv_d` consumption to stay within `s0`–`s7`, at the cost of a 3-instruction
+reload of `s2` (= `s_inv_d`) at the end of each row's Pass 3 when affine is
+enabled.
+
+**Note on `x16`/`x17`:** AAPCS64 designates these as intra-procedure-call
+scratch (IP0/IP1), used by linker stubs across `bl` calls. Because
+`emit_layernorm` has no `bl` calls (leaf function), `x16`/`x17` are
+effectively free for op use.
+
+**3-pass structure:**
+
+1. **Pass 1 — mean:** Load each element, accumulate into `s0` (`s_acc`), then
+   `s_mean = s_acc * s_inv_d`. `fmadd` not used — accumulation is a plain
+   `fadd` to keep the pass structurally parallel with Pass 2.
+2. **Pass 2 — variance + inv_std:** For each element, compute `(xⱼ − μ)²`
+   and accumulate. Then `s_var = s_acc * s_inv_d + s_eps`; `s_var = fsqrt(s_var)`;
+   `s_inv_std = s_one / s_var` (single divide after sqrt; not per-element).
+3. **Pass 3 — normalize + optional affine:** For each element,
+   `s_t = (xⱼ − s_mean) * s_inv_std`; if affine: `s_t = s_t * γⱼ + βⱼ`.
+   Store `s_t` to output.
+
+**Implicit cost — `s_inv_d` rematerialisation.** When affine is enabled, `s2`
+(`s_inv_d`) is consumed as `s_b` during the Pass 3 affine multiply-accumulate.
+Rematerialisation of `s2` at the end of each row's Pass 3 costs 3 instructions
+(`emit_f32_const` emits `movz w9, #lo` / optional `movk w9, #hi, lsl #16` /
+`fmov s2, w9`). This is negligible vs the O(D) per-row work.
+
+**Constants materialisation.** `s_eps` (1e-5 as f32 bits), `s_one` (1.0 as f32
+bits), and `s_inv_d` (1.0/D as f32 bits) are materialised inline once before
+the outer batch loop via the private `emit_f32_const` helper (`movz w9, #lo`
++ optional `movk w9, #hi, lsl #16` + `fmov s_dst, w9`). No `.rodata` pool, no
+`adrp`/`ldr` chain — mirrors the inline materialisation pattern softmax uses
+for its `-inf` constant. The `w9` GPR is safe as a temporary at the
+materialisation sites (caller-saved; only briefly live for the `fmov` bridge).
+
+**Leaf function discipline.** No `bl` — no FFI save/restore, no non-leaf frame
+record, no callee-saved register save. `compute_is_leaf` returns
+`LeafKind::Leaf` for any model that contains only LayerNorm (and no Softmax).
+`compute_callee_saved` is unchanged by M14.
+
+**Validated at N=1..2.** M14 fixtures (`layernorm_no_affine.nfl`,
+`layernorm_affine.nfl`, `pre_ln_block.nfl`) use N=1 and N=2. Higher-N is
+structurally safe on arm64 because the register plan lives entirely in
+`x6`/`x9`–`x17` + `s0`–`s7`, which never overlap the ABI argument window
+(`x0`–`x5`) at any N ∈ {1..4}.
