@@ -10,18 +10,20 @@ nfl_forward_TinyMLP:
     pushq   %r15
     subq    $24, %rsp
     # matmul: input [8,4] x weights [4,2] -> output [8,2] + fused
-    movq    %rdi, %r8
+    movq    %rdi, %r14
     movq    %rdx, %r11
-    movq    %rsi, %r9
+    movq    %rsi, %r15
+    pushq   %r14
+    pushq   %r15
     xorq    %rax, %rax
 .Lmm_i_0_0:
     movl    $8, %r10d
     cmpq    %r10, %rax
     jge     .Lmm_i_end_0_0
-    xorq    %rcx, %rcx
+    xorq    %rbp, %rbp
 .Lmm_j_0_0:
     movl    $2, %r10d
-    cmpq    %r10, %rcx
+    cmpq    %r10, %rbp
     jge     .Lmm_j_end_0_0
     xorq    %rdi, %rdi
     xorps   %xmm0, %xmm0
@@ -33,12 +35,12 @@ nfl_forward_TinyMLP:
     movq    %rax, %rsi
     imulq   %r10, %rsi
     addq    %rdi, %rsi
-    movss   (%r8, %rsi, 4), %xmm1
+    movss   (%r14, %rsi, 4), %xmm1
     movl    $2, %r10d
     movq    %rdi, %rsi
     imulq   %r10, %rsi
-    addq    %rcx, %rsi
-    movss   (%r9, %rsi, 4), %xmm2
+    addq    %rbp, %rsi
+    movss   (%r15, %rsi, 4), %xmm2
     mulss   %xmm2, %xmm1
     addss   %xmm1, %xmm0
     incq    %rdi
@@ -47,14 +49,16 @@ nfl_forward_TinyMLP:
     movl    $2, %r10d
     movq    %rax, %rsi
     imulq   %r10, %rsi
-    addq    %rcx, %rsi
+    addq    %rbp, %rsi
     movss   %xmm0, (%r11, %rsi, 4)
-    incq    %rcx
+    incq    %rbp
     jmp     .Lmm_j_0_0
 .Lmm_j_end_0_0:
     incq    %rax
     jmp     .Lmm_i_0_0
 .Lmm_i_end_0_0:
+    popq    %r15
+    popq    %r14
     # fused softmax_row: output [8,2] in-place
     movq    %r11, %rbx
     movq    %r11, %r12

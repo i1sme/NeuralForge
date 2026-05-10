@@ -10,22 +10,24 @@ nfl_forward_MixedArgs:
     pushq   %r15
     subq    $280, %rsp
     # matmul: input [4,8] x weights [8,16] -> output [4,16] + bias + fused
-    movq    %rdi, %r8
+    movq    %rdi, %r14
     leaq    16(%rsp), %r11
-    movq    %rsi, %r9
+    movq    %rsi, %r15
     xorps   %xmm4, %xmm4
     movq    %rdx, %xmm7
     leaq    512(%rsi), %rdx
     movq    %rsi, %xmm6
+    pushq   %r14
+    pushq   %r15
     xorq    %rax, %rax
 .Lmm_i_0_0:
     movl    $4, %r10d
     cmpq    %r10, %rax
     jge     .Lmm_i_end_0_0
-    xorq    %rcx, %rcx
+    xorq    %rbp, %rbp
 .Lmm_j_0_0:
     movl    $16, %r10d
-    cmpq    %r10, %rcx
+    cmpq    %r10, %rbp
     jge     .Lmm_j_end_0_0
     xorq    %rdi, %rdi
     xorps   %xmm0, %xmm0
@@ -37,46 +39,50 @@ nfl_forward_MixedArgs:
     movq    %rax, %rsi
     imulq   %r10, %rsi
     addq    %rdi, %rsi
-    movss   (%r8, %rsi, 4), %xmm1
+    movss   (%r14, %rsi, 4), %xmm1
     movl    $16, %r10d
     movq    %rdi, %rsi
     imulq   %r10, %rsi
-    addq    %rcx, %rsi
-    movss   (%r9, %rsi, 4), %xmm2
+    addq    %rbp, %rsi
+    movss   (%r15, %rsi, 4), %xmm2
     mulss   %xmm2, %xmm1
     addss   %xmm1, %xmm0
     incq    %rdi
     jmp     .Lmm_k_0_0
 .Lmm_k_end_0_0:
-    movss   (%rdx, %rcx, 4), %xmm5
+    movss   (%rdx, %rbp, 4), %xmm5
     addss   %xmm5, %xmm0
     maxss   %xmm4, %xmm0
     movl    $16, %r10d
     movq    %rax, %rsi
     imulq   %r10, %rsi
-    addq    %rcx, %rsi
+    addq    %rbp, %rsi
     movss   %xmm0, (%r11, %rsi, 4)
-    incq    %rcx
+    incq    %rbp
     jmp     .Lmm_j_0_0
 .Lmm_j_end_0_0:
     incq    %rax
     jmp     .Lmm_i_0_0
 .Lmm_i_end_0_0:
+    popq    %r15
+    popq    %r14
     movq    %xmm6, %rsi
     movq    %xmm7, %rdx
     # matmul: input [4,16] x weights [16,2] -> output [4,2] + fused
-    leaq    16(%rsp), %r8
+    leaq    16(%rsp), %r14
     movq    %rdx, %r11
-    leaq    576(%rsi), %r9
+    leaq    576(%rsi), %r15
+    pushq   %r14
+    pushq   %r15
     xorq    %rax, %rax
 .Lmm_i_0_1:
     movl    $4, %r10d
     cmpq    %r10, %rax
     jge     .Lmm_i_end_0_1
-    xorq    %rcx, %rcx
+    xorq    %rbp, %rbp
 .Lmm_j_0_1:
     movl    $2, %r10d
-    cmpq    %r10, %rcx
+    cmpq    %r10, %rbp
     jge     .Lmm_j_end_0_1
     xorq    %rdi, %rdi
     xorps   %xmm0, %xmm0
@@ -88,12 +94,12 @@ nfl_forward_MixedArgs:
     movq    %rax, %rsi
     imulq   %r10, %rsi
     addq    %rdi, %rsi
-    movss   (%r8, %rsi, 4), %xmm1
+    movss   (%r14, %rsi, 4), %xmm1
     movl    $2, %r10d
     movq    %rdi, %rsi
     imulq   %r10, %rsi
-    addq    %rcx, %rsi
-    movss   (%r9, %rsi, 4), %xmm2
+    addq    %rbp, %rsi
+    movss   (%r15, %rsi, 4), %xmm2
     mulss   %xmm2, %xmm1
     addss   %xmm1, %xmm0
     incq    %rdi
@@ -102,14 +108,16 @@ nfl_forward_MixedArgs:
     movl    $2, %r10d
     movq    %rax, %rsi
     imulq   %r10, %rsi
-    addq    %rcx, %rsi
+    addq    %rbp, %rsi
     movss   %xmm0, (%r11, %rsi, 4)
-    incq    %rcx
+    incq    %rbp
     jmp     .Lmm_j_0_1
 .Lmm_j_end_0_1:
     incq    %rax
     jmp     .Lmm_i_0_1
 .Lmm_i_end_0_1:
+    popq    %r15
+    popq    %r14
     # fused softmax_row: output [4,2] in-place
     movq    %r11, %rbx
     movq    %r11, %r12
