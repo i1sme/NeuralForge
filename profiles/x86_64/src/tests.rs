@@ -1857,7 +1857,7 @@ fn emit_add_abi_clean_at_n4() {
 // post-fix invariants on that body.
 
 #[cfg(test)]
-fn emit_linear_direct(n_inputs: usize, bias: bool) -> String {
+fn emit_linear_at(n_inputs: usize, bias: bool) -> String {
     use crate::abi::AbiContext;
     use compiler::PostOp;
     let abi = AbiContext { n_inputs };
@@ -1914,7 +1914,7 @@ fn emit_linear_n2_with_bias_does_not_alias_output_reg_in_body() {
     // matmul body (between `.Lmm_i_` and `.Lmm_i_end_` labels), assert
     // post-fix invariants on the body.
 
-    let asm = emit_linear_direct(2, true);
+    let asm = emit_linear_at(2, true);
     let body = extract_linear_matmul_body(&asm);
 
     // Pre-fix marker — must NOT appear:
@@ -1943,7 +1943,7 @@ fn emit_linear_n3_does_not_clobber_output_reg() {
     // LH-2 regression guard.
     //
     // Pre-fix: at N=3, output_reg = %r8 (INPUT_REGS[4]). emit_linear's
-    // src_ptr materialise wrote to %r8 (line 90), destroying the FFI
+    // src_ptr materialise wrote to %r8 (via materialise_ptr call), destroying the FFI
     // output_reg. Subsequent ops in the same function would see a
     // garbage output pointer.
     //
@@ -1951,7 +1951,7 @@ fn emit_linear_n3_does_not_clobber_output_reg() {
     // op-local pushq/popq inside emit_linear body — function-level
     // prologue unchanged).
 
-    let asm = emit_linear_direct(3, false);
+    let asm = emit_linear_at(3, false);
     let body = extract_linear_matmul_body(&asm);
 
     // Pre-fix marker — must NOT appear. At N=3, output_reg = %r8;
@@ -1989,14 +1989,14 @@ fn emit_linear_n4_does_not_clobber_output_reg() {
     // LH-3 regression guard.
     //
     // Pre-fix: at N=4, output_reg = %r9 (INPUT_REGS[5]). emit_linear's
-    // weight base setup (lines 95-101) wrote to %r9, destroying the FFI
+    // weight base setup (via movq/leaq into %r9) wrote to %r9, destroying the FFI
     // output_reg.
     //
     // Post-fix: weight ptr scratch relocated to %r15 (callee-saved per
     // SysV; op-local pushq/popq inside emit_linear body — function-level
     // prologue unchanged).
 
-    let asm = emit_linear_direct(4, false);
+    let asm = emit_linear_at(4, false);
     let body = extract_linear_matmul_body(&asm);
 
     // Pre-fix marker — must NOT appear. At N=4, output_reg = %r9; the

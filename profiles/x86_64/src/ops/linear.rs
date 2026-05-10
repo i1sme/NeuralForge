@@ -17,9 +17,11 @@
 //!   - `%rdi` is always input(0) — body clobber is invisible if no
 //!     downstream emitter re-reads input(0).
 //!
-//! Both saved via `pushq` at body entry, `popq` at body exit (N≥2 only).
+//! Both (`%rdi`/`%rsi`) saved via `pushq` at body entry, `popq` at exit (N≥2 only).
+//! `%r14` and `%r15` (LH-2/3 op-local scratch) are saved unconditionally at
+//! all N — see the LH-2/3 bullets below.
 //!
-//! M14 LH-1/2/3 cleanup: three latent hazards resolved uniformly via
+//! LH-1/2/3 cleanup: three latent hazards resolved uniformly via
 //! ABI-register relocation. All scratch now lives in non-INPUT_REGS scope
 //! at all N=1..4.
 //!
@@ -89,14 +91,12 @@ pub fn emit_linear(
     let output_reg = abi.output_reg();
 
     // 1. Pointer setup.
-    // M14 LH-2: src ptr relocated from %r8 (output_reg at N=3) to %r14
-    // (callee-saved per SysV; op-local pushq/popq inside body below).
+    // src ptr scratch: %r14 avoids output_reg alias at N=3 (callee-saved; op-local save below).
     abi.materialise_ptr(src_loc, "%r14", &mut s); // src ptr
     abi.materialise_ptr(dst_loc, "%r11", &mut s); // dst ptr
 
     // weight base = params_reg + weight_offset*4
-    // M14 LH-3: relocated from %r9 (output_reg at N=4) to %r15
-    // (callee-saved per SysV; op-local pushq/popq inside body below).
+    // weight ptr scratch: %r15 avoids output_reg alias at N=4 (callee-saved; op-local save below).
     if weight_offset == 0 {
         s.push_str(&format!("    movq    {}, %r15\n", params_reg));
     } else {
@@ -159,19 +159,18 @@ pub fn emit_linear(
         s.push_str(&format!("    movq    {}, %xmm6\n", params_reg));
     }
 
-    // M13 ABI-register save (N≥2 only). See module doc-comment for the
+    // ABI-register save (N≥2 only). See module doc-comment for the
     // full rationale. The matching pop block lives right after the
     // matmul i-loop end label, before the SoftmaxRow tail.
-    // M14 LH-1 fix: %rcx save removed — j-counter relocated to %rbp,
-    // so body no longer writes %rcx.
+    // %rcx save omitted — j-counter relocated to %rbp, body no longer writes %rcx.
     let save_abi = abi.n_inputs >= 2;
     if save_abi {
         s.push_str("    pushq   %rdi\n");
         s.push_str("    pushq   %rsi\n");
     }
-    // M14 LH-2/3: op-local save of callee-saved scratch used as src/weight
-    // ptrs. Lives inside op body — function-level compute_callee_saved
-    // unchanged. M13 pre-Task-5 arm64 precedent for op-local save/restore.
+    // Op-local save of callee-saved scratch used as src/weight ptrs. Lives
+    // inside op body — function-level compute_callee_saved unchanged.
+    // arm64 pre-Task-5 precedent for op-local save/restore.
     s.push_str("    pushq   %r14\n");
     s.push_str("    pushq   %r15\n");
 
@@ -182,10 +181,9 @@ pub fn emit_linear(
     s.push_str("    cmpq    %r10, %rax\n");
     s.push_str(&format!("    jge     .Lmm_i_end_{lid}\n"));
 
-    // 3. Inner j-loop: %rbp = j, compared against n. M14 LH-1 fix:
-    //    relocated from %rcx (which becomes output_reg at N=2)
-    //    to %rbp (callee-saved by function-level prologue, never
-    //    read by op bodies). M13 Task 1 precedent for emit_matmul.
+    // 3. Inner j-loop: %rbp = j, compared against n. j-counter in %rbp
+    //    avoids output_reg alias at N=2 (%rcx); %rbp is callee-saved by
+    //    function-level prologue, never read by op bodies.
     s.push_str("    xorq    %rbp, %rbp\n");
     s.push_str(&format!(".Lmm_j_{lid}:\n"));
     s.push_str(&emit_imm32_to_r10(n as u32));
@@ -262,14 +260,13 @@ pub fn emit_linear(
     s.push_str(&format!("    jmp     .Lmm_i_{lid}\n"));
     s.push_str(&format!(".Lmm_i_end_{lid}:\n"));
 
-    // M14 LH-2/3 restore (LIFO of entry op-local push):
+    // Op-local restore (LIFO of entry op-local push):
     s.push_str("    popq    %r15\n");
     s.push_str("    popq    %r14\n");
-    // M13 ABI-register restore (LIFO of the entry save block). Runs
-    // BEFORE the SoftmaxRow tail so any `call expf@PLT` in the tail
-    // sees a properly-aligned RSP and uncorrupted ABI registers.
-    // M14 LH-1 fix: %rcx pop removed — j-counter relocated to %rbp,
-    // so body no longer writes %rcx.
+    // ABI-register restore (LIFO of the entry save block). Runs BEFORE the
+    // SoftmaxRow tail so any `call expf@PLT` in the tail sees a properly-
+    // aligned RSP and uncorrupted ABI registers. %rcx pop omitted —
+    // j-counter relocated to %rbp, body no longer writes %rcx.
     if save_abi {
         s.push_str("    popq    %rsi\n");
         s.push_str("    popq    %rdi\n");
