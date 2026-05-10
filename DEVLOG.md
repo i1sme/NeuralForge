@@ -14,6 +14,144 @@ Format for each entry:
 
 ---
 
+## 2026-05-10 — Milestone 15 closed: A2 third brick — FFN compositional + LH-4 cleanup
+
+### What was done
+
+- **T0 — LH-4 cleanup in x86_64 emit_layernorm** (commit `e35dfaa`): per-row
+  src ptr scratch `%r8` → `%r15` (callee-saved, op-local pushq/popq — `%r15`
+  first push / last pop, mirroring LH-2/3 pattern in emit_linear). Per-row
+  dst ptr scratch `%r9` → `%rbp` (callee-saved, function-level prologue
+  already pushes `%rbp` — body free without op-local push, mirroring LH-1
+  pattern in emit_linear and M13 emit_matmul `%rbp` j-counter relocation).
+  Push counts: no-affine 2 → 3 (+%r15), affine 4 → 5 (+%r15).
+  `OP_LOCAL_PUSH_BYTES_NO_AFFINE`: 2*8 → 3*8.
+  `OP_LOCAL_PUSH_BYTES_AFFINE`: 4*8 → 5*8.
+  3 new ABI-invariant unit tests in `profiles/x86_64/src/tests.rs`:
+  `emit_layernorm_n{2,3,4}_does_not_clobber_output_reg`.
+
+- **T1 — A2 third brick — FFN compositional fixture** (commit `3ca6399`,
+  with code-review fix-up `17ad60d`): new `tests/fixtures/ffn.nfl` (N=1,
+  dim=4, hidden=8). Pure NFL composition `linear → relu → linear`. Helper
+  promotion: `reference_matmul`, `reference_bias_add`, `reference_relu`
+  moved from `integration.rs` file-local to `common/mod.rs` `pub fn` (per
+  profile, separate copies — isolation principle). New `pub fn ffn_ref`
+  composes the promoted primitives. **Per-profile divergent
+  `reference_matmul` body:** arm64 uses `f32::mul_add` (matches `fmadd`),
+  x86_64 uses `+= a * b` (matches `mulss + addss`) — enables bit-exact
+  `to_bits()` FFI tests on both profiles. Promotion silently fixed a
+  pre-existing latent bug: x86_64 file-local `reference_matmul` had used
+  `f32::mul_add` (verbatim copy from arm64), masked by `< 1e-3` tolerance
+  in M9-era tests. 2 new FFI integration tests (`ffn_ffi` on arm64 + x86_64).
+  Fix-up commit `17ad60d` added missing `drop(lib);` and param-layout
+  comment per M12+ FFI test convention (caught by code review).
+
+- **T2 — transformer_block fixture — LH-4 runtime evidence + A2 showcase**
+  (commit `edd958f`): new `tests/fixtures/transformer_block.nfl` (N=3,
+  output_reg=%r8 — exact LH-4 trigger). Pipeline: `layernorm[affine=true]
+  → linear → relu → linear → add[skip1] → add[skip2]`. New
+  `transformer_block_ref` composes `layernorm_ref` (M14) + `ffn_ref` (T1)
+  + inline element-wise add. 2 new FFI tests (`transformer_block_ffi`).
+  x86_64 test on Linux CI is the runtime FFI evidence for LH-4 closure.
+  Bisectability claim verified: T0 without T2 = closure by inspection only;
+  T2 without T0 = runtime crash; T0+T2 together = LH-4 closed with runtime
+  evidence.
+
+- **T3 — documentation closure** (this commit): DEVLOG, PROJECT_SPEC
+  (§Milestones row 15, §Strategic Roadmap update, LH-4 row removed),
+  CLAUDE.md "Current Status", `docs/profile_guide/x86_64.md` register table.
+
+- **Final test count: 446** (macOS arm64); **~448** on Linux x86_64 CI
+  (includes x86_64-only FFI tests `ffn_ffi` + `transformer_block_ffi`).
+
+### Decisions made
+
+- **Register relocation `%r8`→`%r15`, `%r9`→`%rbp`** for per-row layernorm
+  scratch. `%r15` requires op-local pushq/popq (not in `compute_callee_saved`);
+  `%rbp` reuses function-level prologue's unconditional push. Choices follow
+  M14 LH-1/2/3 precedents in emit_linear (`%rbp` for LH-1, `%r14`/`%r15`
+  op-local for LH-2/3).
+
+- **Unified push strategy, not conditional.** `%r15` push is unconditional
+  per emit_layernorm invocation (body always references `%r15`). Conditional
+  alternative would require two body code paths; rejected as YAGNI. Push
+  count is now 3 (no-affine) / 5 (affine).
+
+- **Helper promotion applies to all three primitives** (matmul, bias_add,
+  relu — not just two as design spec said). `reference_relu` was already
+  file-local in both integration.rs files; promotion includes it for full
+  reuse in `ffn_ref`.
+
+- **Per-profile divergent `reference_matmul` body** (intentional asymmetry).
+  arm64 uses `f32::mul_add` matching `fmadd`; x86_64 uses `+= a * b` matching
+  `mulss + addss`. Enables bit-exact `to_bits()` FFI tests on both profiles.
+  Verbatim copy would have broken bit-exact testing on x86_64 (≤0.5 ULP
+  per-element FMA-vs-non-FMA divergence).
+
+- **Bit-exact FFI tests via `to_bits()`** (M14 layernorm precedent), not
+  tolerance comparison. M9-era `< 1e-3` tolerance was justified for
+  softmax-bearing chains (libm `expf` imprecision); M15 chains are
+  expf-free, so determinism via matched IEEE 754 ops is achievable.
+
+- **FFN as compositional pattern, no new StdOp.** Per spec §"Strategic
+  Roadmap" Axis 2: "compositional op, no new codegen pattern". Confirmed —
+  both `linear` and `relu` already exist on both profiles. No IR changes.
+
+- **`transformer_block_ref` reuses `layernorm_ref` + `ffn_ref` + inline
+  add.** Helper-reuse rule (design spec §3.4) prevents numerical divergence
+  between reference and emitter.
+
+- **Single PR, 4 logical tasks T0→T1→T2→T3** (not M14-style 2-PR split). M15
+  scope materially smaller than M14 (no IR foundation, no per-profile
+  codegen of a new StdOp, just register relocation + 2 fixtures + helper
+  promotion). Cleanup and feature form one coherent narrative. Resulting
+  commit chain: `e35dfaa` (T0) → `3ca6399` (T1) → `17ad60d` (T1 review
+  fix-up) → `edd958f` (T2) → this commit (T3).
+
+### Problems encountered
+
+None — TDD ordering caught all issues at the unit-test stage; integration
+tests passed first try. T1 code review surfaced 2 Important consistency
+findings (missing `drop(lib);` and asymmetric param-layout comment between
+arm64 and x86_64 ffn_ffi) addressed in fix-up commit `17ad60d`. T2 incorporated
+both lessons from the start, no further fix-ups needed.
+
+### ABI audit record (mandatory paper trail per design spec §5)
+
+x86_64 emitters reviewed at N=3 and N=4 (M15 expanded arity via
+`transformer_block.nfl`):
+
+- `emit_layernorm` — **LH-4 closed in T0**. Asm-shape verified at N=2/3/4 by
+  3 new unit tests; runtime FFI evidence at N=3 from T2 `transformer_block_ffi`
+  on x86_64 Linux CI. N=4 closure asm-only (no current N=4 fixture invokes
+  layernorm; mirroring M14 LH-2/3 precedent).
+- `emit_linear` — clean. LH-1/2/3 closed in M14 commit `916e9c7`; ABI-invariant
+  tests `emit_linear_n{2,3,4}_does_not_clobber_output_reg` continue to pass.
+- `emit_matmul` — clean. M13 Task 1 closed N=4 hazard (`%r9` → `%rbp` j-counter).
+- **`emit_relu` at N=3 — reviewed, clean.** Empirically validated by T2
+  `transformer_block_ffi` (relu invocation between two linears, output_reg=%r8).
+- **`emit_add` at N=3 — reviewed, clean.** Empirically validated by T2 (two
+  `add` invocations after the FFN body, output_reg=%r8 across both).
+- `emit_mulscalar` — clean. Single scratch register, no ABI overlap.
+- `emit_softmax` — clean. M10 spill of `%rdi`/`%rsi`/`%rdx` around
+  `call expf@PLT`.
+- `emit_dropout` — clean. Pass-through marker, no scratch.
+
+No new latent hazards surfaced. M15 closes the §"Known Latent Hazards"
+table with no new entries.
+
+### Next step
+
+Choose next axis:
+- **A3 — profile-level viewer annotations** (per-node footprint, stack frame,
+  callee-saved set). Continues Axis 2 lineage.
+- **Axis 3 — bare-metal `expf`**. Replace `bl _expf` / `call expf@PLT` with
+  Taylor-series `expf` to remove libm dependency. Unlocks bare-metal targets.
+- **A2 follow-up: training syntax (loss/optimiser)**. Requires NFL v0.3 —
+  larger language milestone.
+
+---
+
 ## 2026-05-10 — Milestone 14 closed: A2 second brick — LayerNorm + LH-1/2/3 cleanup + LH-4 entry
 
 ### What was done
