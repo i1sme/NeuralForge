@@ -8,45 +8,47 @@
 //! — bit-identical to M3-M11. For N≥2 they shift (e.g. params → `%rdx`,
 //! output → `%rcx` for N=2).
 //!
-//! M13 ABI-register save (N≥2): the inner k/j-loop scratch uses `%rsi`
-//! for offset arithmetic, `%rcx` as the j-counter, and `%rdi` as the
-//! k-counter. At N=1 these are non-ABI (params=`%rsi`, output=`%rdx`;
-//! `%rcx`/`%rdi` are pure scratch). At N≥2:
-//!   - `%rsi` becomes input(1) — clobber breaks the next op's read of
-//!     the second input pointer (e.g. `add[skip]` after `linear`).
-//!   - `%rcx` becomes output_reg at N=2, params_reg at N=3, or input(3)
-//!     at N=4 — clobber breaks downstream materialise of OutputReg etc.
+//! M13 ABI-register save (N≥2): the inner k-loop scratch uses `%rsi` for
+//! offset arithmetic and `%rdi` as the k-counter. At N=1 these are non-ABI
+//! (params=`%rsi`, output=`%rdx`; `%rdi` is pure scratch). At N≥2:
+//!
+//!   - `%rsi` becomes input(1) — body clobber would break the next op's
+//!     read of the second input pointer.
 //!   - `%rdi` is always input(0) — body clobber is invisible if no
-//!     downstream emitter re-reads input(0) (today: relu/add following
-//!     linear materialise from intermediate stack buffers, not from
-//!     input(0); preserving it is defensive).
+//!     downstream emitter re-reads input(0).
 //!
-//! M12's fixture set was matmul-only multi-input; M13's `residual_add`
-//! is the first multi-input fixture containing a `linear` op and
-//! surfaced this latent hazard via SIGSEGV in the FFI test. Fix:
-//! pushq save at entry of the matmul body, popq restore at exit. No
-//! save needed at N=1 (registers are non-ABI scratch). 3 pushes =
-//! 24 bytes = misaligned vs 16, but the body contains no `call`
-//! instruction (the fused SoftmaxRow tail's `call expf@PLT` runs
-//! AFTER the restore), so misalignment inside the body is harmless.
+//! Both saved via `pushq` at body entry, `popq` at body exit (N≥2 only).
 //!
-//! Cross-reference: same class of bug as Task 1 (`emit_matmul` `%r9`
-//! → `%rbp`) and the arm64 emit_linear x3/x4/x5 stp/ldp fix.
-//! Resolved here via push/pop because emit_linear's complex bias +
-//! fused PostOp dispatch makes register relocation higher-risk.
+//! M14 LH-1/2/3 cleanup: three latent hazards resolved uniformly via
+//! ABI-register relocation. All scratch now lives in non-INPUT_REGS scope
+//! at all N=1..4.
 //!
-//! Latent N≥3 hazards remain: `%r8` (src ptr scratch, line 58) becomes
-//! output_reg at N=3; `%r9` (weight ptr scratch, line 63) becomes
-//! output_reg at N=4. No fixture exercises these today; close in a
-//! future milestone where an N≥3 multi-input linear model surfaces them.
+//!   - LH-1 (was: N=2 + linear-with-bias). j-counter relocated `%rcx` →
+//!     `%rbp`. `%rbp` is callee-saved by the unconditional function-level
+//!     prologue (`pushq %rbp`/`popq %rbp` in `asm.rs::format_function_prologue`)
+//!     and unread by op bodies. M13 Task 1 precedent for emit_matmul.
+//!     Side-effect: M13 save block's `pushq %rcx`/`popq %rcx` removed
+//!     (dead — body no longer writes %rcx).
 //!
-//! Latent N=2 bias hazard: when `bias_offset.is_some()` AND N=2,
-//! `output_reg() == %rcx`, which the push/pop save treats as an
-//! ABI register but the bias-add (line 205) also uses as the j-counter.
-//! Both refer to the same physical register — the bias read uses j as
-//! the base address, producing wrong output. No M13 fixture exercises
-//! this path (residual_add has no bias). Fix in a future milestone
-//! when an N=2 + linear-with-bias fixture surfaces it.
+//!   - LH-2 (was: N=3 src ptr scratch %r8 = output_reg). src ptr scratch
+//!     relocated `%r8` → `%r14`. `%r14` is callee-saved per SysV; op-local
+//!     `pushq %r14`/`popq %r14` brackets the body. M13 pre-Task-5 arm64
+//!     precedent for op-local save/restore. `compute_callee_saved` is
+//!     NOT extended — function-level prologue unchanged.
+//!
+//!   - LH-3 (was: N=4 weight ptr scratch %r9 = output_reg). weight ptr
+//!     scratch relocated `%r9` → `%r15`. Same op-local push/pop pattern
+//!     as LH-2.
+//!
+//! No remaining latent hazards in this file. Future-proofing: any
+//! addition of new scratch registers MUST verify against INPUT_REGS at
+//! the highest supported N (currently N=4) before merging — see
+//! ABI-invariant tests `emit_linear_n{2,3,4}_does_not_clobber_output_reg`
+//! in `profiles/x86_64/src/tests.rs`.
+//!
+//! Cross-reference: same class of bug as M13 Task 1 (`emit_matmul`
+//! `%r9` → `%rbp`) and the M13 pre-Task-5 arm64 emit_linear x3/x4/x5
+//! stp/ldp fix. M14 closes the analogous x86_64 cases uniformly.
 
 use crate::abi::AbiContext;
 use crate::asm::emit_imm32_to_r10;
@@ -87,15 +89,19 @@ pub fn emit_linear(
     let output_reg = abi.output_reg();
 
     // 1. Pointer setup.
-    abi.materialise_ptr(src_loc, "%r8", &mut s); // src ptr
+    // M14 LH-2: src ptr relocated from %r8 (output_reg at N=3) to %r14
+    // (callee-saved per SysV; op-local pushq/popq inside body below).
+    abi.materialise_ptr(src_loc, "%r14", &mut s); // src ptr
     abi.materialise_ptr(dst_loc, "%r11", &mut s); // dst ptr
 
     // weight base = params_reg + weight_offset*4
+    // M14 LH-3: relocated from %r9 (output_reg at N=4) to %r15
+    // (callee-saved per SysV; op-local pushq/popq inside body below).
     if weight_offset == 0 {
-        s.push_str(&format!("    movq    {}, %r9\n", params_reg));
+        s.push_str(&format!("    movq    {}, %r15\n", params_reg));
     } else {
         s.push_str(&format!(
-            "    leaq    {}({}), %r9\n",
+            "    leaq    {}({}), %r15\n",
             weight_offset * 4,
             params_reg
         ));
@@ -156,12 +162,18 @@ pub fn emit_linear(
     // M13 ABI-register save (N≥2 only). See module doc-comment for the
     // full rationale. The matching pop block lives right after the
     // matmul i-loop end label, before the SoftmaxRow tail.
+    // M14 LH-1 fix: %rcx save removed — j-counter relocated to %rbp,
+    // so body no longer writes %rcx.
     let save_abi = abi.n_inputs >= 2;
     if save_abi {
         s.push_str("    pushq   %rdi\n");
         s.push_str("    pushq   %rsi\n");
-        s.push_str("    pushq   %rcx\n");
     }
+    // M14 LH-2/3: op-local save of callee-saved scratch used as src/weight
+    // ptrs. Lives inside op body — function-level compute_callee_saved
+    // unchanged. M13 pre-Task-5 arm64 precedent for op-local save/restore.
+    s.push_str("    pushq   %r14\n");
+    s.push_str("    pushq   %r15\n");
 
     // 2. Outer i-loop: %rax = i, compared against b.
     s.push_str("    xorq    %rax, %rax\n");
@@ -170,11 +182,14 @@ pub fn emit_linear(
     s.push_str("    cmpq    %r10, %rax\n");
     s.push_str(&format!("    jge     .Lmm_i_end_{lid}\n"));
 
-    // 3. Inner j-loop: %rcx = j, compared against n.
-    s.push_str("    xorq    %rcx, %rcx\n");
+    // 3. Inner j-loop: %rbp = j, compared against n. M14 LH-1 fix:
+    //    relocated from %rcx (which becomes output_reg at N=2)
+    //    to %rbp (callee-saved by function-level prologue, never
+    //    read by op bodies). M13 Task 1 precedent for emit_matmul.
+    s.push_str("    xorq    %rbp, %rbp\n");
     s.push_str(&format!(".Lmm_j_{lid}:\n"));
     s.push_str(&emit_imm32_to_r10(n as u32));
-    s.push_str("    cmpq    %r10, %rcx\n");
+    s.push_str("    cmpq    %r10, %rbp\n");
     s.push_str(&format!("    jge     .Lmm_j_end_{lid}\n"));
 
     // 4. Innermost k-loop: %xmm0 = sum.
@@ -190,14 +205,14 @@ pub fn emit_linear(
     s.push_str("    movq    %rax, %rsi\n");
     s.push_str("    imulq   %r10, %rsi\n"); // %rsi = i * k
     s.push_str("    addq    %rdi, %rsi\n"); // %rsi = i*k + kk
-    s.push_str("    movss   (%r8, %rsi, 4), %xmm1\n"); // xmm1 = src[i*k + kk]
+    s.push_str("    movss   (%r14, %rsi, 4), %xmm1\n"); // xmm1 = src[i*k + kk]
 
     // weight offset = kk*n + j; load weights[kk*n + j] → xmm2
     s.push_str(&emit_imm32_to_r10(n as u32));
     s.push_str("    movq    %rdi, %rsi\n");
     s.push_str("    imulq   %r10, %rsi\n"); // %rsi = kk * n
-    s.push_str("    addq    %rcx, %rsi\n"); // %rsi = kk*n + j
-    s.push_str("    movss   (%r9, %rsi, 4), %xmm2\n");
+    s.push_str("    addq    %rbp, %rsi\n"); // %rsi = kk*n + j
+    s.push_str("    movss   (%r15, %rsi, 4), %xmm2\n");
 
     // sum += xmm1 * xmm2  (no FMA)
     s.push_str("    mulss   %xmm2, %xmm1\n");
@@ -211,7 +226,7 @@ pub fn emit_linear(
     // output_reg (re-purposed as scratch for the duration of the body —
     // restored from %xmm7 below).
     if bias_offset.is_some() {
-        s.push_str(&format!("    movss   ({}, %rcx, 4), %xmm5\n", output_reg));
+        s.push_str(&format!("    movss   ({}, %rbp, 4), %xmm5\n", output_reg));
         s.push_str("    addss   %xmm5, %xmm0\n");
     }
 
@@ -236,10 +251,10 @@ pub fn emit_linear(
     s.push_str(&emit_imm32_to_r10(n as u32));
     s.push_str("    movq    %rax, %rsi\n");
     s.push_str("    imulq   %r10, %rsi\n");
-    s.push_str("    addq    %rcx, %rsi\n");
+    s.push_str("    addq    %rbp, %rsi\n");
     s.push_str("    movss   %xmm0, (%r11, %rsi, 4)\n");
 
-    s.push_str("    incq    %rcx\n");
+    s.push_str("    incq    %rbp\n");
     s.push_str(&format!("    jmp     .Lmm_j_{lid}\n"));
     s.push_str(&format!(".Lmm_j_end_{lid}:\n"));
 
@@ -247,11 +262,15 @@ pub fn emit_linear(
     s.push_str(&format!("    jmp     .Lmm_i_{lid}\n"));
     s.push_str(&format!(".Lmm_i_end_{lid}:\n"));
 
+    // M14 LH-2/3 restore (LIFO of entry op-local push):
+    s.push_str("    popq    %r15\n");
+    s.push_str("    popq    %r14\n");
     // M13 ABI-register restore (LIFO of the entry save block). Runs
     // BEFORE the SoftmaxRow tail so any `call expf@PLT` in the tail
     // sees a properly-aligned RSP and uncorrupted ABI registers.
+    // M14 LH-1 fix: %rcx pop removed — j-counter relocated to %rbp,
+    // so body no longer writes %rcx.
     if save_abi {
-        s.push_str("    popq    %rcx\n");
         s.push_str("    popq    %rsi\n");
         s.push_str("    popq    %rdi\n");
     }

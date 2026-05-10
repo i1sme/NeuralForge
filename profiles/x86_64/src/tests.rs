@@ -1493,26 +1493,28 @@ fn emit_add_x86_64_no_callee_saved_or_ffi_save() {
     }
 }
 
-// ---- M13 PR-fix: emit_linear x86_64 ABI register save at N≥2 -----------
+// ---- M13 PR-fix / M14 LH-1 update: emit_linear x86_64 ABI register save at N≥2 -----
 
 #[test]
 fn emit_linear_x86_64_save_block_balances_at_all_n() {
-    // M13 (PR follow-up): x86_64 emit_linear's body clobbers %rdi/%rsi/%rcx
-    // (k-counter, offset scratch, j-counter). At N=1 these are non-ABI; at
-    // N≥2 they overlap with input(0)/input(1)/output_reg respectively
-    // (and shift further at N=3, N=4). The fix: pushq save at body entry,
+    // M13 (PR follow-up): x86_64 emit_linear's body clobbers %rdi/%rsi
+    // (k-counter, offset scratch). At N=1 these are non-ABI; at N≥2 they
+    // overlap with input(0)/input(1). The fix: pushq save at body entry,
     // popq restore at body exit, conditional on n_inputs ≥ 2.
     //
+    // M14 LH-1 update: %rcx save REMOVED from the block (j-counter relocated
+    // to %rbp by M14 LH-1 fix; body no longer writes %rcx). The op-local
+    // push/pop for %r14 and %r15 (LH-2/3) are added unconditionally.
+    //
     // This test verifies push/pop balance at every N ∈ [1, 4] and pins
-    // the exact register set for N≥2:
-    //   N=1 → 0 pushq/popq pairs (no save needed).
-    //   N=2..4 → 3 pushq + 3 popq, in LIFO order (push %rdi, %rsi, %rcx;
-    //            pop %rcx, %rsi, %rdi).
+    // the exact register set for N≥2 (post-M14):
+    //   N=1 → 2 pushq/popq pairs (op-local %r14/%r15 only; no ABI save needed).
+    //   N=2..4 → 4 pushq + 4 popq (ABI save %rdi/%rsi + op-local %r14/%r15).
     use crate::abi::AbiContext;
     use crate::buffer::BufferLoc;
     use compiler::ast::Span;
     use compiler::PostOp;
-    let cases = [(1usize, 0usize), (2, 3), (3, 3), (4, 3)];
+    let cases = [(1usize, 2usize), (2, 4), (3, 4), (4, 4)];
     for &(n_inputs, expected_pushes) in &cases {
         let abi = AbiContext { n_inputs };
         let post: Vec<PostOp> = vec![];
@@ -1542,9 +1544,20 @@ fn emit_linear_x86_64_save_block_balances_at_all_n() {
             popq_count, expected_pushes,
             "N={n_inputs}: expected {expected_pushes} popq; got {popq_count}\n{asm}"
         );
+        // Op-local %r14/%r15 save/restore — always present (M14 LH-2/3).
+        for reg in &["%r14", "%r15"] {
+            assert!(
+                asm.contains(&format!("    pushq   {reg}\n")),
+                "N={n_inputs}: expected `pushq {reg}` (op-local LH-2/3 save); got:\n{asm}"
+            );
+            assert!(
+                asm.contains(&format!("    popq    {reg}\n")),
+                "N={n_inputs}: expected `popq {reg}` (op-local LH-2/3 restore); got:\n{asm}"
+            );
+        }
         if n_inputs >= 2 {
-            // Specific register set + LIFO ordering.
-            for reg in &["%rdi", "%rsi", "%rcx"] {
+            // ABI save: %rdi and %rsi (M14: %rcx removed — j-counter now %rbp).
+            for reg in &["%rdi", "%rsi"] {
                 assert!(
                     asm.contains(&format!("    pushq   {reg}\n")),
                     "N={n_inputs}: expected `pushq {reg}`; got:\n{asm}"
@@ -1554,14 +1567,17 @@ fn emit_linear_x86_64_save_block_balances_at_all_n() {
                     "N={n_inputs}: expected `popq {reg}`; got:\n{asm}"
                 );
             }
-            // LIFO check: pop order must be %rcx, %rsi, %rdi (reverse of
-            // push order %rdi, %rsi, %rcx). Verify by relative position.
-            let pop_rcx = asm.find("    popq    %rcx\n").expect("popq %rcx");
+            // %rcx must NOT be in the save block post-M14 LH-1 fix.
+            assert!(
+                !asm.contains("    pushq   %rcx\n"),
+                "N={n_inputs}: %rcx must no longer be in the save block (M14 LH-1 fix); got:\n{asm}"
+            );
+            // LIFO check: pop %rsi before %rdi (reverse of push order %rdi, %rsi).
             let pop_rsi = asm.find("    popq    %rsi\n").expect("popq %rsi");
             let pop_rdi = asm.find("    popq    %rdi\n").expect("popq %rdi");
             assert!(
-                pop_rcx < pop_rsi && pop_rsi < pop_rdi,
-                "N={n_inputs}: popq order must be LIFO (%rcx < %rsi < %rdi); got {pop_rcx}/{pop_rsi}/{pop_rdi}\n{asm}"
+                pop_rsi < pop_rdi,
+                "N={n_inputs}: popq order must be LIFO (%rsi before %rdi); got {pop_rsi}/{pop_rdi}\n{asm}"
             );
         }
     }
@@ -1828,4 +1844,177 @@ fn emit_add_abi_clean_at_n3() {
 fn emit_add_abi_clean_at_n4() {
     let abi = crate::abi::AbiContext { n_inputs: 4 };
     assert_emit_abi_clean("emit_add", &emit_add_at(4), &abi);
+}
+
+// ─── M14 Plan 1: LH-1/2/3 ABI-invariant regression guards for emit_linear ───
+//
+// Three latent hazards existed in emit_linear at N=2/3/4 where scratch
+// registers aliased ABI argument registers (output_reg at those N values).
+// These tests guard against regression after the M14 LH-1/2/3 cleanup.
+//
+// Test structure: call emit_linear directly at the triggering N, extract
+// the matmul body (between .Lmm_i_ and .Lmm_i_end_ labels), assert
+// post-fix invariants on that body.
+
+#[cfg(test)]
+fn emit_linear_direct(n_inputs: usize, bias: bool) -> String {
+    use crate::abi::AbiContext;
+    use compiler::PostOp;
+    let abi = AbiContext { n_inputs };
+    let post: Vec<PostOp> = vec![];
+    crate::ops::emit_linear(
+        &abi,
+        /* b */ 2,
+        /* k */ 2,
+        /* n */ 2,
+        /* model_idx */ 0,
+        /* linear_idx */ 0,
+        /* src_loc */ BufferLoc::InputReg(0),
+        /* dst_loc */ BufferLoc::OutputReg,
+        /* weight_offset */ 0,
+        /* bias_offset */ if bias { Some(0) } else { None },
+        /* node_span */ compiler::ast::Span::new(1, 1),
+        /* fused_post_ops */ &post,
+        /* sym_prefix */ "",
+    )
+    .expect("emit_linear must succeed")
+}
+
+/// Extract the matmul body: text between the `.Lmm_i_` loop label and
+/// the `.Lmm_i_end_` label (exclusive). This is the region where
+/// j-counter and scratch pointer conflicts manifest.
+#[cfg(test)]
+fn extract_linear_matmul_body(asm: &str) -> &str {
+    // The outer i-loop starts at ".Lmm_i_0_0:\n" and ends at ".Lmm_i_end_0_0:\n".
+    let start_label = ".Lmm_i_0_0:";
+    let end_label = ".Lmm_i_end_0_0:";
+    let start = asm
+        .find(start_label)
+        .expect("matmul body start label not found")
+        + start_label.len();
+    let end = asm
+        .find(end_label)
+        .expect("matmul body end label not found");
+    &asm[start..end]
+}
+
+#[test]
+fn emit_linear_n2_with_bias_does_not_alias_output_reg_in_body() {
+    // LH-1 regression guard.
+    //
+    // Pre-fix: at N=2, output_reg = %rcx (INPUT_REGS[3]). The j-counter
+    // also lived in %rcx, so the bias-add expanded to
+    // `movss (%rcx, %rcx, 4), %xmm5` — base aliased offset, wrong output.
+    //
+    // Post-fix: j-counter relocated to %rbp. Bias-add expands to
+    // `movss (%rcx, %rbp, 4), %xmm5` — base = bias_base in %rcx, offset
+    // = j-counter in %rbp. Correct.
+    //
+    // Pattern: lower a minimal N=2 + linear-with-bias UIR, extract the
+    // matmul body (between `.Lmm_i_` and `.Lmm_i_end_` labels), assert
+    // post-fix invariants on the body.
+
+    let asm = emit_linear_direct(2, true);
+    let body = extract_linear_matmul_body(&asm);
+
+    // Pre-fix marker — must NOT appear:
+    assert!(
+        !body.contains("xorq    %rcx, %rcx"),
+        "j-counter init must not be %rcx (would alias output_reg at N=2). Body:\n{body}"
+    );
+    assert!(
+        !body.contains("(%rcx, %rcx,"),
+        "bias-add base must not alias offset (LH-1 silent corruption pattern). Body:\n{body}"
+    );
+
+    // Post-fix marker — must appear:
+    assert!(
+        body.contains("xorq    %rbp, %rbp"),
+        "j-counter should be relocated to %rbp (M13 Task 1 precedent). Body:\n{body}"
+    );
+    assert!(
+        body.contains("(%rcx, %rbp, 4), %xmm5"),
+        "bias-add should read from (output_reg=%rcx, j=%rbp). Body:\n{body}"
+    );
+}
+
+#[test]
+fn emit_linear_n3_does_not_clobber_output_reg() {
+    // LH-2 regression guard.
+    //
+    // Pre-fix: at N=3, output_reg = %r8 (INPUT_REGS[4]). emit_linear's
+    // src_ptr materialise wrote to %r8 (line 90), destroying the FFI
+    // output_reg. Subsequent ops in the same function would see a
+    // garbage output pointer.
+    //
+    // Post-fix: src ptr scratch relocated to %r14 (callee-saved per SysV;
+    // op-local pushq/popq inside emit_linear body — function-level
+    // prologue unchanged).
+
+    let asm = emit_linear_direct(3, false);
+    let body = extract_linear_matmul_body(&asm);
+
+    // Pre-fix marker — must NOT appear. At N=3, output_reg = %r8;
+    // `materialise_ptr(src_loc, "%r8", ...)` would emit a `movq ..., %r8`
+    // (write to %r8) which is the LH-2 silent corruption. Also check the
+    // body uses no %r8 base in indexed loads.
+    assert!(
+        !body.contains(", %r8\n") && !body.contains("(%r8,"),
+        "src ptr scratch must not use %r8 at N=3 (output_reg alias). Body:\n{body}"
+    );
+    // Post-fix expectation: src loads use (%r14, ...) indexed addressing.
+    assert!(
+        body.contains("(%r14,"),
+        "src ptr should be relocated to %r14 (indexed load). Body:\n{body}"
+    );
+
+    // Op-local save/restore must appear in full asm:
+    assert!(
+        asm.contains("    pushq   %r14\n"),
+        "op-local pushq %r14 must appear (callee-saved op-local save). Asm:\n{asm}"
+    );
+    assert!(
+        asm.contains("    popq    %r14\n"),
+        "op-local popq %r14 must appear (matching restore). Asm:\n{asm}"
+    );
+    // Full asm must show %r14 init (materialise src ptr, before the loop body).
+    assert!(
+        asm.contains(", %r14\n"),
+        "src ptr materialise must write to %r14 (full asm). Asm:\n{asm}"
+    );
+}
+
+#[test]
+fn emit_linear_n4_does_not_clobber_output_reg() {
+    // LH-3 regression guard.
+    //
+    // Pre-fix: at N=4, output_reg = %r9 (INPUT_REGS[5]). emit_linear's
+    // weight base setup (lines 95-101) wrote to %r9, destroying the FFI
+    // output_reg.
+    //
+    // Post-fix: weight ptr scratch relocated to %r15 (callee-saved per
+    // SysV; op-local pushq/popq inside emit_linear body — function-level
+    // prologue unchanged).
+
+    let asm = emit_linear_direct(4, false);
+    let body = extract_linear_matmul_body(&asm);
+
+    // Pre-fix marker — must NOT appear. At N=4, output_reg = %r9; the
+    // weight base setup (movq params_reg, %r9 OR leaq weight_offset(params_reg), %r9)
+    // would clobber output_reg.
+    assert!(
+        !body.contains(", %r9\n"),
+        "weight ptr scratch must not write to %r9 at N=4 (output_reg alias). Body:\n{body}"
+    );
+    // Post-fix expectation: weight ptr lives in %r15.
+    assert!(
+        body.contains("(%r15, ") || body.contains(", %r15\n"),
+        "weight ptr should be relocated to %r15. Body:\n{body}"
+    );
+
+    // Op-local save/restore:
+    assert!(
+        asm.contains("    pushq   %r15\n") && asm.contains("    popq    %r15\n"),
+        "op-local pushq/popq %r15 must bracket the body. Asm:\n{asm}"
+    );
 }
