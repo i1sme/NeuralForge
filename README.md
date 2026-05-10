@@ -49,8 +49,9 @@ model Classifier [batch=32, input=784, output=10]:
 | `nflc/` | `nflc` crate — CLI binary (`nflc parse`, `nflc compile`) |
 | `profile-api/` | `profile-api` crate — shared `Profile` trait, `Asm`, `FnSig`, `ParamSlot`, `ParamKind`, `LowerError` |
 | `profiles/arm64/` | `profiles-arm64` crate — AArch64 / Apple Silicon code generator |
-| `profiles/x86_64/` | `profiles-x86_64` crate — Linux ELF scalar SSE2 code generator (M9) |
-| `language/` | NFL grammar (`grammar.ebnf`, frozen at v0.1) |
+| `profiles/x86_64/` | `profiles-x86_64` crate — Linux ELF scalar SSE2 code generator |
+| `bench/` | `bench` crate — OQ-BENCH harness (`cargo run -p bench --release -- --profile {arm64\|x86_64}`); per-profile median + p95 µs across `classifier` / `large_classifier_k` / `self_attention` |
+| `language/` | NFL grammar (`grammar.ebnf`, frozen at v0.1; v0.2 named-pipeline extension since M10) |
 | `tests/fixtures/` | Sample `.nfl` files used in integration tests |
 | `docs/` | Language reference (`grammar.md`, `uir.md`) and profile guide (`arm64.md`, `x86_64.md`) |
 | `viewer/` | Reserved for a future standalone viewer tool; rendering today is via `nflc parse --uir` (compact) and `nflc parse --uir-verbose` (annotated) |
@@ -70,40 +71,65 @@ design decision is recorded there with its reasoning.
 
 ## Project status
 
-**Milestone 9 complete** — second concrete profile (`x86_64` Linux ELF, scalar)
-ships. A single NFL source now compiles to two distinct binaries via
-`nflc compile --profile arm64` and `nflc compile --profile x86_64`; the
-profile-isolation hypothesis is validated. Full op-parity with arm64 minus SIMD.
+**Milestone 15 complete** — A2 axis (transformer block) fully shipped on both
+profiles. NFL now compiles full pre-LN transformer blocks (`LayerNorm + FFN +
+dual residual` at N=3) to scalar AArch64 and x86_64 SSE2 with bit-exact FFI
+parity vs Rust reference. M15 closed the A2 third brick — FFN as a
+compositional NFL pattern (`linear → relu → linear`, no new StdOp variant) —
+and the LH-4 latent hazard cleanup in x86_64 `emit_layernorm`. The §"Known
+Latent Hazards" table is empty as of end of M15.
 
 What's working today:
 
-- Lexer, parser, typed AST, Universal IR (UIR)
+- **NFL v0.1 grammar** (frozen since M1) + **v0.2 named-pipeline extension**
+  (since M10) for self-attention-style multi-stage fixtures with declared
+  intermediate shapes
+- **Lexer, parser, typed AST, Universal IR (UIR)** with optimiser passes
+- **Multi-input ABI** (since M12, A1) — models with up to N=4 input tensors
+  lower correctly under SysV AMD64 / AAPCS64 calling conventions; all
+  per-emitter scratch is non-INPUT_REGS at all supported N
+- **Stdlib operations on both profiles:** `linear` (± bias), `relu`,
+  `dropout` (no-op pass-through), `softmax` (libm `expf`, rank ≥ 2),
+  `matmul` (rank ≥ 2, optional `transpose_b`, M10), `mul_scalar` (M10),
+  `add` (residual connections, M13), `layernorm` (3-pass mean/var/normalize,
+  optional affine, native `fsqrt` / `sqrtss` — no libm dependency, M14)
+- **FFN as compositional NFL pattern** — `linear → relu → linear` (M15), no
+  new StdOp variant. Demonstrated via `tests/fixtures/ffn.nfl` (N=1) and
+  `tests/fixtures/transformer_block.nfl` (N=3 — full pre-LN block:
+  `x -> layernorm[affine=true] -> linear -> relu -> linear -> add[skip1] -> add[skip2]`)
 - **`profile-api/`** — shared `Profile` trait, `Asm`, `FnSig`, `ParamSlot`,
   `ParamKind`, `LowerError` types; both profiles implement the trait
-- **AArch64 scalar code generation** (`profiles/arm64/`): `linear` (with or
-  without bias), `relu`, `dropout`, `softmax` (libm `expf`); large-dimension
-  immediates routed uniformly through `emit_imm32`
-- **x86_64 Linux ELF scalar code generation** (`profiles/x86_64/`): full
-  op-parity with arm64; AT&T syntax; `call expf@PLT`; SysV AMD64 ABI;
-  xmm-spill strategy for `row_max`/`row_sum` across `call expf@PLT` (no
-  callee-saved FP registers under SysV)
-- UIR-pass framework with three passes shipped — `EliminateDropout`,
-  `FuseLinearRelu`, and `FuseLinearSoftmax`
-- CLI: `nflc parse` (with `--uir` compact and `--uir-verbose` annotated
+- **AArch64 scalar code generation** (`profiles/arm64/`): all stdlib ops
+  above; AAPCS64-clean register allocation; `fmadd` single-rounding matmul
+- **x86_64 Linux ELF scalar SSE2 code generation** (`profiles/x86_64/`):
+  full op-parity with arm64; AT&T syntax; SysV AMD64 ABI; ABI-invariant
+  unit tests at N=2/3/4 for every emitter; xmm-spill strategy across
+  `call expf@PLT` (no callee-saved FP registers under SysV)
+- **UIR-pass framework** with `EliminateDropout`, `FuseLinearRelu`, and
+  `FuseLinearSoftmax`
+- **CLI:** `nflc parse` (with `--uir` compact and `--uir-verbose` annotated
   rendering) and `nflc compile --profile <arm64|x86_64>`
-- Bit-exact fused-vs-unfused FFI integration tests across all
-  fusion-eligible fixtures; x86_64 FFI tests run on ubuntu-latest CI
-- Viewer v0.1: `nflc parse --uir-verbose` renders annotated UIR with
+- **Bit-exact FFI integration tests** with `to_bits()` comparison
+  (M14 layernorm precedent); per-profile divergent `reference_matmul` body
+  matches each emitter's rounding semantics (arm64 `fmadd` single-rounding;
+  x86_64 `mulss + addss` two-rounding)
+- **OQ-BENCH harness** (`bench/` crate, M11) — per-profile median + p95 µs
+  across `classifier` / `large_classifier_k` / `self_attention` fixtures;
+  CI workflow `.github/workflows/bench.yml` writes per-profile Job
+  Summaries on `macos-14` (arm64) and `ubuntu-latest` (x86_64)
+- **Viewer v0.1:** `nflc parse --uir-verbose` renders annotated UIR with
   top-level and per-model summaries, and fused post-ops on indented lines
-- 284 tests passing on macOS arm64 (~300 on Linux x86_64 CI); CI green;
-  `cargo fmt`, `cargo clippy -D warnings`, `cargo test --workspace` all clean
+- **446 tests passing on macOS arm64 (~448 on Linux x86_64 CI)**; CI green;
+  `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace` all clean
 
 Active development continues along three strategic axes — codegen breadth
-(x86_64 ships in M9; SIMD/AVX still open), modelling depth (NFL v0.2 /
-attention), and deployment reach (bare-metal `expf`) — tracked in
+(SIMD/AVX vectorisation still open), modelling depth (A2 axis fully closed
+in M15; A3 — profile-level viewer annotations next), and deployment reach
+(bare-metal `expf` to drop libm) — tracked in
 [`PROJECT_SPEC.md` §"Strategic Roadmap"](PROJECT_SPEC.md#strategic-roadmap).
 
-NFL training syntax (loss, optimiser) is deferred to v0.2.
+NFL training syntax (loss, optimiser) remains deferred to v0.3.
 
 ---
 
