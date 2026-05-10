@@ -9,16 +9,21 @@
 //! `compute_callee_saved` unchanged (M13 pre-Task-5 arm64 precedent). No
 //! FFI calls (native `sqrtss`).
 //!
-//! Pointer materialisation order (M14 bugfix): base pointers are materialised
-//! via `abi.materialise_ptr` BEFORE the op-local `pushq` instructions. For
-//! `BufferLoc::StackOffset(N)`, materialise_ptr emits `leaq N(%rsp), <reg>`
-//! using the current %rsp. Emitting pushq first would adjust %rsp by 16/32
-//! bytes and produce wrong stack-relative addresses. The correct pattern is:
+//! Pointer materialisation order (M14 bugfix): the op-local `pushq` block
+//! comes FIRST (saves caller's callee-saved values), then base pointers are
+//! materialised AFTER pushes WITH stack-offset bias compensation. For
+//! `BufferLoc::StackOffset(N)`, the helper `materialise_ptr_with_rsp_bias`
+//! emits `leaq (N + push_bytes)(%rsp), <reg>` so the stack-relative address
+//! recovers the function-frame %rsp. Two-property fix:
 //!
-//!   1. materialise_ptr → uses pre-push %rsp → correct addresses in %rbx/%r14
-//!   2. pushq → saves the materialised values for use throughout the body
+//!   1. push first → caller's %rbx/%r14/%r12/%r13 preserved on stack
+//!   2. materialise with bias → correct buffer addresses despite shifted %rsp
 //!
-//! This mirrors emit_linear's pattern (linear.rs), which has been correct since M3.
+//! Pre-bug-fix attempt (commit 65c24b6) tried materialise-then-push pattern
+//! mirroring emit_linear, but that corrupts caller's callee-saved registers
+//! (push saves the OVERWRITTEN values, not caller's), surfacing as a Rust-side
+//! FFI test failure when the caller's %rbx/%r12/%r14 hold loop state. The
+//! current order is the correct fix.
 //!
 //! Register plan (M14 spec §8, N=1..2 scope, finalized):
 //!   %rax  = x_j (inner counter); also temp for byte-offset compute before counter use
@@ -62,6 +67,31 @@ use crate::buffer::BufferLoc;
 use compiler::ast::Span;
 use profile_api::LowerError;
 
+/// Materialise a `BufferLoc` into `dst_reg`, with `rsp_bias_bytes` added to
+/// stack-relative offsets to compensate for op-local `pushq` instructions
+/// that have decremented `%rsp` since the function-frame base. For non-stack
+/// locations (`InputReg`/`OutputReg`), delegates to `abi.materialise_ptr`
+/// (no bias needed — those use ABI argument registers, not `%rsp`).
+fn materialise_ptr_with_rsp_bias(
+    abi: &AbiContext,
+    loc: BufferLoc,
+    dst_reg: &str,
+    rsp_bias_bytes: usize,
+    s: &mut String,
+) {
+    match loc {
+        BufferLoc::StackOffset(n) => {
+            let adjusted = n + rsp_bias_bytes;
+            if adjusted == 0 {
+                s.push_str(&format!("    movq    %rsp, {}\n", dst_reg));
+            } else {
+                s.push_str(&format!("    leaq    {}(%rsp), {}\n", adjusted, dst_reg));
+            }
+        }
+        _ => abi.materialise_ptr(loc, dst_reg, s),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn emit_layernorm(
     abi: &AbiContext,
@@ -89,16 +119,32 @@ pub fn emit_layernorm(
         if has_affine { "with " } else { "no-" },
     ));
 
-    // Materialise base pointers ONCE before any op-local pushes. materialise_ptr
-    // for BufferLoc::StackOffset(N) emits `leaq N(%rsp), <reg>` using the
-    // current %rsp. If we push first, %rsp is adjusted by 16 (no-affine) or 32
-    // (affine) bytes and the stack-relative address is wrong by that delta.
-    // Mirrors the emit_linear pattern in profiles/x86_64/src/ops/linear.rs
-    // which has been correct since M3.
-    abi.materialise_ptr(src_loc, "%rbx", &mut s);
-    abi.materialise_ptr(dst_loc, "%r14", &mut s);
+    // Op-local callee-saved save: push CALLER's values FIRST so they can be
+    // restored at body exit. The body overwrites %rbx/%r14 (and %r12/%r13 if
+    // affine) below; the LIFO pop at body exit restores caller's values.
+    //
+    // Stack-relative materialise compensation: each pushq decrements %rsp by 8.
+    // After this block, %rsp is `op_local_push_bytes` lower than at function-
+    // frame stable point. `materialise_ptr` for BufferLoc::StackOffset(N) emits
+    // `leaq N(%rsp), <reg>` using current %rsp — to recover the caller's
+    // intended buffer address we must add `op_local_push_bytes` to N. Pre-fix,
+    // this adjustment was missing → silent buffer-address corruption when
+    // src_loc / dst_loc was a StackOffset (e.g. pre_ln_block fixture).
+    let op_local_push_bytes = if has_affine { 4 * 8 } else { 2 * 8 };
+    if has_affine {
+        s.push_str("    pushq   %r12\n");
+        s.push_str("    pushq   %r13\n");
+    }
+    s.push_str("    pushq   %rbx\n");
+    s.push_str("    pushq   %r14\n");
+
+    // Materialise base pointers AFTER the pushes, with stack-offset adjustment.
+    materialise_ptr_with_rsp_bias(abi, src_loc, "%rbx", op_local_push_bytes, &mut s);
+    materialise_ptr_with_rsp_bias(abi, dst_loc, "%r14", op_local_push_bytes, &mut s);
 
     // Affine: materialise γ/β base pointers from params_reg into %r12/%r13.
+    // params_reg is one of the ABI input registers (%rsi at N=1, %rdx at N=2,
+    // etc.) — never %rsp-relative — so no offset adjustment needed.
     if has_affine {
         let g_off = gamma_offset.unwrap();
         let b_off = beta_offset.unwrap();
@@ -122,17 +168,6 @@ pub fn emit_layernorm(
             ));
         }
     }
-
-    // Op-local callee-saved save. Push order: γ/β first if affine, then base
-    // pointers. The materialised values (computed above using pre-push %rsp)
-    // are pushed here so they survive the body unchanged. LIFO pop at body
-    // exit mirrors this exactly.
-    if has_affine {
-        s.push_str("    pushq   %r12\n");
-        s.push_str("    pushq   %r13\n");
-    }
-    s.push_str("    pushq   %rbx\n");
-    s.push_str("    pushq   %r14\n");
 
     // Pre-loop hoisted constants — RIP-relative loads from .rodata pool
     // (emitted at end of this function).
