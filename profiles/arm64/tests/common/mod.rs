@@ -95,3 +95,110 @@ pub fn layernorm_ref(
     }
     out
 }
+
+/// Reference matmul — naive `b × k` @ `k × n` → `b × n` with `f32::mul_add`
+/// reduction. Promoted from integration.rs file-local in M15 to enable
+/// reuse from `ffn_ref` and `transformer_block_ref`.
+///
+/// Reduction order is sequential left-to-right (`mul_add` accumulator) —
+/// matches the emitter's scalar fmadd loop bit-exactly. Do NOT replace
+/// with iterator-based fold under -O3 (auto-vec tree reduction breaks
+/// bit-exact equivalence; same constraint as `layernorm_ref` above).
+pub fn reference_matmul(input: &[f32], weights: &[f32], b: usize, k: usize, n: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; b * n];
+    for i in 0..b {
+        for j in 0..n {
+            let mut sum = 0.0f32;
+            for kk in 0..k {
+                sum = f32::mul_add(input[i * k + kk], weights[kk * n + j], sum);
+            }
+            out[i * n + j] = sum;
+        }
+    }
+    out
+}
+
+/// Reference bias add — broadcast `bias[n]` across `b` rows of `acc[b*n]`,
+/// in place semantically (returns new vec, doesn't mutate input).
+/// Promoted from integration.rs file-local in M15.
+pub fn reference_bias_add(acc: &[f32], bias: &[f32], n: usize) -> Vec<f32> {
+    let b = acc.len() / n;
+    let mut out = acc.to_vec();
+    for i in 0..b {
+        for j in 0..n {
+            out[i * n + j] += bias[j];
+        }
+    }
+    out
+}
+
+/// Reference relu — element-wise max(x, 0.0). Promoted from
+/// integration.rs file-local in M15.
+pub fn reference_relu(input: &[f32]) -> Vec<f32> {
+    input.iter().map(|x| x.max(0.0)).collect()
+}
+
+/// Reference FFN — composes `reference_matmul` + `reference_bias_add` +
+/// `reference_relu` in the order `linear[w1, b1] → relu → linear[w2, b2]`.
+///
+/// Shapes: input `[batch, dim]` → matmul w1 `[dim, hidden]` → bias b1 → relu
+///       → matmul w2 `[hidden, dim]` → bias b2 → output `[batch, dim]`.
+///
+/// CRITICAL (M15 helper-reuse rule, see design spec §3.4): this function
+/// MUST compose the promoted primitives above. Do NOT inline a fresh matmul
+/// or bias loop — divergent reduction order produces 1+ ULP mismatches that
+/// fail bit-exact comparison and are deeply painful to debug.
+#[allow(clippy::too_many_arguments)]
+pub fn ffn_ref(
+    input: &[f32],
+    w1: &[f32],
+    b1: &[f32],
+    w2: &[f32],
+    b2: &[f32],
+    batch: usize,
+    dim: usize,
+    hidden: usize,
+) -> Vec<f32> {
+    let mm1 = reference_matmul(input, w1, batch, dim, hidden);
+    let mm1_b = reference_bias_add(&mm1, b1, hidden);
+    let r1 = reference_relu(&mm1_b);
+    let mm2 = reference_matmul(&r1, w2, batch, hidden, dim);
+    reference_bias_add(&mm2, b2, dim)
+}
+
+/// Reference transformer block — composes `layernorm_ref` + `ffn_ref` +
+/// element-wise add. Mirrors the `transformer_block.nfl` fixture pipeline:
+/// `x -> layernorm[affine] -> linear -> relu -> linear -> add[skip1] -> add[skip2]`.
+///
+/// CRITICAL (helper-reuse rule, design spec §3.4): this function MUST compose
+/// `layernorm_ref` (M14, above) and `ffn_ref` (M15, above). Do NOT reimplement
+/// LayerNorm normalization, matmul reduction, or bias add. The existing
+/// helpers are M14-verified bit-exact against emitters; reuse them as-is.
+#[allow(clippy::too_many_arguments)]
+pub fn transformer_block_ref(
+    input: &[f32],
+    skip1: &[f32],
+    skip2: &[f32],
+    gamma: &[f32],
+    beta: &[f32],
+    w1: &[f32],
+    b1: &[f32],
+    w2: &[f32],
+    b2: &[f32],
+    batch: usize,
+    dim: usize,
+    hidden: usize,
+) -> Vec<f32> {
+    // 1. layernorm[affine=true]
+    let ln = layernorm_ref(input, &[batch, dim], Some(gamma), Some(beta));
+    // 2. ffn (linear → relu → linear with bias on both)
+    let ffn_out = ffn_ref(&ln, w1, b1, w2, b2, batch, dim, hidden);
+    // 3. add[skip1] (element-wise)
+    let r1: Vec<f32> = ffn_out
+        .iter()
+        .zip(skip1.iter())
+        .map(|(&a, &b)| a + b)
+        .collect();
+    // 4. add[skip2] (element-wise)
+    r1.iter().zip(skip2.iter()).map(|(&a, &b)| a + b).collect()
+}

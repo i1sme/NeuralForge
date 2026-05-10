@@ -165,16 +165,17 @@ NeuralForge is designed so that LLMs can write, read, and reason about NFL code 
 | 12 | NFL multi-input ABI (A1 — first leg of Axis 2 follow-up) (complete) | Multi-input function ABI (N=1..4) via per-profile `AbiContext` connector. New `profiles/{arm64,x86_64}/src/abi.rs` carrying `n_inputs: usize`, arity-aware `input_reg/params_reg/output_reg/ffi_save_set/materialise_ptr` accessors, alignment-correct `emit_ffi_save/emit_ffi_restore` (xzr / pushq %rax padding for odd cardinality, strict LIFO restore). `BufferLoc::InputReg(usize)` carries input index. `walk_model` constructs AbiContext once and threads `&abi` through every op-emitter; arity > 4 returns `LowerError::TooManyInputs`. `emit_matmul` rework on both profiles per spec §9.1: per-iter slice pointers move off ABI registers (arm64: x12/x13/x14 in place of x1/x2/x4; x86_64: callee-saved %rbx/%r12-%r15 via extended `compute_callee_saved` trigger), eliminating M10 outer-loop spill blocks. New fixtures: `two_input_matmul.nfl` (N=2 sanity), `multi_input_attention.nfl` (N=3 acceptance — V consumed post-softmax), `tests/fixtures/profile-negative/too_many_inputs.nfl` (N=5 → LowerError). Bench `bench/src/main.rs` gains per-arity dispatch + seed cascade. Test count: 344 → 390. **Known follow-up:** x86_64 `emit_matmul` currently rejects N=4 (j-counter %r9 collides with output_reg); rework deferred to M13+. |
 | 13 | N=4 + matmul fix + `add` op (A2 first brick) (complete) | x86_64 `emit_matmul` j-counter relocated from `%r9` to `%rbp` (callee-saved by unconditional prologue `pushq %rbp`; read by zero op-emitter bodies). Closes M12 known follow-up: N=4 + matmul now compiles and runs bit-exact. New `StdOp::Add` (flat variant; no BinaryOp container). NFL surface `a -> add[skip]` — first real consumer of M10's `ArgType::Tensor` outside Matmul. Strict shape equality (no broadcasting); new `ShapeError::AddShapeMismatch`. Both profiles ship `emit_add` (flat elementwise loop, modeled after `emit_mulscalar`); x86_64 reuses Task 1's `%rbp` scratch trick as loop counter. **Pre-Task-5 fix:** arm64 `emit_linear` ABI register clobber for N≥2 closed via stp/ldp save/restore of x3 (and x4 at N≥3, x5 at N≥4) around the i-loop body — same class of bug as Task 1 but resolved differently because emit_linear's bias paths and fused PostOp::SoftmaxRow dispatch already saturate x9-x16. Three new fixtures: `residual_add.nfl` (positive both profiles), `four_input_matmul.nfl` (closes Group A end-to-end x86_64), `negative/add_shape_mismatch.nfl` (IR-level reject). Test count: 390 → 400. |
 | 14 | A2 second brick — LayerNorm + LH-1/2/3 cleanup (complete) | LH-1/2/3 cleanup in x86_64 `emit_linear` (commit `916e9c7`): j-counter `%rcx` → `%rbp` (LH-1); src-ptr scratch `%r8` → op-local `pushq %r14` (LH-2); weight-ptr scratch `%r9` → op-local `pushq %r15` (LH-3). New `StdOp::LayerNorm` — single StdOp variant with internal 3-pass codegen (mean → variance + inv_std → normalize + optional affine). Native `fsqrt` on arm64, `sqrtss` on x86_64; no libm dependency. Affine toggle `layernorm[affine=true]` mirrors `linear[bias=true]`. `ParamKind` extended: `LayerNormScale` (γ) before `LayerNormBias` (β) — contract. arm64: leaf function, s0–s7 scratch only (s8–s15 avoided), `s_b` reuses `s2` after `s_inv_d` consumption. x86_64: op-local `pushq %r12/%r13` when affine; `compute_callee_saved` unchanged. LH-4 logged (N=3..4 %r8/%r9 reuse in x86_64 emit_layernorm, deferred). New fixtures: `layernorm_no_affine.nfl`, `layernorm_affine.nfl`, `pre_ln_block.nfl` (N=2, validates LH-1 closure end-to-end), `negative/layernorm_rank_too_low.nfl`. Test count: 400 → 441. |
+| 15 | A2 third brick — FFN compositional + LH-4 cleanup (complete) | LH-4 cleanup in x86_64 `emit_layernorm` (commit `e35dfaa`): per-row src ptr `%r8` → `%r15` (op-local pushq/popq); per-row dst ptr `%r9` → `%rbp` (function-level prologue handles). Push counts no-affine 2→3, affine 4→5. `OP_LOCAL_PUSH_BYTES_*` constants updated. 3 ABI-invariant unit tests `emit_layernorm_n{2,3,4}_does_not_clobber_output_reg`. A2 third brick: FFN as compositional NFL pattern (`linear → relu → linear`) — no new StdOp variant, no codegen changes. New fixtures `ffn.nfl` (N=1) and `transformer_block.nfl` (N=3 — exercises LH-4 condition output_reg=%r8 and validates closure via FFI on Linux x86_64 CI). Helper promotion: `reference_matmul/bias_add/relu` moved from `integration.rs` file-local to `common/mod.rs` `pub fn` per profile (isolation principle). Per-profile divergent `reference_matmul` body (arm64 `fmadd` / x86_64 `mulss+addss`). 4 new FFI integration tests with bit-exact `to_bits()` comparison. ABI audit at N=3,4: all emitters clean. Test count: 441 → 446 (macOS arm64); ~448 on Linux x86_64 CI. |
 
 ---
 
 ## Current Status
 
-**Milestone 14 complete. 441 tests passing on macOS arm64 (~444 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean (`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, `cargo test --workspace`).
+**Milestone 15 complete. 446 tests passing on macOS arm64 (~448 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean (`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, `cargo test --workspace`).
 
-M14 closed the A2 second brick (LayerNorm) end-to-end on both profiles and the LH-1/2/3 latent hazard cleanup in x86_64 `emit_linear` (opener commit `916e9c7`). LayerNorm is a single StdOp variant with internal 3-pass codegen (mean → variance + inv_std → normalize + optional affine), modeled structurally after Softmax. Native `fsqrt`/`sqrtss` — no libm dependency added. Affine optionality via single Symbol toggle `layernorm[affine=true]`, mirroring `linear[bias=true]`. AAPCS64-safe register allocation on arm64 (s8–s15 callee-saved range intentionally avoided; `s_b` reuses `s2` after `s_inv_d` consumption to stay within s0–s7). Op-local `%r12`/`%r13` push/pop on x86_64 affine path — `compute_callee_saved` unchanged. LH-4 logged for N=3..4 `%r8`/`%r9` reuse in x86_64 `emit_layernorm` (deferred until a fixture surfaces it).
+M14 closed the A2 second brick (LayerNorm) end-to-end on both profiles and the LH-1/2/3 latent hazard cleanup in x86_64 `emit_linear` (opener commit `916e9c7`). LayerNorm is a single StdOp variant with internal 3-pass codegen (mean → variance + inv_std → normalize + optional affine), modeled structurally after Softmax. Native `fsqrt`/`sqrtss` — no libm dependency added. Affine optionality via single Symbol toggle `layernorm[affine=true]`, mirroring `linear[bias=true]`. AAPCS64-safe register allocation on arm64 (s8–s15 callee-saved range intentionally avoided; `s_b` reuses `s2` after `s_inv_d` consumption to stay within s0–s7). Op-local `%r12`/`%r13` push/pop on x86_64 affine path — `compute_callee_saved` unchanged. **M15 closed LH-4 (per-row `%r8`/`%r9` scratch in x86_64 `emit_layernorm`) — relocated to `%r15` (op-local pushq/popq) and `%rbp` (function-level prologue handles). Runtime FFI evidence via new `transformer_block.nfl` fixture (N=3, output_reg=%r8) on Linux x86_64 CI.**
 
-Strategic direction: see §"Strategic Roadmap" — A1 closed in M12, A2 first brick (`add`) closed in M13, A2 second brick (`layernorm`) closed in M14. A2 third brick — FFN (`linear → relu → linear`) — remains in M15+ as compositional op (no new codegen pattern). Trigger-driven cleanup items (OQ-7, OQ-8, OQ-9, M5c OQ-4) live in §"Open Questions" / "Trigger-driven cleanup" and stay dormant. OQ-NEW closed in M9 (commit `a08fd24`). OQ-BENCH closed in M11 (commit `e7c29b8`).
+Strategic direction: see §"Strategic Roadmap" — A1 closed in M12, A2 first brick (`add`) closed in M13, A2 second brick (`layernorm`) closed in M14, **A2 third brick (FFN) closed in M15 — A2 axis fully complete**. Trigger-driven cleanup items (OQ-7, OQ-8, OQ-9, M5c OQ-4) live in §"Open Questions" / "Trigger-driven cleanup" and stay dormant. OQ-NEW closed in M9 (commit `a08fd24`). OQ-BENCH closed in M11 (commit `e7c29b8`).
 
 ---
 
@@ -204,10 +205,15 @@ bare-metal expf → drop libm dependency
   A2 second brick (`StdOp::LayerNorm`) — single StdOp variant with internal
   3-pass codegen (mean → variance + inv_std → normalize + optional affine),
   mirroring Softmax-as-one-node. Native sqrt (`fsqrt` / `sqrtss`) — no libm
-  dependency added. Open follow-ups: A2 FFN (`linear → relu → linear`,
-  compositional op, no new codegen pattern, deferred to M15+),
-  A3 — profile-level viewer annotations (per-node footprint, stack frame,
-  callee-saved set).
+  dependency added. **M15 closed the A2 third brick — FFN as compositional
+  NFL pattern (`linear → relu → linear`) — no new StdOp variant, no codegen
+  changes. Demonstrated via `ffn.nfl` (N=1 baseline) and `transformer_block.nfl`
+  (N=3, full transformer block with LayerNorm + FFN + dual residual). M15
+  also closed LH-4 in x86_64 `emit_layernorm` (per-row scratch `%r8`/`%r9`
+  → `%r15`/`%rbp`).** A2 axis is now complete (residual + LayerNorm + FFN
+  all shipped on both profiles). Open follow-ups: A3 — profile-level viewer
+  annotations (per-node footprint, stack frame, callee-saved set); A2-extended
+  — training syntax (loss/optimiser) for NFL v0.3.
 - **Axis 3 — deployment reach.** Replacing the `bl _expf` libm call with a
   Taylor-series `expf` removes the only runtime dependency, unlocking bare-metal
   targets.
@@ -229,7 +235,8 @@ Leaving an entry here longer than one milestone is a process failure.
 
 | # | Location | Condition | Symptom | Opened |
 |---|----------|-----------|---------|--------|
-| LH-4 | profiles/x86_64/src/ops/layernorm.rs | N=3 (output_reg = %r8) or N=4 (output_reg = %r9) | emit_layernorm uses %r8 (src row ptr) and %r9 (dst row ptr) as per-row scratch — clobbers output_reg / input(N-1) at N≥3 | M14 |
+
+*(Table is empty as of M15 — all latent hazards closed.)*
 
 ### Trigger-driven cleanup
 Items raised during a milestone that intentionally do not get scheduled — they

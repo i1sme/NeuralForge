@@ -82,7 +82,7 @@ NeuralForge/
 │   └── x86_64/             ← Linux ELF scalar SSE2 codegen profile, M9
 │       └── src/
 │           ├── abi.rs      ← AbiContext (SysV AMD64 variant, M12)
-│           └── ops/        ← add.rs (M13), layernorm.rs (M14; 3-pass SysV native sqrtss, op-local %r12/%r13 for affine), linear.rs, matmul.rs (M10; callee-saved scratch rework M12; %rbp j-counter fix M13), mulscalar.rs (M10), relu.rs, softmax.rs, dropout.rs
+│           └── ops/        ← add.rs (M13), layernorm.rs (M14; 3-pass SysV native sqrtss, op-local %r12/%r13 for affine; M15 LH-4 closed — %r15/%rbp scratch), linear.rs, matmul.rs (M10; callee-saved scratch rework M12; %rbp j-counter fix M13), mulscalar.rs (M10), relu.rs, softmax.rs, dropout.rs
 │
 ├── language/
 │   ├── grammar.ebnf        ← formal NFL grammar
@@ -178,13 +178,27 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-**Milestone 14 complete. 441 tests passing on macOS arm64 (~444 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean
+**Milestone 15 complete. 446 tests passing on macOS arm64 (~448 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean
 (`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo fmt --all -- --check`, `cargo test --workspace`).
 
-M14 closed the A2 second brick (`StdOp::LayerNorm`) and the LH-1/2/3 latent hazard cleanup in x86_64 `emit_linear` (opener commit `916e9c7`). LayerNorm is a single StdOp variant with internal 3-pass codegen (mean → variance + inv_std → normalize + optional affine). Native `fsqrt`/`sqrtss` — no libm dependency added. NFL surface `x -> layernorm` or `x -> layernorm[affine=true]`. LH-4 logged for x86_64 N=3..4 deferral. Four new fixtures including `pre_ln_block.nfl` (N=2 transformer block, validates LH-1 closure end-to-end).
+M15 closed the A2 third brick — FFN as compositional NFL pattern
+(`linear → relu → linear`, no new StdOp variant, no codegen changes) — and
+the LH-4 latent hazard cleanup in x86_64 `emit_layernorm` (per-row scratch
+`%r8`/`%r9` → `%r15`/`%rbp`). A2 axis fully complete: residual + LayerNorm
++ FFN all shipped on both profiles. Two new positive fixtures: `ffn.nfl`
+(N=1 baseline) and `transformer_block.nfl` (N=3 full transformer block,
+runtime FFI evidence for LH-4 closure on Linux x86_64 CI). Helper
+promotion: `reference_matmul`/`bias_add`/`relu` moved from `integration.rs`
+file-local to `common/mod.rs` `pub fn` per profile.
 
-Strategic direction: see `PROJECT_SPEC.md` §"Strategic Roadmap" — A1 closed M12, A2 first brick (`add`) closed M13, A2 second brick (`layernorm`) closed M14. A2 third brick FFN (`linear → relu → linear`) remains in M15+. Trigger-driven cleanup (OQ-7, OQ-8, OQ-9, M5c OQ-4) stays dormant.
+Strategic direction: see `PROJECT_SPEC.md` §"Strategic Roadmap" — A1 closed
+M12, A2 first brick (`add`) closed M13, A2 second brick (`layernorm`)
+closed M14, A2 third brick (FFN) closed M15. **A2 axis fully complete.**
+Next candidates: A3 — profile-level viewer annotations (per-node footprint,
+stack frame, callee-saved set); Axis 3 — bare-metal `expf` to drop libm.
+Trigger-driven cleanup (OQ-7, OQ-8, OQ-9, M5c OQ-4) stays dormant. §"Known
+Latent Hazards" table empty as of end of M15.
 
 ---
 

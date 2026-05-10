@@ -1,0 +1,12 @@
+# FFN as compositional NFL pattern — A2 third brick (M15).
+#
+# Pure composition: linear → relu → linear, both with bias.
+# N=1 baseline — no multi-input ABI involvement, no LH surface.
+# Demonstrates that FFN requires NO new StdOp / IR / codegen pattern;
+# both `linear` and `relu` emitters already exist on both profiles
+# (arm64 since M3, x86_64 since M9).
+
+model Ffn [batch=2, dim=4, hidden=8]:
+    x: Tensor[batch, dim]
+
+    x -> linear[hidden, bias=true] -> relu -> linear[dim, bias=true]

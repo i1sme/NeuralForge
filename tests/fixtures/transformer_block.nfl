@@ -1,0 +1,32 @@
+# transformer_block.nfl — N=3 LH-4 runtime evidence + A2 transformer-block showcase.
+#
+# Combined purpose:
+#   1. Runtime FFI evidence for LH-4 closure: LayerNorm at N=3 →
+#      output_reg = %r8 on x86_64. Pre-T0, layernorm body would clobber
+#      %r8 (per-row src ptr), corrupting output pointer → segfault or
+#      wrong-output bit-mismatch vs Rust reference. Post-T0, %r8 untouched
+#      (relocated to %r15), bit-exact match.
+#   2. A2 third brick demonstration — full transformer-block composition
+#      (LayerNorm + FFN + dual residual) end-to-end on both profiles.
+#
+# ABI slot layout (declaration order, SysV AMD64):
+#   N=3: x (%rdi), skip1 (%rsi), skip2 (%rdx),
+#        params (%rcx), out (%r8).  ← LH-4 condition: out = %r8
+#
+# Param blob (compute_offsets traversal order):
+#   LayerNormScale (4 floats), LayerNormBias (4 floats),
+#   LinearWeight (4*8=32), LinearBias (8),
+#   LinearWeight (8*4=32), LinearBias (4)
+#   Total: 84 floats.
+
+model TransformerBlock [batch=2, dim=4, hidden=8]:
+    x: Tensor[batch, dim]
+    skip1: Tensor[batch, dim]
+    skip2: Tensor[batch, dim]
+
+    x -> layernorm[affine=true]
+      -> linear[hidden, bias=true]
+      -> relu
+      -> linear[dim, bias=true]
+      -> add[skip1]
+      -> add[skip2]

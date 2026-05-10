@@ -10,36 +10,9 @@
 
 mod common;
 
-// ─── Reference implementations (verbatim from arm64 — pure Rust) ─────────────
+use common::{reference_bias_add, reference_matmul, reference_relu};
 
-fn reference_matmul(input: &[f32], weights: &[f32], b: usize, k: usize, n: usize) -> Vec<f32> {
-    let mut out = vec![0.0f32; b * n];
-    for i in 0..b {
-        for j in 0..n {
-            let mut sum = 0.0f32;
-            for kk in 0..k {
-                sum = f32::mul_add(input[i * k + kk], weights[kk * n + j], sum);
-            }
-            out[i * n + j] = sum;
-        }
-    }
-    out
-}
-
-fn reference_bias_add(acc: &[f32], bias: &[f32], n: usize) -> Vec<f32> {
-    let b = acc.len() / n;
-    let mut out = acc.to_vec();
-    for i in 0..b {
-        for j in 0..n {
-            out[i * n + j] += bias[j];
-        }
-    }
-    out
-}
-
-fn reference_relu(input: &[f32]) -> Vec<f32> {
-    input.iter().map(|x| x.max(0.0)).collect()
-}
+// ─── Reference implementations ────────────────────────────────────────────────
 
 fn reference_softmax_stable(input: &[f32], b: usize, k: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; b * k];
@@ -1722,6 +1695,162 @@ fn pre_ln_block_match_numerically() {
              (pre_ln_block validates LH-1 closure — bit mismatch may indicate a regression)",
             got.to_bits(),
             want.to_bits()
+        );
+    }
+
+    drop(lib);
+}
+
+// ─── M15 FFN integration tests ───────────────────────────────────────────────
+
+#[test]
+fn ffn_ffi() {
+    // M15 A2 third brick — FFN as compositional NFL pattern (x86_64).
+    // Linux x86_64 only; macOS skipped via file-level cfg.
+    //
+    // Fixture: tests/fixtures/ffn.nfl (N=1, dim=4, hidden=8).
+    // Expected: bit-exact match against common::ffn_ref.
+
+    if !common::cc_available() {
+        eprintln!("skip: requires cc");
+        return;
+    }
+
+    let src = std::fs::read_to_string("../../tests/fixtures/ffn.nfl").unwrap();
+    let ast = compiler::parse(&src).unwrap();
+    let uir = compiler::ir::build(&ast).unwrap();
+    let uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
+    let asm = profiles_x86_64::lower(&uir).expect("lower");
+
+    let sig = &asm.functions[0];
+    assert_eq!(sig.name, "nfl_forward_Ffn");
+    // params: w1 (4*8=32) + b1 (8) + w2 (8*4=32) + b2 (4) = 76 floats.
+    assert_eq!(sig.params_floats, 76);
+
+    let so_path = common::compile_to_so(&asm.source, "ffn");
+    let lib = unsafe { libloading::Library::new(&so_path) }.unwrap();
+    let forward: libloading::Symbol<unsafe extern "C" fn(*const f32, *const f32, *mut f32)> =
+        unsafe { lib.get(b"nfl_forward_Ffn").unwrap() };
+
+    let mut input = vec![0.0f32; 2 * 4];
+    for (i, v) in input.iter_mut().enumerate() {
+        *v = (i as f32) * 0.1 - 0.4;
+    }
+    let mut params = vec![0.0f32; sig.params_floats];
+    for (i, v) in params.iter_mut().enumerate() {
+        *v = ((i as f32) - 38.0) * 0.01;
+    }
+    let mut output = vec![0.0f32; 2 * 4];
+    unsafe {
+        forward(input.as_ptr(), params.as_ptr(), output.as_mut_ptr());
+    }
+
+    let w1 = &params[0..32];
+    let b1 = &params[32..40];
+    let w2 = &params[40..72];
+    let b2 = &params[72..76];
+
+    let expected = common::ffn_ref(&input, w1, b1, w2, b2, 2, 4, 8);
+
+    // Bit-exact comparison: x86_64 reference_matmul uses non-FMA `+= a * b`
+    // (two roundings) matching the emitter's `mulss + addss` pattern.
+    // M14 layernorm test precedent — same to_bits() discipline.
+    for (i, (a, b)) in output.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            a.to_bits() == b.to_bits(),
+            "ffn[{i}]: asm got {a} (bits 0x{:08x}), ref got {b} (bits 0x{:08x})",
+            a.to_bits(),
+            b.to_bits()
+        );
+    }
+    drop(lib);
+}
+
+#[test]
+fn transformer_block_ffi() {
+    // M15 — N=3 transformer block (LayerNorm + FFN + dual residual).
+    //
+    // x86_64 / Linux only (file-level #![cfg]). THE LH-4 RUNTIME EVIDENCE
+    // TEST. Pre-T0 (without LH-4 fix): layernorm body clobbers output_reg=%r8
+    // → segfault or wrong-output bit-mismatch vs Rust reference. Post-T0:
+    // %r8 untouched (relocated to %r15), bit-exact match.
+
+    if !common::cc_available() {
+        eprintln!("skip: requires cc");
+        return;
+    }
+
+    let src = std::fs::read_to_string("../../tests/fixtures/transformer_block.nfl").unwrap();
+    let ast = compiler::parse(&src).unwrap();
+    let uir = compiler::ir::build(&ast).unwrap();
+    let uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
+    let asm = profiles_x86_64::lower(&uir).expect("lower");
+
+    let sig = &asm.functions[0];
+    assert_eq!(sig.name, "nfl_forward_TransformerBlock");
+    // params: γ(4) + β(4) + w1(4*8=32) + b1(8) + w2(8*4=32) + b2(4) = 84.
+    assert_eq!(sig.params_floats, 84);
+
+    let so_path = common::compile_to_so(&asm.source, "transformer_block");
+    let lib = unsafe { libloading::Library::new(&so_path) }.unwrap();
+    let forward: libloading::Symbol<
+        unsafe extern "C" fn(*const f32, *const f32, *const f32, *const f32, *mut f32),
+    > = unsafe { lib.get(b"nfl_forward_TransformerBlock").unwrap() };
+
+    let mut input = vec![0.0f32; 2 * 4];
+    for (i, v) in input.iter_mut().enumerate() {
+        *v = (i as f32) * 0.1 - 0.4;
+    }
+    let mut skip1 = vec![0.0f32; 2 * 4];
+    for (i, v) in skip1.iter_mut().enumerate() {
+        *v = (i as f32) * 0.05 - 0.2;
+    }
+    let mut skip2 = vec![0.0f32; 2 * 4];
+    for (i, v) in skip2.iter_mut().enumerate() {
+        *v = (i as f32) * 0.03 + 0.1;
+    }
+    let mut params = vec![0.0f32; sig.params_floats];
+    for (i, v) in params.iter_mut().enumerate() {
+        *v = ((i as f32) - 42.0) * 0.01;
+    }
+    let mut output = vec![0.0f32; 2 * 4];
+    unsafe {
+        forward(
+            input.as_ptr(),
+            skip1.as_ptr(),
+            skip2.as_ptr(),
+            params.as_ptr(),
+            output.as_mut_ptr(),
+        );
+    }
+
+    // Param blob slicing per compute_offsets traversal order.
+    let gamma = &params[0..4];
+    let beta = &params[4..8];
+    let w1 = &params[8..40];
+    let b1 = &params[40..48];
+    let w2 = &params[48..80];
+    let b2 = &params[80..84];
+
+    let expected =
+        common::transformer_block_ref(&input, &skip1, &skip2, gamma, beta, w1, b1, w2, b2, 2, 4, 8);
+
+    // Bit-exact comparison: composition of layernorm_ref (M14 verified
+    // bit-exact) + ffn_ref (uses x86_64's non-FMA `+= a * b` reference_matmul
+    // matching `mulss + addss`) + element-wise add. Determinism preserved
+    // through the chain.
+    //
+    // THIS IS THE LH-4 RUNTIME EVIDENCE TEST. Pre-T0: layernorm body
+    // clobbers output_reg=%r8 → segfault or bit-mismatch here. Post-T0:
+    // %r8 untouched → bit-exact match.
+    for (i, (a, b)) in output.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            a.to_bits() == b.to_bits(),
+            "transformer_block[{i}]: asm got {a} (bits 0x{:08x}), ref got {b} (bits 0x{:08x})",
+            a.to_bits(),
+            b.to_bits()
         );
     }
 
