@@ -131,6 +131,17 @@ Three new tests, mirroring `emit_linear_n{2,3,4}_does_not_clobber_output_reg`:
 
 Additional asm-shape assertion in each test: `pushq` substring count matches expected (3 for no-affine variant, 5 for affine — runs both `has_affine` cases per N where applicable).
 
+### Evidence type per N (explicit gap statement)
+
+LH-4 affects both N=3 and N=4 (output_reg is `%r8` and `%r9` respectively). M15 closes both, but with **different evidence types**:
+
+| N | Evidence in M15 | Source |
+|---|---|---|
+| 3 | **asm-shape unit test (T0) + runtime FFI fixture (T2)** | `emit_layernorm_n3_does_not_clobber_output_reg` + `transformer_block_ffi` on x86_64 Linux CI |
+| 4 | **asm-shape unit test only (T0)** | `emit_layernorm_n4_does_not_clobber_output_reg`; **no N=4 runtime fixture in M15** |
+
+The N=4 asm-only closure follows the M14 precedent for LH-2/3 in `emit_linear`: `emit_linear_n4_does_not_clobber_output_reg` was accepted as sufficient evidence at N=4 because `four_input_matmul.nfl` (the N=4 multi-input fixture) does not invoke `emit_linear` (it's `matmul → add → add`, no linear op). Same situation here: no current N=4 fixture invokes `emit_layernorm`, so asm-shape is the highest available evidence type. If a future milestone adds an N=4 fixture invoking LayerNorm, it will exercise this path empirically; until then, the asm-shape guarantee + the precedent set by LH-2/3 acceptance is the closure standard.
+
 ---
 
 ## 3. Fixtures + reference impls + FFI tests
@@ -298,6 +309,34 @@ pub fn transformer_block_ref(
 | **`transformer_block_ffi`** | **x86_64** | **Linux CI; `#[cfg]` skipped on macOS** | **LH-4 runtime evidence — empirical proof of T0 closure** |
 
 Total: **4 new FFI integration tests.** Skip-on-macOS pattern follows M9 precedent (`#[cfg]` gating `target_os = "linux"` for x86_64-specific tests).
+
+#### FFI extern "C" signatures
+
+For implementer self-consistency (M14 spec convention), the FFI entry-point signatures the tests must `dlsym` and call:
+
+**`ffn_ffi`** — N=1 (1 input + params + output):
+
+```rust
+type FfnFn = unsafe extern "C" fn(
+    x: *const f32,        // %rdi (x86_64) / x0 (arm64) — input tensor
+    params: *const f32,   // %rsi / x1 — flattened param blob (76 floats: w1,b1,w2,b2)
+    out: *mut f32,        // %rdx / x2 — output tensor (batch × dim = 8 floats)
+);
+```
+
+**`transformer_block_ffi`** — N=3 (3 inputs + params + output):
+
+```rust
+type TransformerBlockFn = unsafe extern "C" fn(
+    x: *const f32,        // %rdi / x0 — input tensor
+    skip1: *const f32,    // %rsi / x1 — first residual
+    skip2: *const f32,    // %rdx / x2 — second residual
+    params: *const f32,   // %rcx / x3 — flattened param blob (84 floats: γ,β,w1,b1,w2,b2)
+    out: *mut f32,        // %r8 / x4 — output tensor; LH-4 trigger register on x86_64
+);
+```
+
+Same Rust signature works for both profiles (Rust `extern "C"` dispatches to the host C ABI — SysV AMD64 on Linux x86_64, AAPCS64 on macOS arm64).
 
 ---
 
