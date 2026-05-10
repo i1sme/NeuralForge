@@ -222,10 +222,9 @@ Bugs that exist in the codebase but are not triggered by any current fixture.
 Each entry must be resolved in the milestone whose fixture first exercises it.
 Leaving an entry here longer than one milestone is a process failure.
 
-*Currently empty — populate as new latent hazards are discovered.*
-
 | # | Location | Condition | Symptom | Opened |
 |---|----------|-----------|---------|--------|
+| LH-4 | profiles/x86_64/src/ops/layernorm.rs | N=3 (output_reg = %r8) or N=4 (output_reg = %r9) | emit_layernorm uses %r8 (src row ptr) and %r9 (dst row ptr) as per-row scratch — clobbers output_reg / input(N-1) at N≥3 | M14 |
 
 ### Trigger-driven cleanup
 Items raised during a milestone that intentionally do not get scheduled — they
