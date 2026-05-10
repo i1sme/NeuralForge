@@ -1725,6 +1725,7 @@ fn ffn_ffi() {
 
     let sig = &asm.functions[0];
     assert_eq!(sig.name, "nfl_forward_Ffn");
+    // params: w1 (4*8=32) + b1 (8) + w2 (8*4=32) + b2 (4) = 76 floats.
     assert_eq!(sig.params_floats, 76);
 
     let so_path = common::compile_to_so(&asm.source, "ffn");
@@ -1763,4 +1764,5 @@ fn ffn_ffi() {
             b.to_bits()
         );
     }
+    drop(lib);
 }

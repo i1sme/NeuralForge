@@ -1693,4 +1693,5 @@ fn ffn_ffi() {
             b.to_bits()
         );
     }
+    drop(lib);
 }
