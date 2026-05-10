@@ -9,6 +9,17 @@
 //! `compute_callee_saved` unchanged (M13 pre-Task-5 arm64 precedent). No
 //! FFI calls (native `sqrtss`).
 //!
+//! Pointer materialisation order (M14 bugfix): base pointers are materialised
+//! via `abi.materialise_ptr` BEFORE the op-local `pushq` instructions. For
+//! `BufferLoc::StackOffset(N)`, materialise_ptr emits `leaq N(%rsp), <reg>`
+//! using the current %rsp. Emitting pushq first would adjust %rsp by 16/32
+//! bytes and produce wrong stack-relative addresses. The correct pattern is:
+//!
+//!   1. materialise_ptr → uses pre-push %rsp → correct addresses in %rbx/%r14
+//!   2. pushq → saves the materialised values for use throughout the body
+//!
+//! This mirrors emit_linear's pattern (linear.rs), which has been correct since M3.
+//!
 //! Register plan (M14 spec §8, N=1..2 scope, finalized):
 //!   %rax  = x_j (inner counter); also temp for byte-offset compute before counter use
 //!   %r10  = bound scratch (clobbered every emit_imm32_to_r10 call)
@@ -78,16 +89,12 @@ pub fn emit_layernorm(
         if has_affine { "with " } else { "no-" },
     ));
 
-    // Op-local callee-saved save. Push order: γ/β first if affine, then
-    // base pointers. LIFO pop at function end mirrors this exactly.
-    if has_affine {
-        s.push_str("    pushq   %r12\n");
-        s.push_str("    pushq   %r13\n");
-    }
-    s.push_str("    pushq   %rbx\n");
-    s.push_str("    pushq   %r14\n");
-
-    // Materialise base pointers ONCE before the outer loop.
+    // Materialise base pointers ONCE before any op-local pushes. materialise_ptr
+    // for BufferLoc::StackOffset(N) emits `leaq N(%rsp), <reg>` using the
+    // current %rsp. If we push first, %rsp is adjusted by 16 (no-affine) or 32
+    // (affine) bytes and the stack-relative address is wrong by that delta.
+    // Mirrors the emit_linear pattern in profiles/x86_64/src/ops/linear.rs
+    // which has been correct since M3.
     abi.materialise_ptr(src_loc, "%rbx", &mut s);
     abi.materialise_ptr(dst_loc, "%r14", &mut s);
 
@@ -115,6 +122,17 @@ pub fn emit_layernorm(
             ));
         }
     }
+
+    // Op-local callee-saved save. Push order: γ/β first if affine, then base
+    // pointers. The materialised values (computed above using pre-push %rsp)
+    // are pushed here so they survive the body unchanged. LIFO pop at body
+    // exit mirrors this exactly.
+    if has_affine {
+        s.push_str("    pushq   %r12\n");
+        s.push_str("    pushq   %r13\n");
+    }
+    s.push_str("    pushq   %rbx\n");
+    s.push_str("    pushq   %r14\n");
 
     // Pre-loop hoisted constants — RIP-relative loads from .rodata pool
     // (emitted at end of this function).
