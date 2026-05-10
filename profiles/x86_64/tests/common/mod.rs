@@ -171,3 +171,40 @@ pub fn ffn_ref(
     let mm2 = reference_matmul(&r1, w2, batch, hidden, dim);
     reference_bias_add(&mm2, b2, dim)
 }
+
+/// Reference transformer block — composes `layernorm_ref` + `ffn_ref` +
+/// element-wise add. Mirrors the `transformer_block.nfl` fixture pipeline:
+/// `x -> layernorm[affine] -> linear -> relu -> linear -> add[skip1] -> add[skip2]`.
+///
+/// CRITICAL (helper-reuse rule, design spec §3.4): this function MUST compose
+/// `layernorm_ref` (M14, above) and `ffn_ref` (M15, above). Do NOT reimplement
+/// LayerNorm normalization, matmul reduction, or bias add. The existing
+/// helpers are M14-verified bit-exact against emitters; reuse them as-is.
+#[allow(clippy::too_many_arguments)]
+pub fn transformer_block_ref(
+    input: &[f32],
+    skip1: &[f32],
+    skip2: &[f32],
+    gamma: &[f32],
+    beta: &[f32],
+    w1: &[f32],
+    b1: &[f32],
+    w2: &[f32],
+    b2: &[f32],
+    batch: usize,
+    dim: usize,
+    hidden: usize,
+) -> Vec<f32> {
+    // 1. layernorm[affine=true]
+    let ln = layernorm_ref(input, &[batch, dim], Some(gamma), Some(beta));
+    // 2. ffn (linear → relu → linear with bias on both)
+    let ffn_out = ffn_ref(&ln, w1, b1, w2, b2, batch, dim, hidden);
+    // 3. add[skip1] (element-wise)
+    let r1: Vec<f32> = ffn_out
+        .iter()
+        .zip(skip1.iter())
+        .map(|(&a, &b)| a + b)
+        .collect();
+    // 4. add[skip2] (element-wise)
+    r1.iter().zip(skip2.iter()).map(|(&a, &b)| a + b).collect()
+}

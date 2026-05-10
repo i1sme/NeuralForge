@@ -1695,3 +1695,93 @@ fn ffn_ffi() {
     }
     drop(lib);
 }
+
+#[test]
+fn transformer_block_ffi() {
+    // M15 — N=3 transformer block (LayerNorm + FFN + dual residual).
+    //
+    // arm64 path: AAPCS64-clean by construction (M14 emit_layernorm uses
+    // x6/x9-x17 + s0-s7 scratch, no overlap with x0-x4 inputs at N=3).
+    // This test is the implicit ABI audit for arm64 emit_layernorm at N=3.
+
+    if !cfg!(target_arch = "aarch64") {
+        eprintln!("skip: requires aarch64");
+        return;
+    }
+    if !common::cc_available() {
+        eprintln!("skip: requires cc");
+        return;
+    }
+
+    let src = std::fs::read_to_string("../../tests/fixtures/transformer_block.nfl").unwrap();
+    let ast = compiler::parse(&src).unwrap();
+    let uir = compiler::ir::build(&ast).unwrap();
+    let uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
+    let asm = profiles_arm64::lower(&uir).expect("lower");
+
+    let sig = &asm.functions[0];
+    assert_eq!(sig.name, "nfl_forward_TransformerBlock");
+    // params: γ(4) + β(4) + w1(4*8=32) + b1(8) + w2(8*4=32) + b2(4) = 84.
+    assert_eq!(sig.params_floats, 84);
+
+    let dylib_path = common::compile_to_dylib(&asm.source, "transformer_block");
+    let lib = unsafe { libloading::Library::new(&dylib_path) }.unwrap();
+    let forward: libloading::Symbol<
+        unsafe extern "C" fn(*const f32, *const f32, *const f32, *const f32, *mut f32),
+    > = unsafe { lib.get(b"nfl_forward_TransformerBlock").unwrap() };
+
+    // batch=2, dim=4 — three N=3 input tensors of [2,4] each.
+    let mut input = vec![0.0f32; 2 * 4];
+    for (i, v) in input.iter_mut().enumerate() {
+        *v = (i as f32) * 0.1 - 0.4;
+    }
+    let mut skip1 = vec![0.0f32; 2 * 4];
+    for (i, v) in skip1.iter_mut().enumerate() {
+        *v = (i as f32) * 0.05 - 0.2;
+    }
+    let mut skip2 = vec![0.0f32; 2 * 4];
+    for (i, v) in skip2.iter_mut().enumerate() {
+        *v = (i as f32) * 0.03 + 0.1;
+    }
+    let mut params = vec![0.0f32; sig.params_floats];
+    for (i, v) in params.iter_mut().enumerate() {
+        *v = ((i as f32) - 42.0) * 0.01;
+    }
+    let mut output = vec![0.0f32; 2 * 4];
+    unsafe {
+        forward(
+            input.as_ptr(),
+            skip1.as_ptr(),
+            skip2.as_ptr(),
+            params.as_ptr(),
+            output.as_mut_ptr(),
+        );
+    }
+
+    // Param blob slicing per compute_offsets traversal order.
+    let gamma = &params[0..4];
+    let beta = &params[4..8];
+    let w1 = &params[8..40];
+    let b1 = &params[40..48];
+    let w2 = &params[48..80];
+    let b2 = &params[80..84];
+
+    let expected =
+        common::transformer_block_ref(&input, &skip1, &skip2, gamma, beta, w1, b1, w2, b2, 2, 4, 8);
+
+    // Bit-exact comparison: composition of layernorm_ref (M14 verified
+    // bit-exact) + ffn_ref (uses arm64's f32::mul_add reference_matmul
+    // matching `fmadd`) + element-wise add. Determinism preserved through
+    // the chain.
+    for (i, (a, b)) in output.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            a.to_bits() == b.to_bits(),
+            "transformer_block[{i}]: asm got {a} (bits 0x{:08x}), ref got {b} (bits 0x{:08x})",
+            a.to_bits(),
+            b.to_bits()
+        );
+    }
+
+    drop(lib);
+}
