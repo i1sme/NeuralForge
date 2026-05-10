@@ -10,36 +10,9 @@
 
 mod common;
 
-// ─── Reference implementations (verbatim from arm64 — pure Rust) ─────────────
+use common::{reference_bias_add, reference_matmul, reference_relu};
 
-fn reference_matmul(input: &[f32], weights: &[f32], b: usize, k: usize, n: usize) -> Vec<f32> {
-    let mut out = vec![0.0f32; b * n];
-    for i in 0..b {
-        for j in 0..n {
-            let mut sum = 0.0f32;
-            for kk in 0..k {
-                sum = f32::mul_add(input[i * k + kk], weights[kk * n + j], sum);
-            }
-            out[i * n + j] = sum;
-        }
-    }
-    out
-}
-
-fn reference_bias_add(acc: &[f32], bias: &[f32], n: usize) -> Vec<f32> {
-    let b = acc.len() / n;
-    let mut out = acc.to_vec();
-    for i in 0..b {
-        for j in 0..n {
-            out[i * n + j] += bias[j];
-        }
-    }
-    out
-}
-
-fn reference_relu(input: &[f32]) -> Vec<f32> {
-    input.iter().map(|x| x.max(0.0)).collect()
-}
+// ─── Reference implementations ────────────────────────────────────────────────
 
 fn reference_softmax_stable(input: &[f32], b: usize, k: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; b * k];
@@ -1726,4 +1699,68 @@ fn pre_ln_block_match_numerically() {
     }
 
     drop(lib);
+}
+
+// ─── M15 FFN integration tests ───────────────────────────────────────────────
+
+#[test]
+fn ffn_ffi() {
+    // M15 A2 third brick — FFN as compositional NFL pattern (x86_64).
+    // Linux x86_64 only; macOS skipped via file-level cfg.
+    //
+    // Fixture: tests/fixtures/ffn.nfl (N=1, dim=4, hidden=8).
+    // Expected: bit-exact match against common::ffn_ref.
+
+    if !common::cc_available() {
+        eprintln!("skip: requires cc");
+        return;
+    }
+
+    let src = std::fs::read_to_string("../../tests/fixtures/ffn.nfl").unwrap();
+    let ast = compiler::parse(&src).unwrap();
+    let uir = compiler::ir::build(&ast).unwrap();
+    let uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
+    let asm = profiles_x86_64::lower(&uir).expect("lower");
+
+    let sig = &asm.functions[0];
+    assert_eq!(sig.name, "nfl_forward_Ffn");
+    assert_eq!(sig.params_floats, 76);
+
+    let so_path = common::compile_to_so(&asm.source, "ffn");
+    let lib = unsafe { libloading::Library::new(&so_path) }.unwrap();
+    let forward: libloading::Symbol<unsafe extern "C" fn(*const f32, *const f32, *mut f32)> =
+        unsafe { lib.get(b"nfl_forward_Ffn").unwrap() };
+
+    let mut input = vec![0.0f32; 2 * 4];
+    for (i, v) in input.iter_mut().enumerate() {
+        *v = (i as f32) * 0.1 - 0.4;
+    }
+    let mut params = vec![0.0f32; sig.params_floats];
+    for (i, v) in params.iter_mut().enumerate() {
+        *v = ((i as f32) - 38.0) * 0.01;
+    }
+    let mut output = vec![0.0f32; 2 * 4];
+    unsafe {
+        forward(input.as_ptr(), params.as_ptr(), output.as_mut_ptr());
+    }
+
+    let w1 = &params[0..32];
+    let b1 = &params[32..40];
+    let w2 = &params[40..72];
+    let b2 = &params[72..76];
+
+    let expected = common::ffn_ref(&input, w1, b1, w2, b2, 2, 4, 8);
+
+    // Bit-exact comparison: x86_64 reference_matmul uses non-FMA `+= a * b`
+    // (two roundings) matching the emitter's `mulss + addss` pattern.
+    // M14 layernorm test precedent — same to_bits() discipline.
+    for (i, (a, b)) in output.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            a.to_bits() == b.to_bits(),
+            "ffn[{i}]: asm got {a} (bits 0x{:08x}), ref got {b} (bits 0x{:08x})",
+            a.to_bits(),
+            b.to_bits()
+        );
+    }
 }
