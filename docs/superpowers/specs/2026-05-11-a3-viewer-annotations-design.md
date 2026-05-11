@@ -238,8 +238,14 @@ Six commits, sequenced for bisectability. Each commit has an explicit
   richer than arm64's bare enum).
 - `pub use profile_api::BufferLoc` in `profiles/{arm64,x86_64}/src/buffer.rs`;
   remove the local definitions.
-- All callsites continue to import via `crate::buffer::BufferLoc` — no callsite
-  edits needed beyond the two `pub use` lines.
+- Within each profile crate, callsites continue to import via
+  `crate::buffer::BufferLoc` — no callsite edits needed beyond the two
+  `pub use` lines.
+- **Pre-task verification:** `grep -r 'BufferLoc' --include='*.rs' .` to confirm
+  no external crate (e.g. `nflc`, `bench`, integration tests in
+  `profiles/*/tests/`) imports `profiles_arm64::buffer::BufferLoc` or
+  `profiles_x86_64::buffer::BufferLoc` directly. If found, those imports must
+  be updated to `profile_api::BufferLoc` as part of this task.
 - **Tests changed:** ±0.
 - **Bisect-claim:** "type relocation only; all callers re-import via existing path;
   446 tests clean."
@@ -251,9 +257,28 @@ Six commits, sequenced for bisectability. Each commit has an explicit
 - New trait method `Profile::inspect(&self, uir: &Uir) -> Result<Inspection, LowerError>`.
 - Per-profile implementation: each profile's `lib.rs` adds `fn inspect`, calling
   the shared `analyze()` from Task 1, then walking `model.nodes` to build
-  `Vec<NodeAnnotation>`. `params_floats` derived from `fn_sig.params_layout` by
-  matching `origin_node`. `callee_saved: Vec<String>` rendered per-profile from
-  `RegSet`:
+  `Vec<NodeAnnotation>`. `params_floats` for `Linear` / `LayerNorm` nodes
+  derived from `FnSig.params_layout` (verified extant in
+  `profile-api/src/lib.rs`: `pub params_layout: Vec<ParamSlot>` where
+  `ParamSlot { kind, origin_node: NodeId, offset, size }`). Concretely:
+  ```rust
+  let params_floats: Option<usize> = match &node.kind {
+      NodeKind::Op { op: StdOp::Linear, .. } | NodeKind::Op { op: StdOp::LayerNorm, .. } => {
+          let total: usize = fn_sig.params_layout.iter()
+              .filter(|s| s.origin_node == node_idx)
+              .map(|s| s.size)
+              .sum();
+          Some(total)
+      }
+      _ => None,
+  };
+  ```
+  Defensive fallback (if `params_layout` shape changes in a future milestone):
+  derive directly from UIR attributes — for `Linear[out_dim=N, bias=true]` on
+  input `[B, K]` → `K*N + N`; for `LayerNorm[affine=true]` on input `[..., D]`
+  → `2*D`. **Use the layout-driven path; the fallback is documented for future
+  refactor reference, not implemented.**
+- `callee_saved: Vec<String>` rendered per-profile from `RegSet`:
   - arm64: `RegSet { d8_d9: true, x19_x23: true }` → `["d8-d9", "x19-x23"]`
   - x86_64: `RegSet { callee_saved_int: true }` → `["%rbx", "%r12-%r15"]`
   - Both empty → `[]`
@@ -299,7 +324,8 @@ Six commits, sequenced for bisectability. Each commit has an explicit
   per profile) that, for each fixture in the table:
   - Reads the fixture, parses, builds UIR, runs default passes, calls
     `Arm64Profile.inspect(&uir)?` (or x86_64), renders via
-    `compiler-or-shared::render_inspection`, compares to the captured `.expected.txt`.
+    `inspect_render::render_inspection` (the workspace crate created in Task 4),
+    compares to the captured `.expected.txt`.
 - Renderer reuse: `render_inspection` cannot live in `nflc` (which is a binary
   crate and not consumable by integration tests in `profiles/`). **Decision:
   new `inspect-render` workspace crate** (lib only) consumed by both `nflc`
@@ -492,9 +518,13 @@ Three orthogonal regression axes, no axis is tautological w.r.t. another.
 - **Coverage (~3 per profile, ~6 total):**
   - Leaf detection: model with softmax → `inspect.functions[0].leaf == false`;
     model without → `true`.
-  - Alias placement: model with `linear → relu` (post-fusion the relu is gone,
-    but pre-fusion via `--no-passes` we should see `Alias(operands[0])` for
-    relu; choose whichever path gives stable assertion).
+  - Alias placement: model with `linear → relu`. Test runs `inspect` against
+    the **pre-pass** UIR (either via the `--no-passes`-equivalent in-process
+    code path, or by skipping the pass pipeline and calling
+    `Profile::inspect(&pre_pass_uir)` directly). Post-pass the `relu` node is
+    gone (fused into `linear` as `fused_post_ops=[Relu]`), so alias placement
+    is observable only on the pre-pass graph. Assertion: the relu node's
+    `NodeAnnotation.buffer_loc == BufferLoc::Alias(linear_node_id)`.
   - Params count: `linear[out_dim=8, bias=true]` over input `[B, 4]` →
     `params_floats == Some(4*8 + 8)`.
 - These target *analyzer correctness*, not format. They survive renderer changes.
@@ -559,7 +589,9 @@ Before milestone closure:
 
 None at brainstorm closure. Spec is fully specified.
 
-If implementation surfaces a non-obvious choice (e.g. whether to split
-`inspect_render` into a new workspace crate or fold into `profile-api`, see
-Task 5), record it as a Known Latent Hazard / Open Question in `PROJECT_SPEC.md`
-following project process — not by amending this spec post-hoc.
+If implementation surfaces a non-obvious choice (e.g. an unexpected compiler
+API change that affects the `analyze()` extraction shape, or a real cross-crate
+import of `BufferLoc` discovered during Task 2's grep that requires a
+non-trivial reconciliation), record it as a Known Latent Hazard / Open Question
+in `PROJECT_SPEC.md` following project process — not by amending this spec
+post-hoc.
