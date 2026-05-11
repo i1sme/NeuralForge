@@ -1,0 +1,23 @@
+inspect tests/fixtures/self_attention.nfl --profile x86_64
+  passes applied: eliminate_dropout, fuse_linear_relu, fuse_linear_softmax
+
+inspect-model SelfAttention
+  inputs:        [n0]                2048 floats (8192 B)
+  output:        n4                  2048 floats (8192 B)
+  params:        0 floats            (0 B)
+  stack frame:   16400 bytes             (16-byte aligned)
+  callee-saved:  [%rbx, %r12-%r15]
+  leaf:          no
+
+  nodes:
+    n0  input "x"        :: Tensor[2, 4, 16, 16]
+          loc=InputReg(0)    out=8192 B
+    n1  matmul           :: Tensor[2, 4, 16, 16]    operands=[n0, n0]    attrs=[transpose_b=true]
+          loc=StackOffset(16)    out=8192 B
+    n2  mul_scalar           :: Tensor[2, 4, 16, 16]    operands=[n1]    attrs=[value=0.25]
+          loc=Alias(n1)    out=8192 B
+    n3  softmax           :: Tensor[2, 4, 16, 16]    operands=[n2]
+          loc=StackOffset(8208)    out=8192 B
+    n4  matmul           :: Tensor[2, 4, 16, 16]    operands=[n3, n0]
+          loc=OutputReg    out=8192 B
+
