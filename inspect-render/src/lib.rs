@@ -54,11 +54,13 @@ fn render_fn_annotations(out: &mut String, fa: &FnAnnotations) {
     let total_input_bytes = total_input_floats * 4;
     let n_inputs = fa.input_nodes.len();
     let input_node_refs: Vec<String> = fa.input_nodes.iter().map(|id| format!("n{}", id)).collect();
-    let inputs_per_count_clause = if n_inputs > 1 {
-        format!(
-            " ({} B each)",
-            total_input_bytes / n_inputs.max(1) // safe — n_inputs > 1 here
-        )
+    // Only emit `(N B each)` when all inputs share the same byte-size.
+    // For non-uniform inputs (e.g. four_input_matmul.nfl with mixed shapes),
+    // "each" would be a factual lie — emit no per-input clause, the total
+    // bytes alone is honest.
+    let inputs_uniform = fa.fn_sig.inputs_floats.windows(2).all(|w| w[0] == w[1]);
+    let inputs_per_count_clause = if n_inputs > 1 && inputs_uniform {
+        format!(" ({} B each)", total_input_bytes / n_inputs)
     } else {
         String::new()
     };
