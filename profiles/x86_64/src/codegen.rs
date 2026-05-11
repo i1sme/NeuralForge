@@ -40,13 +40,19 @@ pub fn walk_uir(uir: &Uir, sym_prefix: &'static str) -> Result<Asm, LowerError> 
     Ok(Asm { source, functions })
 }
 
-fn walk_model(
-    model_idx: usize,
-    model: &UirModel,
-    sym_prefix: &'static str,
-) -> Result<(String, FnSig), LowerError> {
-    use crate::asm::{format_function_epilogue, format_function_prologue};
+/// Analysis preamble shared by `walk_model` and `inspect_model`.
+/// Mirror of arm64's analyze(), minus LeafKind (x86_64 prologue does
+/// not depend on leaf classification — see profiles/x86_64/src/asm.rs).
+/// Leaf classification for inspect output is computed via the UIR-side
+/// `model.calls_extern_math()` predicate directly in inspect_model.
+struct ModelAnalysis {
+    fn_sig: FnSig,
+    assignment: crate::buffer::BufferAssignment,
+    callee_saved: crate::buffer::RegSet,
+    abi: AbiContext,
+}
 
+fn analyze(model: &UirModel) -> Result<ModelAnalysis, LowerError> {
     // 1. Validate ops upfront.
     for node in &model.nodes {
         if let NodeKind::Op { op, attrs, .. } = &node.kind {
@@ -54,10 +60,7 @@ fn walk_model(
         }
     }
 
-    // 1b. Arity check (M12 spec §5.3): N + 2 ≤ INPUT_REGS.len(). The
-    // current cap is N=4 (INPUT_REGS = %rdi/%rsi/%rdx/%rcx/%r8/%r9).
-    // Larger N would require stack-spill on the input side, deferred
-    // to a future milestone.
+    // 1b. Arity check.
     let n_inputs = model.inputs.len();
     if n_inputs + 2 > INPUT_REGS.len() {
         return Err(LowerError::TooManyInputs {
@@ -68,8 +71,7 @@ fn walk_model(
     }
     let abi = AbiContext { n_inputs };
 
-    // 2. Compute layout, ABI sizes. inputs_floats is now a per-input
-    // vec (M12 multi-input ABI); for N=1 this is just `vec![input_0]`.
+    // 2. Compute layout, ABI sizes.
     if model.inputs.is_empty() {
         return Err(LowerError::ShapeNotConcrete {
             span: model.source_span,
@@ -85,8 +87,6 @@ fn walk_model(
 
     let mut params_layout: Vec<ParamSlot> = Vec::new();
     let mut params_floats: usize = 0;
-    // Single pass in UIR-node order — preserves params_layout contract
-    // (one entry per parameter slot in node-index order).
     for (node_idx, node) in model.nodes.iter().enumerate() {
         if let NodeKind::Op {
             op: StdOp::Linear,
@@ -121,9 +121,6 @@ fn walk_model(
                 params_floats += n;
             }
         }
-        // LayerNorm ParamSlot allocation — in the same loop to preserve
-        // UIR-node order in params_layout. Order is contract: γ (Scale)
-        // BEFORE β (Bias). See ParamKind doc.
         if let NodeKind::Op {
             op: StdOp::LayerNorm,
             attrs,
@@ -139,8 +136,6 @@ fn walk_model(
                     .copied()
                     .expect("LayerNorm input rank ≥ 2 enforced at IR build")
                     as usize;
-
-                // γ — pushed FIRST (contract).
                 params_layout.push(ParamSlot {
                     kind: ParamKind::LayerNormScale,
                     origin_node: node_idx,
@@ -148,8 +143,6 @@ fn walk_model(
                     size: last_dim,
                 });
                 params_floats += last_dim;
-
-                // β — pushed SECOND (contract).
                 params_layout.push(ParamSlot {
                     kind: ParamKind::LayerNormBias,
                     origin_node: node_idx,
@@ -161,7 +154,7 @@ fn walk_model(
         }
     }
 
-    let sig = FnSig {
+    let fn_sig = FnSig {
         name: format!("nfl_forward_{}", model.name),
         model: model.name.clone(),
         inputs_floats,
@@ -170,9 +163,31 @@ fn walk_model(
         params_layout,
     };
 
-    // 3. Buffer assignment + callee-saved set.
     let assignment = assign_buffers(model);
-    let regs = compute_callee_saved(model);
+    let callee_saved = compute_callee_saved(model);
+
+    Ok(ModelAnalysis {
+        fn_sig,
+        assignment,
+        callee_saved,
+        abi,
+    })
+}
+
+fn walk_model(
+    model_idx: usize,
+    model: &UirModel,
+    sym_prefix: &'static str,
+) -> Result<(String, FnSig), LowerError> {
+    use crate::asm::{format_function_epilogue, format_function_prologue};
+
+    let analysis = analyze(model)?;
+    let ModelAnalysis {
+        fn_sig: sig,
+        assignment,
+        callee_saved: regs,
+        abi,
+    } = analysis;
 
     // 4. Emit prologue + body + epilogue. assignment.stack_bytes already
     // includes the 16-byte fused-softmax xmm-spill reserve when softmax
@@ -447,6 +462,97 @@ fn walk_model(
 
     body.push_str(&format_function_epilogue(regs, assignment.stack_bytes));
     Ok((body, sig))
+}
+
+/// Inspect one model under x86_64. Mirror of walk_model.
+pub(crate) fn inspect_model(model: &UirModel) -> Result<profile_api::FnAnnotations, LowerError> {
+    use compiler::NodeKind;
+    use profile_api::{FnAnnotations, NodeAnnotation};
+
+    let analysis = analyze(model)?;
+    let ModelAnalysis {
+        fn_sig,
+        assignment,
+        callee_saved,
+        abi: _,
+    } = analysis;
+
+    // x86_64 RegSet → Vec<String>. The callee_saved_int flag covers the
+    // entire %rbx, %r12-%r15 set as a single group (see
+    // profiles/x86_64/src/buffer.rs RegSet doc).
+    let mut callee_saved_str: Vec<String> = Vec::new();
+    if callee_saved.contains_callee_saved_int() {
+        callee_saved_str.push("%rbx".to_string());
+        callee_saved_str.push("%r12-%r15".to_string());
+    }
+
+    // x86_64 has no LeafKind (its prologue is leaf-agnostic). Compute
+    // leaf bool directly from the UIR-side predicate — same source
+    // arm64's compute_is_leaf delegates to.
+    let leaf_bool = !model.calls_extern_math();
+
+    const BYTES_PER_ELEMENT: usize = 4;
+
+    let nodes: Vec<NodeAnnotation> = model
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(node_idx, node)| {
+            let element_count: u64 = node.ty.shape.0.iter().copied().product();
+            let output_bytes = (element_count as usize)
+                .checked_mul(BYTES_PER_ELEMENT)
+                .expect("output_bytes overflow: shape product * f32 size");
+
+            let params_floats: Option<usize> = match &node.kind {
+                NodeKind::Op { op, .. }
+                    if matches!(op, compiler::StdOp::Linear)
+                        || matches!(op, compiler::StdOp::LayerNorm) =>
+                {
+                    let total: usize = fn_sig
+                        .params_layout
+                        .iter()
+                        .filter(|s| s.origin_node == node_idx)
+                        .map(|s| s.size)
+                        .sum();
+                    if total == 0 {
+                        None
+                    } else {
+                        Some(total)
+                    }
+                }
+                _ => None,
+            };
+
+            let buffer_loc: BufferLoc = assignment.locs[node_idx];
+            let label = format!("{}", node);
+
+            NodeAnnotation {
+                label,
+                buffer_loc,
+                output_bytes,
+                params_floats,
+                extra_notes: Vec::new(),
+            }
+        })
+        .collect();
+
+    Ok(FnAnnotations {
+        fn_sig,
+        stack_bytes: assignment.stack_bytes,
+        callee_saved: callee_saved_str,
+        leaf: leaf_bool,
+        input_nodes: model.inputs.clone(),
+        output_node: model.output,
+        nodes,
+    })
+}
+
+pub fn inspect_uir(uir: &Uir) -> Result<profile_api::Inspection, LowerError> {
+    let mut functions = Vec::with_capacity(uir.models.len());
+    for model in &uir.models {
+        functions.push(inspect_model(model)?);
+    }
+    Ok(profile_api::Inspection { functions })
 }
 
 /// Resolve `Alias` chains to a concrete BufferLoc.

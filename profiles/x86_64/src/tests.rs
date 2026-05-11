@@ -2446,3 +2446,89 @@ fn emit_layernorm_n4_does_not_clobber_output_reg() {
     );
     assert_eq!(pushq_count, popq_count, "push/pop LIFO. Asm:\n{asm}");
 }
+
+// ── M16 (A3): Profile::inspect() unit tests ─────────────────────────────────
+
+fn build_uir(src: &str) -> compiler::Uir {
+    let ast = compiler::parse(src).expect("parse");
+    compiler::ir::build(&ast).expect("ir::build")
+}
+
+#[test]
+fn inspect_softmax_model_is_non_leaf() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 4]\n    x -> softmax\n");
+    let insp = crate::X86_64Profile.inspect(&uir).expect("inspect");
+    assert_eq!(insp.functions.len(), 1);
+    assert!(
+        !insp.functions[0].leaf,
+        "softmax-bearing model must report leaf=false (calls expf@PLT)"
+    );
+}
+
+#[test]
+fn inspect_pure_linear_model_is_leaf() {
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n");
+    let insp = crate::X86_64Profile.inspect(&uir).expect("inspect");
+    assert!(insp.functions[0].leaf, "no extern math = leaf");
+}
+
+#[test]
+fn inspect_pre_pass_dropout_uses_alias_placement() {
+    use compiler::{NodeKind, StdOp};
+    use profile_api::BufferLoc;
+
+    // Pre-pass: dropout is the canonical alias-bearing op. The model
+    // below has dropout in the middle (NOT as the output), so
+    // assign_buffers takes the Alias branch.
+    let uir =
+        build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> dropout[rate=0.1] -> linear[4]\n");
+    let insp = crate::X86_64Profile.inspect(&uir).expect("inspect");
+    let dropout_idx = uir.models[0]
+        .nodes
+        .iter()
+        .position(|n| {
+            matches!(
+                &n.kind,
+                NodeKind::Op {
+                    op: StdOp::Dropout,
+                    ..
+                }
+            )
+        })
+        .expect("pre-pass UIR must contain a Dropout node");
+    let dropout_input_idx = match &uir.models[0].nodes[dropout_idx].kind {
+        NodeKind::Op { operands, .. } => operands[0],
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        insp.functions[0].nodes[dropout_idx].buffer_loc,
+        BufferLoc::Alias(dropout_input_idx),
+        "dropout (not output) must alias its operand"
+    );
+}
+
+#[test]
+fn inspect_linear_with_bias_reports_correct_params() {
+    use compiler::{NodeKind, StdOp};
+
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 4]\n    x -> linear[8, bias=true]\n");
+    let insp = crate::X86_64Profile.inspect(&uir).expect("inspect");
+    let f = &insp.functions[0];
+
+    let linear_idx = uir.models[0]
+        .nodes
+        .iter()
+        .position(|n| {
+            matches!(
+                &n.kind,
+                NodeKind::Op {
+                    op: StdOp::Linear,
+                    ..
+                }
+            )
+        })
+        .unwrap();
+
+    // K=4, N=8, bias=true → 4*8 + 8 = 40 floats
+    assert_eq!(f.nodes[linear_idx].params_floats, Some(40));
+}

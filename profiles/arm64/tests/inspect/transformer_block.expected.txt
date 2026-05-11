@@ -1,0 +1,29 @@
+inspect tests/fixtures/transformer_block.nfl --profile arm64
+  passes applied: eliminate_dropout, fuse_linear_relu, fuse_linear_softmax
+
+inspect-model TransformerBlock
+  inputs:        [n0, n1, n2]                24 floats (96 B) (32 B each)
+  output:        n7                  8 floats (32 B)
+  params:        84 floats            (336 B)
+  stack frame:   160 bytes             (16-byte aligned)
+  callee-saved:  []
+  leaf:          yes
+
+  nodes:
+    n0  input "x"        :: Tensor[2, 4]
+          loc=InputReg(0)    out=32 B
+    n1  input "skip1"        :: Tensor[2, 4]
+          loc=InputReg(1)    out=32 B
+    n2  input "skip2"        :: Tensor[2, 4]
+          loc=InputReg(2)    out=32 B
+    n3  layernorm           :: Tensor[2, 4]    operands=[n0]    attrs=[affine=true]
+          loc=StackOffset(0)    out=32 B    params=8 floats (32 B)
+    n4  linear           :: Tensor[2, 8]    operands=[n3]    attrs=[out_dim=8, bias=true]    fused=[relu]
+          loc=StackOffset(32)    out=64 B    params=40 floats (160 B)
+    n5  linear           :: Tensor[2, 4]    operands=[n4]    attrs=[out_dim=4, bias=true]
+          loc=StackOffset(96)    out=32 B    params=36 floats (144 B)
+    n6  add           :: Tensor[2, 4]    operands=[n5, n1]
+          loc=StackOffset(128)    out=32 B
+    n7  add           :: Tensor[2, 4]    operands=[n6, n2]
+          loc=OutputReg    out=32 B
+

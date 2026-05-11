@@ -166,16 +166,17 @@ NeuralForge is designed so that LLMs can write, read, and reason about NFL code 
 | 13 | N=4 + matmul fix + `add` op (A2 first brick) (complete) | x86_64 `emit_matmul` j-counter relocated from `%r9` to `%rbp` (callee-saved by unconditional prologue `pushq %rbp`; read by zero op-emitter bodies). Closes M12 known follow-up: N=4 + matmul now compiles and runs bit-exact. New `StdOp::Add` (flat variant; no BinaryOp container). NFL surface `a -> add[skip]` — first real consumer of M10's `ArgType::Tensor` outside Matmul. Strict shape equality (no broadcasting); new `ShapeError::AddShapeMismatch`. Both profiles ship `emit_add` (flat elementwise loop, modeled after `emit_mulscalar`); x86_64 reuses Task 1's `%rbp` scratch trick as loop counter. **Pre-Task-5 fix:** arm64 `emit_linear` ABI register clobber for N≥2 closed via stp/ldp save/restore of x3 (and x4 at N≥3, x5 at N≥4) around the i-loop body — same class of bug as Task 1 but resolved differently because emit_linear's bias paths and fused PostOp::SoftmaxRow dispatch already saturate x9-x16. Three new fixtures: `residual_add.nfl` (positive both profiles), `four_input_matmul.nfl` (closes Group A end-to-end x86_64), `negative/add_shape_mismatch.nfl` (IR-level reject). Test count: 390 → 400. |
 | 14 | A2 second brick — LayerNorm + LH-1/2/3 cleanup (complete) | LH-1/2/3 cleanup in x86_64 `emit_linear` (commit `916e9c7`): j-counter `%rcx` → `%rbp` (LH-1); src-ptr scratch `%r8` → op-local `pushq %r14` (LH-2); weight-ptr scratch `%r9` → op-local `pushq %r15` (LH-3). New `StdOp::LayerNorm` — single StdOp variant with internal 3-pass codegen (mean → variance + inv_std → normalize + optional affine). Native `fsqrt` on arm64, `sqrtss` on x86_64; no libm dependency. Affine toggle `layernorm[affine=true]` mirrors `linear[bias=true]`. `ParamKind` extended: `LayerNormScale` (γ) before `LayerNormBias` (β) — contract. arm64: leaf function, s0–s7 scratch only (s8–s15 avoided), `s_b` reuses `s2` after `s_inv_d` consumption. x86_64: op-local `pushq %r12/%r13` when affine; `compute_callee_saved` unchanged. LH-4 logged (N=3..4 %r8/%r9 reuse in x86_64 emit_layernorm, deferred). New fixtures: `layernorm_no_affine.nfl`, `layernorm_affine.nfl`, `pre_ln_block.nfl` (N=2, validates LH-1 closure end-to-end), `negative/layernorm_rank_too_low.nfl`. Test count: 400 → 441. |
 | 15 | A2 third brick — FFN compositional + LH-4 cleanup (complete) | LH-4 cleanup in x86_64 `emit_layernorm` (commit `e35dfaa`): per-row src ptr `%r8` → `%r15` (op-local pushq/popq); per-row dst ptr `%r9` → `%rbp` (function-level prologue handles). Push counts no-affine 2→3, affine 4→5. `OP_LOCAL_PUSH_BYTES_*` constants updated. 3 ABI-invariant unit tests `emit_layernorm_n{2,3,4}_does_not_clobber_output_reg`. A2 third brick: FFN as compositional NFL pattern (`linear → relu → linear`) — no new StdOp variant, no codegen changes. New fixtures `ffn.nfl` (N=1) and `transformer_block.nfl` (N=3 — exercises LH-4 condition output_reg=%r8 and validates closure via FFI on Linux x86_64 CI). Helper promotion: `reference_matmul/bias_add/relu` moved from `integration.rs` file-local to `common/mod.rs` `pub fn` per profile (isolation principle). Per-profile divergent `reference_matmul` body (arm64 `fmadd` / x86_64 `mulss+addss`). 4 new FFI integration tests with bit-exact `to_bits()` comparison. ABI audit at N=3,4: all emitters clean. Test count: 441 → 446 (macOS arm64); ~448 on Linux x86_64 CI. |
+| 16 | A3 viewer annotations (complete) | New `nflc inspect <file.nfl> --profile <name>` subcommand surfaces post-pass per-node BufferLoc + footprint + params and per-model stack frame + callee-saved + leaf classification. Architecture: per-profile `analyze()` preamble extracted from `walk_model` (Task 1), shared `Inspection`/`FnAnnotations`/`NodeAnnotation` schema in `profile-api` with `BufferLoc` lifted from per-profile duplicates (Task 2), `Profile::inspect()` trait method + per-profile impl (Task 3), new `inspect-render` workspace crate (Task 4), 8 golden-snapshot tests (Task 5), profile-guide docs (Task 6). Test count: 446 → 466. |
 
 ---
 
 ## Current Status
 
-**Milestone 15 complete. 446 tests passing on macOS arm64 (~448 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean (`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, `cargo test --workspace`).
+**Milestone 16 complete. 466 tests passing on macOS arm64 (~468 on Linux x86_64 CI — the +2 delta is the M15 x86_64-only FFI integration tests `ffn_ffi` / `transformer_block_ffi`, gated on `#[cfg(target_os = "linux")]`; the new M16 inspect goldens are pure Rust and run on both platforms).** All workspace gates clean (`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, `cargo test --workspace`).
 
-M14 closed the A2 second brick (LayerNorm) end-to-end on both profiles and the LH-1/2/3 latent hazard cleanup in x86_64 `emit_linear` (opener commit `916e9c7`). LayerNorm is a single StdOp variant with internal 3-pass codegen (mean → variance + inv_std → normalize + optional affine), modeled structurally after Softmax. Native `fsqrt`/`sqrtss` — no libm dependency added. Affine optionality via single Symbol toggle `layernorm[affine=true]`, mirroring `linear[bias=true]`. AAPCS64-safe register allocation on arm64 (s8–s15 callee-saved range intentionally avoided; `s_b` reuses `s2` after `s_inv_d` consumption to stay within s0–s7). Op-local `%r12`/`%r13` push/pop on x86_64 affine path — `compute_callee_saved` unchanged. **M15 closed LH-4 (per-row `%r8`/`%r9` scratch in x86_64 `emit_layernorm`) — relocated to `%r15` (op-local pushq/popq) and `%rbp` (function-level prologue handles). Runtime FFI evidence via new `transformer_block.nfl` fixture (N=3, output_reg=%r8) on Linux x86_64 CI.**
+M16 closed A3 — profile-level viewer annotations. New `nflc inspect <file.nfl> --profile <name>` subcommand surfaces post-pass per-node BufferLoc + footprint + params and per-model stack frame + callee-saved + leaf classification, packaged from the same `analyze()` preamble that `lower()` consumes (drift-prevention by construction). New workspace crate `inspect-render/` hosts the renderer. `BufferLoc` lifted from per-profile duplicates to `profile-api`. Eight golden-snapshot integration tests (4 fixtures × 2 profiles) anchor format stability.
 
-Strategic direction: see §"Strategic Roadmap" — A1 closed in M12, A2 first brick (`add`) closed in M13, A2 second brick (`layernorm`) closed in M14, **A2 third brick (FFN) closed in M15 — A2 axis fully complete**. Trigger-driven cleanup items (OQ-7, OQ-8, OQ-9, M5c OQ-4) live in §"Open Questions" / "Trigger-driven cleanup" and stay dormant. OQ-NEW closed in M9 (commit `a08fd24`). OQ-BENCH closed in M11 (commit `e7c29b8`).
+Strategic direction: see §"Strategic Roadmap" — A1 closed in M12, A2 first brick (`add`) closed in M13, A2 second brick (`layernorm`) closed in M14, **A2 third brick (FFN) closed in M15 — A2 axis fully complete. A3 (viewer annotations) closed in M16.** Trigger-driven cleanup items (OQ-7, OQ-8, OQ-9, M5c OQ-4) live in §"Open Questions" / "Trigger-driven cleanup" and stay dormant. OQ-NEW closed in M9 (commit `a08fd24`). OQ-BENCH closed in M11 (commit `e7c29b8`).
 
 ---
 
@@ -188,7 +189,7 @@ its own trigger condition and lives under "Open Questions" below.
 
 ```
 x86_64 profile [M9 complete] → MACHO_SYM_PREFIX rename [closed — abstracted as Profile::sym_prefix() in M9]
-NFL v0.2 self-attention [complete in M10] → multi-input grammar A1 [closed M12] → transformer block A2 (residual + LayerNorm + FFN) → profile-level viewer annotations A3
+NFL v0.2 self-attention [complete in M10] → multi-input grammar A1 [closed M12] → transformer block A2 (residual + LayerNorm + FFN) [closed M15] → profile-level viewer annotations A3 [closed M16]
 bare-metal expf → drop libm dependency
 ```
 
@@ -211,9 +212,10 @@ bare-metal expf → drop libm dependency
   (N=3, full transformer block with LayerNorm + FFN + dual residual). M15
   also closed LH-4 in x86_64 `emit_layernorm` (per-row scratch `%r8`/`%r9`
   → `%r15`/`%rbp`).** A2 axis is now complete (residual + LayerNorm + FFN
-  all shipped on both profiles). Open follow-ups: A3 — profile-level viewer
-  annotations (per-node footprint, stack frame, callee-saved set); A2-extended
-  — training syntax (loss/optimiser) for NFL v0.3.
+  all shipped on both profiles). **M16 closed A3 — profile-level viewer
+  annotations (`nflc inspect` subcommand, `inspect-render` crate, 8 golden
+  tests). Axis 2 fully complete.** Open follow-ups: A2-extended — training
+  syntax (loss/optimiser) for NFL v0.3.
 - **Axis 3 — deployment reach.** Replacing the `bl _expf` libm call with a
   Taylor-series `expf` removes the only runtime dependency, unlocking bare-metal
   targets.
@@ -236,7 +238,7 @@ Leaving an entry here longer than one milestone is a process failure.
 | # | Location | Condition | Symptom | Opened |
 |---|----------|-----------|---------|--------|
 
-*(Table is empty as of M15 — all latent hazards closed.)*
+*(Table is empty as of M16 — all latent hazards closed.)*
 
 ### Trigger-driven cleanup
 Items raised during a milestone that intentionally do not get scheduled — they

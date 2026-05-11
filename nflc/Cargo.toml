@@ -10,6 +10,7 @@ compiler        = { path = "../compiler" }
 profile-api     = { path = "../profile-api" }
 profiles-arm64  = { path = "../profiles/arm64" }
 profiles-x86_64 = { path = "../profiles/x86_64" }
+inspect-render  = { path = "../inspect-render" }
 
 [[bin]]
 name = "nflc"

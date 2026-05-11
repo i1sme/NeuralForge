@@ -1,0 +1,9 @@
+[package]
+name = "inspect-render"
+version = "0.1.0"
+edition = "2021"
+description = "NeuralForge inspection renderer — formats profile_api::Inspection as human-readable text"
+license.workspace = true
+
+[dependencies]
+profile-api = { path = "../profile-api" }

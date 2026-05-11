@@ -46,7 +46,8 @@ model Classifier [batch=32, input=784, output=10]:
 | `DEVLOG.md` | Chronological record of all work and decisions |
 | `CLAUDE.md` | Context file for Claude Code (AI development assistant) |
 | `compiler/` | `compiler` crate — lexer, parser, AST, Universal IR, optimisation passes |
-| `nflc/` | `nflc` crate — CLI binary (`nflc parse`, `nflc compile`) |
+| `inspect-render/` | `inspect-render` crate — formats `profile_api::Inspection` as human-readable text for `nflc inspect` and per-profile golden tests |
+| `nflc/` | `nflc` crate — CLI binary (`nflc parse`, `nflc compile`, `nflc inspect`) |
 | `profile-api/` | `profile-api` crate — shared `Profile` trait, `Asm`, `FnSig`, `ParamSlot`, `ParamKind`, `LowerError` |
 | `profiles/arm64/` | `profiles-arm64` crate — AArch64 / Apple Silicon code generator |
 | `profiles/x86_64/` | `profiles-x86_64` crate — Linux ELF scalar SSE2 code generator |
@@ -54,7 +55,7 @@ model Classifier [batch=32, input=784, output=10]:
 | `language/` | NFL grammar (`grammar.ebnf`, frozen at v0.1; v0.2 named-pipeline extension since M10) |
 | `tests/fixtures/` | Sample `.nfl` files used in integration tests |
 | `docs/` | Language reference (`grammar.md`, `uir.md`) and profile guide (`arm64.md`, `x86_64.md`) |
-| `viewer/` | Reserved for a future standalone viewer tool; rendering today is via `nflc parse --uir` (compact) and `nflc parse --uir-verbose` (annotated) |
+| `viewer/` | Reserved for a future standalone viewer tool; UIR rendering is via `nflc parse --uir` / `--uir-verbose`; profile-level annotation is now live via `nflc inspect` (M16) |
 
 ---
 
@@ -71,13 +72,13 @@ design decision is recorded there with its reasoning.
 
 ## Project status
 
-**Milestone 15 complete** — A2 axis (transformer block) fully shipped on both
-profiles. NFL now compiles full pre-LN transformer blocks (`LayerNorm + FFN +
-dual residual` at N=3) to scalar AArch64 and x86_64 SSE2 with bit-exact FFI
-parity vs Rust reference. M15 closed the A2 third brick — FFN as a
-compositional NFL pattern (`linear → relu → linear`, no new StdOp variant) —
-and the LH-4 latent hazard cleanup in x86_64 `emit_layernorm`. The §"Known
-Latent Hazards" table is empty as of end of M15.
+**Milestone 16 complete** — A3 (profile-level viewer annotations) shipped;
+Axis 2 fully complete. `nflc inspect --profile <arm64|x86_64>` prints
+per-node footprint, BufferLoc, and params alongside per-model stack-frame,
+callee-saved set, and leaf flag. The new `inspect-render/` workspace crate
+houses the renderer; `BufferLoc` was lifted to `profile-api` in Task 2.
+8 golden tests anchor the output format. The §"Known Latent Hazards" table
+remains empty.
 
 What's working today:
 
@@ -108,7 +109,7 @@ What's working today:
 - **UIR-pass framework** with `EliminateDropout`, `FuseLinearRelu`, and
   `FuseLinearSoftmax`
 - **CLI:** `nflc parse` (with `--uir` compact and `--uir-verbose` annotated
-  rendering) and `nflc compile --profile <arm64|x86_64>`
+  rendering), `nflc compile --profile <arm64|x86_64>`, and `nflc inspect --profile <arm64|x86_64>`
 - **Bit-exact FFI integration tests** with `to_bits()` comparison
   (M14 layernorm precedent); per-profile divergent `reference_matmul` body
   matches each emitter's rounding semantics (arm64 `fmadd` single-rounding;
@@ -119,14 +120,14 @@ What's working today:
   Summaries on `macos-14` (arm64) and `ubuntu-latest` (x86_64)
 - **Viewer v0.1:** `nflc parse --uir-verbose` renders annotated UIR with
   top-level and per-model summaries, and fused post-ops on indented lines
-- **446 tests passing on macOS arm64 (~448 on Linux x86_64 CI)**; CI green;
+- **466 tests passing on macOS arm64 (~468 on Linux x86_64 CI)**; CI green;
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   `cargo test --workspace` all clean
 
 Active development continues along three strategic axes — codegen breadth
 (SIMD/AVX vectorisation still open), modelling depth (A2 axis fully closed
-in M15; A3 — profile-level viewer annotations next), and deployment reach
-(bare-metal `expf` to drop libm) — tracked in
+in M15; A3 — profile-level viewer annotations closed in M16; Axis 2 fully
+complete), and deployment reach (bare-metal `expf` to drop libm) — tracked in
 [`PROJECT_SPEC.md` §"Strategic Roadmap"](PROJECT_SPEC.md#strategic-roadmap).
 
 NFL training syntax (loss, optimiser) remains deferred to v0.3.
@@ -188,7 +189,7 @@ are future work.
 - **Explicit over implicit** — shapes and types are always declared, never inferred silently
 - **Profile isolation** — each hardware target is a self-contained module
 - **AI-native syntax** — NFL is designed to be written and read by both humans and LLMs
-- **Human oversight** — every compiler output is inspectable; viewer v0.1 ships today via `nflc parse --uir` (compact) and `nflc parse --uir-verbose` (annotated), with a dedicated standalone viewer tool reserved for future profile-level annotation work
+- **Human oversight** — every compiler output is inspectable; viewer v0.1 ships today via `nflc parse --uir` (compact) and `nflc parse --uir-verbose` (annotated), with profile-level annotation now live via `nflc inspect` (M16), and a fuller standalone viewer tool still reserved for future UI work
 
 ---
 

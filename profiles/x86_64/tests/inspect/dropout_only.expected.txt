@@ -1,0 +1,15 @@
+inspect tests/fixtures/dropout_only.nfl --profile x86_64
+  passes applied: eliminate_dropout, fuse_linear_relu, fuse_linear_softmax
+
+inspect-model OnlyDropout
+  inputs:        [n0]                8 floats (32 B)
+  output:        n0                  8 floats (32 B)
+  params:        0 floats            (0 B)
+  stack frame:   0 bytes             (16-byte aligned)
+  callee-saved:  []
+  leaf:          yes
+
+  nodes:
+    n0  input "x"        :: Tensor[2, 4]
+          loc=InputReg(0)    out=32 B
+

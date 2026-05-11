@@ -11,7 +11,7 @@ mod buffer;
 mod codegen;
 mod ops;
 
-pub use profile_api::{Asm, FnSig, LowerError, ParamKind, ParamSlot};
+pub use profile_api::{Asm, FnSig, Inspection, LowerError, ParamKind, ParamSlot};
 
 use compiler::Uir;
 use profile_api::Profile;
@@ -26,6 +26,10 @@ impl Profile for X86_64Profile {
 
     fn sym_prefix(&self) -> &'static str {
         ""
+    }
+
+    fn inspect(&self, uir: &Uir) -> Result<profile_api::Inspection, LowerError> {
+        codegen::inspect_uir(uir)
     }
 }
 

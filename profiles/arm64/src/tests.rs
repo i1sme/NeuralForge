@@ -1739,3 +1739,95 @@ fn emit_layernorm_avoids_callee_saved_simd_regs_v8_v15() {
         );
     }
 }
+
+// ── M16 (A3): Profile::inspect() unit tests ─────────────────────────────────
+
+#[test]
+fn inspect_softmax_model_is_non_leaf() {
+    use profile_api::Profile;
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 4]\n    x -> softmax\n");
+    let insp = Arm64Profile.inspect(&uir).expect("inspect");
+    assert_eq!(insp.functions.len(), 1);
+    assert!(
+        !insp.functions[0].leaf,
+        "softmax-bearing model must report leaf=false (calls _expf)"
+    );
+    // NOTE: callee_saved population is implementation-defined per profile
+    // (arm64 ties d8-d9/x19-x23 to extern_math; x86_64 ties %rbx/%r12-%r15
+    // to extern_math OR matmul). Don't assert non-emptiness here — the
+    // primary leaf assertion is what this test is for.
+}
+
+#[test]
+fn inspect_pure_linear_model_is_leaf() {
+    use profile_api::Profile;
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n");
+    let insp = Arm64Profile.inspect(&uir).expect("inspect");
+    assert!(insp.functions[0].leaf, "no extern math = leaf");
+    // Same NOTE as above — don't over-specify callee_saved emptiness.
+    // arm64 tiny linear model happens to be empty today; that's a
+    // correctness outcome of the analyzer, not a contract we want to
+    // pin in the inspect-level test.
+}
+
+#[test]
+fn inspect_pre_pass_dropout_uses_alias_placement() {
+    use compiler::{NodeKind, StdOp};
+    use profile_api::{BufferLoc, Profile};
+
+    // Pre-pass: dropout is the canonical alias-bearing op. The model
+    // below has dropout in the middle (NOT as the output), so
+    // assign_buffers takes the Alias branch.
+    let uir =
+        build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> dropout[rate=0.1] -> linear[4]\n");
+    let insp = Arm64Profile.inspect(&uir).expect("inspect");
+    let dropout_idx = uir.models[0]
+        .nodes
+        .iter()
+        .position(|n| {
+            matches!(
+                &n.kind,
+                NodeKind::Op {
+                    op: StdOp::Dropout,
+                    ..
+                }
+            )
+        })
+        .expect("pre-pass UIR must contain a Dropout node");
+    let dropout_input_idx = match &uir.models[0].nodes[dropout_idx].kind {
+        NodeKind::Op { operands, .. } => operands[0],
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        insp.functions[0].nodes[dropout_idx].buffer_loc,
+        BufferLoc::Alias(dropout_input_idx),
+        "dropout (not output) must alias its operand"
+    );
+}
+
+#[test]
+fn inspect_linear_with_bias_reports_correct_params() {
+    use compiler::{NodeKind, StdOp};
+    use profile_api::Profile;
+
+    let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 4]\n    x -> linear[8, bias=true]\n");
+    let insp = Arm64Profile.inspect(&uir).expect("inspect");
+    let f = &insp.functions[0];
+
+    let linear_idx = uir.models[0]
+        .nodes
+        .iter()
+        .position(|n| {
+            matches!(
+                &n.kind,
+                NodeKind::Op {
+                    op: StdOp::Linear,
+                    ..
+                }
+            )
+        })
+        .unwrap();
+
+    // K=4, N=8, bias=true → 4*8 + 8 = 40 floats
+    assert_eq!(f.nodes[linear_idx].params_floats, Some(40));
+}

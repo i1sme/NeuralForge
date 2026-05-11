@@ -31,7 +31,7 @@ NeuralForge/
 ├── CLAUDE.md               ← you are here
 ├── PROJECT_SPEC.md         ← full design specification
 │
-├── Cargo.toml              ← workspace manifest (members = ["bench", "compiler", "nflc", "profile-api", "profiles/arm64", "profiles/x86_64"])
+├── Cargo.toml              ← workspace manifest (members = ["bench", "compiler", "inspect-render", "nflc", "profile-api", "profiles/arm64", "profiles/x86_64"])
 │
 ├── bench/                  ← `bench` crate (bin only) — OQ-BENCH harness
 │   ├── Cargo.toml
@@ -49,9 +49,11 @@ NeuralForge/
 │   │   └── ir/             ← UIR types, builder, stdlib
 │   └── tests/              ← integration tests (positive + negative fixtures)
 │
+├── inspect-render/         ← `inspect-render` crate (lib only) — Inspection → text renderer (M16)
+│
 ├── nflc/                   ← `nflc` crate (bin only) — CLI dispatcher
 │   ├── Cargo.toml
-│   └── src/main.rs         ← `nflc parse|compile ...`
+│   └── src/main.rs         ← `nflc parse|compile|inspect ...`
 │
 ├── profile-api/            ← shared Profile contract — types + trait, lifted from arm64 in M9
 │
@@ -63,7 +65,7 @@ NeuralForge/
 │   │   │   ├── types.rs    ← Asm, FnSig, ParamSlot, ParamKind, LowerError
 │   │   │   ├── asm.rs      ← prologue/epilogue + emit_sp_* + emit_imm32 helpers
 │   │   │   ├── abi.rs      ← AbiContext (n_inputs, input_reg/params_reg/output_reg, ffi_save/restore, M12)
-│   │   │   ├── buffer.rs   ← BufferLoc, assign_buffers, compute_is_leaf, compute_callee_saved
+│   │   │   ├── buffer.rs   ← BufferAssignment, RegSet, assign_buffers, compute_is_leaf, compute_callee_saved (BufferLoc re-exported from profile-api)
 │   │   │   ├── codegen.rs  ← walk_uir/walk_model dispatcher + classify_op
 │   │   │   ├── ops/
 │   │   │   │   ├── mod.rs        ← per-op submodule entry + re-exports
@@ -178,27 +180,23 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-**Milestone 15 complete. 446 tests passing on macOS arm64 (~448 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean
+**Milestone 16 complete. 466 tests passing on macOS arm64 (~468 on Linux x86_64 CI — the +2 delta is the M15 x86_64-only FFI integration tests `ffn_ffi` / `transformer_block_ffi`, gated on `#[cfg(target_os = "linux")]`; the new M16 inspect goldens are pure Rust and run on both platforms).** All workspace gates clean
 (`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo fmt --all -- --check`, `cargo test --workspace`).
 
-M15 closed the A2 third brick — FFN as compositional NFL pattern
-(`linear → relu → linear`, no new StdOp variant, no codegen changes) — and
-the LH-4 latent hazard cleanup in x86_64 `emit_layernorm` (per-row scratch
-`%r8`/`%r9` → `%r15`/`%rbp`). A2 axis fully complete: residual + LayerNorm
-+ FFN all shipped on both profiles. Two new positive fixtures: `ffn.nfl`
-(N=1 baseline) and `transformer_block.nfl` (N=3 full transformer block,
-runtime FFI evidence for LH-4 closure on Linux x86_64 CI). Helper
-promotion: `reference_matmul`/`bias_add`/`relu` moved from `integration.rs`
-file-local to `common/mod.rs` `pub fn` per profile.
+M16 closed A3 — profile-level viewer annotations. New `nflc inspect <file.nfl> --profile <name>`
+subcommand surfaces post-pass per-node BufferLoc + footprint + params and per-model stack
+frame + callee-saved + leaf classification, packaged from the same `analyze()` preamble that
+`lower()` consumes (drift-prevention by construction). New workspace crate `inspect-render/`
+hosts the renderer. `BufferLoc` lifted from per-profile duplicates to `profile-api`. Eight
+golden-snapshot integration tests (4 fixtures × 2 profiles) anchor format stability.
 
 Strategic direction: see `PROJECT_SPEC.md` §"Strategic Roadmap" — A1 closed
 M12, A2 first brick (`add`) closed M13, A2 second brick (`layernorm`)
-closed M14, A2 third brick (FFN) closed M15. **A2 axis fully complete.**
-Next candidates: A3 — profile-level viewer annotations (per-node footprint,
-stack frame, callee-saved set); Axis 3 — bare-metal `expf` to drop libm.
-Trigger-driven cleanup (OQ-7, OQ-8, OQ-9, M5c OQ-4) stays dormant. §"Known
-Latent Hazards" table empty as of end of M15.
+closed M14, A2 third brick (FFN) closed M15, **A3 (viewer annotations) closed M16. Axis 2 fully complete.**
+Next candidates: Axis 3 — bare-metal `expf` to drop libm (now unblocked — A3 enables structural
+`--diff before.s after.s` validation post-implementation). Trigger-driven cleanup (OQ-7, OQ-8, OQ-9,
+M5c OQ-4) stays dormant. §"Known Latent Hazards" table empty as of end of M16.
 
 ---
 

@@ -1,0 +1,17 @@
+inspect tests/fixtures/tiny_mlp.nfl --profile x86_64
+  passes applied: eliminate_dropout, fuse_linear_relu, fuse_linear_softmax
+
+inspect-model TinyMLP
+  inputs:        [n0]                32 floats (128 B)
+  output:        n1                  16 floats (64 B)
+  params:        8 floats            (32 B)
+  stack frame:   16 bytes             (16-byte aligned)
+  callee-saved:  [%rbx, %r12-%r15]
+  leaf:          no
+
+  nodes:
+    n0  input "x"        :: Tensor[8, 4]
+          loc=InputReg(0)    out=128 B
+    n1  linear           :: Tensor[8, 2]    operands=[n0]    attrs=[out_dim=2]    fused=[softmax_row]
+          loc=OutputReg    out=64 B    params=8 floats (32 B)
+
