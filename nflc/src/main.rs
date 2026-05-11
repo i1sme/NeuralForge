@@ -12,6 +12,9 @@
 //! - `nflc compile <file> --profile <name> -o <file.s>` → lower UIR to assembly, write to file
 //! - `nflc compile <file> --profile <name> [--no-passes]` → skip optimisation passes
 //! - `nflc compile <file> --profile <name> [--passes <list>]` → run only listed passes
+//! - `nflc inspect <file> --profile <arm64|x86_64>` → inspect post-pass UIR with profile annotations
+//! - `nflc inspect <file> --profile <name> [--no-passes]` → skip passes during inspection
+//! - `nflc inspect <file> --profile <name> [--passes <list>]` → filter passes during inspection
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -46,6 +49,14 @@ fn main() -> ExitCode {
             eprintln!("error: --uir and --uir-verbose are mutually exclusive");
             ExitCode::FAILURE
         }
+        [cmd, rest @ ..] if cmd == "inspect" => match parse_inspect_args(rest) {
+            Ok(parsed) => run_inspect(parsed),
+            Err(msg) => {
+                eprintln!("error: {}", msg);
+                print_usage();
+                ExitCode::FAILURE
+            }
+        },
         [cmd, rest @ ..] if cmd == "compile" => match parse_compile_args(rest) {
             Ok(parsed) => run_compile(parsed),
             Err(msg) => {
@@ -76,7 +87,85 @@ fn print_usage() {
     println!(
         "                          [--passes <list>]  Run only listed passes (comma-separated)"
     );
+    println!("  nflc inspect <file.nfl> --profile <arm64|x86_64>   Inspect post-pass UIR with profile annotations");
+    println!("                          [--no-passes]      Skip optimisation passes");
+    println!(
+        "                          [--passes <list>]  Run only listed passes (comma-separated)"
+    );
 }
+
+// ---------------------------------------------------------------------------
+// Shared pass-flag helpers (used by both `compile` and `inspect`).
+// ---------------------------------------------------------------------------
+
+/// Parse the `--no-passes` / `--passes <list>` flag pair from a flag
+/// iterator. Returns `Ok(true)` if the arg was consumed, `Ok(false)` if
+/// the caller should handle it, or `Err` on a malformed value.
+/// Shared by `nflc compile` and `nflc inspect`.
+fn parse_pass_flag(
+    arg: &str,
+    iter: &mut std::slice::Iter<'_, String>,
+    no_passes: &mut bool,
+    passes: &mut Option<Vec<String>>,
+) -> Result<bool, String> {
+    match arg {
+        "--no-passes" => {
+            *no_passes = true;
+            Ok(true)
+        }
+        "--passes" => {
+            let v = iter
+                .next()
+                .ok_or_else(|| "--passes requires a value".to_string())?;
+            if v.is_empty() {
+                return Err(
+                    "--passes value cannot be empty (use --no-passes to skip the pipeline)"
+                        .to_string(),
+                );
+            }
+            let names: Vec<String> = v.split(',').map(str::to_owned).collect();
+            if names.iter().any(|n| n.is_empty()) {
+                return Err(format!(
+                    "--passes value '{v}' contains an empty token (use --no-passes for empty)"
+                ));
+            }
+            *passes = Some(names);
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn validate_pass_args(no_passes: bool, passes: &Option<Vec<String>>) -> Result<(), String> {
+    if no_passes && passes.is_some() {
+        return Err("--no-passes and --passes are mutually exclusive".to_string());
+    }
+    if let Some(names) = passes {
+        let available_names: Vec<String> = compiler::passes::default_pipeline()
+            .iter()
+            .map(|p| p.name().to_owned())
+            .collect();
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for n in names {
+            if !seen.insert(n.as_str()) {
+                return Err(format!("pass '{n}' specified more than once in --passes"));
+            }
+        }
+        for n in names {
+            if !available_names.iter().any(|c| c == n) {
+                return Err(format!(
+                    "unknown pass '{n}' (available: {})",
+                    available_names.join(", ")
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// compile subcommand
+// ---------------------------------------------------------------------------
 
 struct CompileArgs {
     path: PathBuf,
@@ -119,69 +208,16 @@ fn parse_compile_args(args: &[String]) -> Result<CompileArgs, String> {
                     .ok_or_else(|| "-o requires a value".to_string())?;
                 output = Some(PathBuf::from(v));
             }
-            "--no-passes" => {
-                no_passes = true;
-            }
-            "--passes" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| "--passes requires a value".to_string())?;
-                if v.is_empty() {
-                    return Err(
-                        "--passes value cannot be empty (use --no-passes to skip the pipeline)"
-                            .to_string(),
-                    );
-                }
-                // Strict split on `,` — no whitespace trimming. Users invoke
-                // as --passes a,b or --passes "a,b" (no spaces inside).
-                let names: Vec<String> = v.split(',').map(str::to_owned).collect();
-                if names.iter().any(|n| n.is_empty()) {
-                    return Err(format!(
-                        "--passes value '{v}' contains an empty token (use --no-passes for empty)"
-                    ));
-                }
-                passes = Some(names);
-            }
             other => {
-                return Err(format!("unknown flag: {other}"));
+                if !parse_pass_flag(other, &mut iter, &mut no_passes, &mut passes)? {
+                    return Err(format!("unknown flag: {other}"));
+                }
             }
         }
     }
 
     let profile = profile.ok_or_else(|| "compile: missing --profile <name>".to_string())?;
-
-    // Mutually exclusive: --no-passes and --passes can't coexist.
-    if no_passes && passes.is_some() {
-        return Err("--no-passes and --passes are mutually exclusive".to_string());
-    }
-
-    // Validate --passes content against the canonical pass registry.
-    // The list is for *validation only* here — `run_compile` builds the
-    // actual filtered pipeline from `default_pipeline()` independently.
-    if let Some(ref names) = passes {
-        let available_names: Vec<String> = compiler::passes::default_pipeline()
-            .iter()
-            .map(|p| p.name().to_owned())
-            .collect();
-
-        // Duplicate check.
-        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for n in names {
-            if !seen.insert(n.as_str()) {
-                return Err(format!("pass '{n}' specified more than once in --passes"));
-            }
-        }
-
-        // Unknown-name check (dynamic available list).
-        for n in names {
-            if !available_names.iter().any(|c| c == n) {
-                return Err(format!(
-                    "unknown pass '{n}' (available: {})",
-                    available_names.join(", ")
-                ));
-            }
-        }
-    }
+    validate_pass_args(no_passes, &passes)?;
 
     Ok(CompileArgs {
         path: PathBuf::from(path),
@@ -191,6 +227,64 @@ fn parse_compile_args(args: &[String]) -> Result<CompileArgs, String> {
         passes,
     })
 }
+
+// ---------------------------------------------------------------------------
+// inspect subcommand
+// ---------------------------------------------------------------------------
+
+struct InspectArgs {
+    path: PathBuf,
+    profile: String,
+    no_passes: bool,
+    passes: Option<Vec<String>>,
+}
+
+fn parse_inspect_args(args: &[String]) -> Result<InspectArgs, String> {
+    let mut iter = args.iter();
+    let path = iter
+        .next()
+        .ok_or_else(|| "inspect: missing <file.nfl>".to_string())?
+        .clone();
+    if path.starts_with('-') {
+        return Err(format!(
+            "inspect: expected <file.nfl> as first argument, got flag '{path}'"
+        ));
+    }
+
+    let mut profile: Option<String> = None;
+    let mut no_passes = false;
+    let mut passes: Option<Vec<String>> = None;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--profile" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| "--profile requires a value".to_string())?;
+                profile = Some(v.clone());
+            }
+            other => {
+                if !parse_pass_flag(other, &mut iter, &mut no_passes, &mut passes)? {
+                    return Err(format!("unknown flag: {other}"));
+                }
+            }
+        }
+    }
+
+    let profile = profile.ok_or_else(|| "inspect: missing --profile <name>".to_string())?;
+    validate_pass_args(no_passes, &passes)?;
+
+    Ok(InspectArgs {
+        path: PathBuf::from(path),
+        profile,
+        no_passes,
+        passes,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Shared error rendering helper
+// ---------------------------------------------------------------------------
 
 /// Render an error with a source-snippet pointer. Output format mirrors
 /// rustc / cargo:
@@ -234,6 +328,71 @@ fn render_error_with_snippet(
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Shared pass-pipeline runner (used by both run_compile and run_inspect)
+// ---------------------------------------------------------------------------
+
+/// Run (or skip) the UIR pass pipeline according to `no_passes` / `passes`
+/// flags. Returns `(post_pass_uir, applied_pass_names)` where
+/// `applied_pass_names` is `None` when passes were skipped.
+///
+/// Side effect: emits `note:` lines to stderr.
+fn run_pass_pipeline(
+    uir: compiler::Uir,
+    source: &str,
+    path: &Path,
+    no_passes: bool,
+    passes: Option<Vec<String>>,
+) -> Result<(compiler::Uir, Option<Vec<String>>), ExitCode> {
+    if no_passes {
+        eprintln!("note: passes skipped (--no-passes)");
+        return Ok((uir, None));
+    }
+
+    let canonical = compiler::passes::default_pipeline();
+    let canonical_names: Vec<String> = canonical.iter().map(|p| p.name().to_owned()).collect();
+
+    let (pipeline, divergent) = match passes {
+        None => (canonical, false),
+        Some(user_names) => {
+            let user_set: std::collections::HashSet<&str> =
+                user_names.iter().map(String::as_str).collect();
+            let filtered: Vec<Box<dyn compiler::passes::UirPass>> = canonical
+                .into_iter()
+                .filter(|p| user_set.contains(p.name()))
+                .collect();
+            let canonical_filtered_names: Vec<&str> = filtered.iter().map(|p| p.name()).collect();
+            let div = user_names.len() >= 2
+                && user_names.iter().map(String::as_str).collect::<Vec<_>>()
+                    != canonical_filtered_names;
+            (filtered, div)
+        }
+    };
+
+    match compiler::passes::run_pipeline(&uir, &pipeline) {
+        Ok(u) => {
+            let names: Vec<String> = pipeline.iter().map(|p| p.name().to_owned()).collect();
+            eprintln!("note: applied passes: {}", names.join(", "));
+            if divergent {
+                eprintln!(
+                    "note: pass order is canonical ({}); user-specified order ignored",
+                    canonical_names.join(", ")
+                );
+            }
+            Ok((u, Some(names)))
+        }
+        Err(e) => {
+            let span = e.span();
+            render_error_with_snippet(source, path, span.line, span.col, &format!("{}", e), None);
+            Err(ExitCode::FAILURE)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// parse subcommand
+// ---------------------------------------------------------------------------
 
 fn run_parse(path: PathBuf, tokens_only: bool) -> ExitCode {
     let source = match std::fs::read_to_string(&path) {
@@ -415,6 +574,10 @@ fn run_build_uir_verbose(path: PathBuf) -> ExitCode {
     }
 }
 
+// ---------------------------------------------------------------------------
+// compile subcommand runner
+// ---------------------------------------------------------------------------
+
 fn run_compile(args: CompileArgs) -> ExitCode {
     let CompileArgs {
         path,
@@ -469,66 +632,9 @@ fn run_compile(args: CompileArgs) -> ExitCode {
 
     // M5b: run UIR-passes pipeline with optional filter, or skip
     // entirely if --no-passes. See spec §9.3.
-    let post_pass_uir = if no_passes {
-        eprintln!("note: passes skipped (--no-passes)");
-        uir
-    } else {
-        let canonical = compiler::passes::default_pipeline();
-        // Own the names (Vec<String>, not Vec<&str>) so the borrow on
-        // `canonical` doesn't outlive the move into either match arm —
-        // E0505 if Vec<&str> were used here (see spec §9.3).
-        let canonical_names: Vec<String> = canonical.iter().map(|p| p.name().to_owned()).collect();
-
-        let (pipeline, divergent) = match passes {
-            None => (canonical, false),
-            Some(user_names) => {
-                // Filter canonical to retain only user-named passes,
-                // preserving canonical order.
-                let user_set: std::collections::HashSet<&str> =
-                    user_names.iter().map(String::as_str).collect();
-                let filtered: Vec<Box<dyn compiler::passes::UirPass>> = canonical
-                    .into_iter()
-                    .filter(|p| user_set.contains(p.name()))
-                    .collect();
-                let canonical_filtered_names: Vec<&str> =
-                    filtered.iter().map(|p| p.name()).collect();
-                // Order divergence: only meaningful when len >= 2.
-                // user_names is Vec<String> (owned), canonical_filtered_names
-                // is Vec<&str> (borrowed). Project user_names through
-                // String::as_str into a Vec<&str> for type-aligned `!=`.
-                let div = user_names.len() >= 2
-                    && user_names.iter().map(String::as_str).collect::<Vec<_>>()
-                        != canonical_filtered_names;
-                (filtered, div)
-            }
-        };
-
-        match compiler::passes::run_pipeline(&uir, &pipeline) {
-            Ok(u) => {
-                // Applied-note emitted only on success (M5a polish kept).
-                let names: Vec<&str> = pipeline.iter().map(|p| p.name()).collect();
-                eprintln!("note: applied passes: {}", names.join(", "));
-                if divergent {
-                    eprintln!(
-                        "note: pass order is canonical ({}); user-specified order ignored",
-                        canonical_names.join(", ")
-                    );
-                }
-                u
-            }
-            Err(e) => {
-                let span = e.span();
-                render_error_with_snippet(
-                    &source,
-                    &path,
-                    span.line,
-                    span.col,
-                    &format!("{}", e),
-                    None,
-                );
-                return ExitCode::FAILURE;
-            }
-        }
+    let post_pass_uir = match run_pass_pipeline(uir, &source, &path, no_passes, passes) {
+        Ok((u, _names)) => u,
+        Err(code) => return code,
     };
 
     match profile_impl.lower(&post_pass_uir) {
@@ -551,4 +657,87 @@ fn run_compile(args: CompileArgs) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// inspect subcommand runner
+// ---------------------------------------------------------------------------
+
+fn run_inspect(args: InspectArgs) -> ExitCode {
+    let InspectArgs {
+        path,
+        profile,
+        no_passes,
+        passes,
+    } = args;
+
+    let source = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {}", path.display(), e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let ast = match compiler::parse(&source) {
+        Ok(a) => a,
+        Err(e) => {
+            render_error_with_snippet(&source, &path, e.line, e.col, &e.to_string(), None);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let uir = match compiler::ir::build(&ast) {
+        Ok(u) => u,
+        Err(e) => {
+            let first = match &e.kind {
+                compiler::BuildErrorKind::DuplicateModelName { first_span, .. } => {
+                    Some((first_span.line, first_span.col))
+                }
+                _ => None,
+            };
+            let msg = e.to_string();
+            render_error_with_snippet(&source, &path, e.line, e.col, &msg, first);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let profile_impl: Box<dyn profile_api::Profile> = match profile.as_str() {
+        "arm64" => Box::new(profiles_arm64::Arm64Profile),
+        "x86_64" => Box::new(profiles_x86_64::X86_64Profile),
+        other => {
+            eprintln!(
+                "error: unknown profile '{}' (supported: arm64, x86_64)",
+                other
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let (post_pass_uir, applied_pass_names) =
+        match run_pass_pipeline(uir, &source, &path, no_passes, passes) {
+            Ok(pair) => pair,
+            Err(code) => return code,
+        };
+
+    let inspection = match profile_impl.inspect(&post_pass_uir) {
+        Ok(i) => i,
+        Err(e) => {
+            let span = e.span();
+            render_error_with_snippet(&source, &path, span.line, span.col, &format!("{}", e), None);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Render. Convert applied_pass_names to &[&str] for the renderer.
+    let applied_refs: Option<Vec<&str>> = applied_pass_names
+        .as_ref()
+        .map(|v| v.iter().map(String::as_str).collect());
+    let header = inspect_render::RenderHeader {
+        source_path: &path,
+        profile: &profile,
+        applied_passes: applied_refs.as_deref(),
+    };
+    print!("{}", inspect_render::render_inspection(&inspection, header));
+    ExitCode::SUCCESS
 }

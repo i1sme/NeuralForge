@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "bench",
     "compiler",
+    "inspect-render",
     "nflc",
     "profile-api",
     "profiles/arm64",
