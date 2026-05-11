@@ -65,7 +65,7 @@ NeuralForge/
 │   │   │   ├── types.rs    ← Asm, FnSig, ParamSlot, ParamKind, LowerError
 │   │   │   ├── asm.rs      ← prologue/epilogue + emit_sp_* + emit_imm32 helpers
 │   │   │   ├── abi.rs      ← AbiContext (n_inputs, input_reg/params_reg/output_reg, ffi_save/restore, M12)
-│   │   │   ├── buffer.rs   ← BufferLoc, assign_buffers, compute_is_leaf, compute_callee_saved
+│   │   │   ├── buffer.rs   ← BufferAssignment, RegSet, assign_buffers, compute_is_leaf, compute_callee_saved (BufferLoc re-exported from profile-api)
 │   │   │   ├── codegen.rs  ← walk_uir/walk_model dispatcher + classify_op
 │   │   │   ├── ops/
 │   │   │   │   ├── mod.rs        ← per-op submodule entry + re-exports
