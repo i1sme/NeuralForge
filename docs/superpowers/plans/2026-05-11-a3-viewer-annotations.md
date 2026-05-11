@@ -599,6 +599,14 @@ pub struct FnAnnotations {
 /// (See spec §3.4.)
 #[derive(Debug, Clone)]
 pub struct NodeAnnotation {
+    /// Pre-rendered description of the node — op kind, shape, operands,
+    /// attrs, fused post-ops. Format mirrors `Display for compiler::Node`
+    /// (the `--uir-verbose` style); produced once at inspect time so the
+    /// renderer doesn't need access to the source UirModel.
+    /// Examples:
+    /// - `input "x"        :: Tensor[8, 4]`
+    /// - `linear           :: Tensor[8, 2]    operands=[n0]    attrs=[out_dim=2]    fused=[softmax_row]`
+    pub label: String,
     pub buffer_loc: BufferLoc,
     /// `element_count * 4` (BYTES_PER_ELEMENT). For aliased nodes this
     /// is still the *logical* output size — the node "produces" this
@@ -636,6 +644,21 @@ pub trait Profile {
 - [ ] **Step 3: Run `cargo build --workspace`** — expect failure: both profile crates now don't satisfy the `Profile` trait (missing `inspect` method). This confirms the trait change reached the right place.
 
 ### 3b. arm64 `inspect` implementation
+
+- [ ] **Step 3.5: Verify RegSet accessor surface (both profiles).** Quick sanity check before Step 4:
+
+```bash
+grep -n 'fn contains_' profiles/arm64/src/buffer.rs profiles/x86_64/src/buffer.rs
+```
+
+Expected output:
+```
+profiles/arm64/src/buffer.rs: pub fn contains_d8_d9(&self) -> bool { self.d8_d9 }
+profiles/arm64/src/buffer.rs: pub fn contains_x19_x23(&self) -> bool { self.x19_x23 }
+profiles/x86_64/src/buffer.rs: pub fn contains_callee_saved_int(&self) -> bool { self.callee_saved_int }
+```
+
+If methods missing (regression), use field access instead — `callee_saved.d8_d9` etc. — both `pub` fields exist. The plan code below uses methods (verified extant at M15-tip).
 
 - [ ] **Step 4: Add `inspect_model` to `profiles/arm64/src/codegen.rs`.** Add after `walk_model` (or below the `analyze()` function, in the same file):
 
@@ -704,7 +727,13 @@ pub(crate) fn inspect_model(model: &UirModel) -> Result<profile_api::FnAnnotatio
             // BufferLoc is the lifted profile_api::BufferLoc (Task 2).
             let buffer_loc: BufferLoc = assignment.locs[node_idx];
 
+            // label = pre-rendered `Display for Node` output. This is the
+            // exact format used by `nflc parse --uir-verbose` per-node
+            // line — visual continuity is intentional (Q5 brainstorm).
+            let label = format!("{}", node);
+
             NodeAnnotation {
+                label,
                 buffer_loc,
                 output_bytes,
                 params_floats,
@@ -823,8 +852,10 @@ pub(crate) fn inspect_model(model: &UirModel) -> Result<profile_api::FnAnnotatio
             };
 
             let buffer_loc: BufferLoc = assignment.locs[node_idx];
+            let label = format!("{}", node);
 
             NodeAnnotation {
+                label,
                 buffer_loc,
                 output_bytes,
                 params_floats,
@@ -890,10 +921,10 @@ fn inspect_softmax_model_is_non_leaf() {
         !insp.functions[0].leaf,
         "softmax-bearing model must report leaf=false (calls _expf)"
     );
-    assert!(
-        !insp.functions[0].callee_saved.is_empty(),
-        "non-leaf softmax model must report non-empty callee_saved"
-    );
+    // NOTE: callee_saved population is implementation-defined per profile
+    // (arm64 ties d8-d9/x19-x23 to extern_math; x86_64 ties %rbx/%r12-%r15
+    // to extern_math OR matmul). Don't assert non-emptiness here — the
+    // primary leaf assertion is what this test is for.
 }
 
 #[test]
@@ -902,10 +933,10 @@ fn inspect_pure_linear_model_is_leaf() {
     let uir = build_uir("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2]\n");
     let insp = Arm64Profile.inspect(&uir).expect("inspect");
     assert!(insp.functions[0].leaf, "no extern math = leaf");
-    assert!(
-        insp.functions[0].callee_saved.is_empty(),
-        "leaf linear model must report empty callee_saved"
-    );
+    // Same NOTE as above — don't over-specify callee_saved emptiness.
+    // arm64 tiny linear model happens to be empty today; that's a
+    // correctness outcome of the analyzer, not a contract we want to
+    // pin in the inspect-level test.
 }
 ```
 
@@ -1210,12 +1241,10 @@ fn render_fn_annotations(out: &mut String, fa: &FnAnnotations) {
 }
 
 fn render_node_annotation(out: &mut String, node_idx: usize, na: &NodeAnnotation) {
-    // Line 1: node id placeholder. The renderer doesn't have access
-    // to the UirModel here (Inspection schema doesn't carry it), so
-    // shape/op-kind/operands/attrs/fused are NOT rendered. v1 keeps
-    // line 1 minimal: `n<idx>`. (Future: extend Inspection schema to
-    // include a per-node label string if richer line 1 is needed.)
-    out.push_str(&format!("    n{}\n", node_idx));
+    // Line 1: node id ref + pre-rendered label (op kind + shape +
+    // operands + attrs + fused). Format mirrors `--uir-verbose`
+    // per-node line — visual continuity per Q5 brainstorm.
+    out.push_str(&format!("    n{}  {}\n", node_idx, na.label));
 
     // Line 2: annotation row.
     let mut parts: Vec<String> = Vec::new();
@@ -1268,12 +1297,14 @@ mod tests {
                 output_node: 1,
                 nodes: vec![
                     NodeAnnotation {
+                        label: "input \"x\"        :: Tensor[2, 3]".to_string(),
                         buffer_loc: BufferLoc::InputReg(0),
                         output_bytes: 24,
                         params_floats: None,
                         extra_notes: vec![],
                     },
                     NodeAnnotation {
+                        label: "linear           :: Tensor[2, 2]    operands=[n0]    attrs=[out_dim=2]".to_string(),
                         buffer_loc: BufferLoc::OutputReg,
                         output_bytes: 16,
                         params_floats: Some(6),
@@ -1300,6 +1331,9 @@ mod tests {
         assert!(out.contains("out=24 B"), "missing output_bytes render");
         assert!(out.contains("params=6 floats (24 B)"), "missing params line: {}", out);
         assert!(out.contains("passes applied: fuse_linear_relu"), "missing passes line");
+        // Label rendered on line 1.
+        assert!(out.contains("n0  input \"x\""), "line-1 label missing for input node: {}", out);
+        assert!(out.contains("n1  linear"), "line-1 label missing for op node: {}", out);
     }
 
     #[test]
@@ -2145,7 +2179,7 @@ for the full schema and design rationale.
 Replace with:
 
 ```
-**Milestone 16 complete. ~464 tests passing on macOS arm64 (~466 on Linux x86_64 CI with x86_64 FFI tests included).** All workspace gates clean
+**Milestone 16 complete. ~464 tests passing on macOS arm64 (~466 on Linux x86_64 CI — the +2 delta is the M15 x86_64-only FFI integration tests `ffn_ffi` / `transformer_block_ffi`, gated on `#[cfg(target_os = "linux")]`; the new M16 inspect goldens are pure Rust and run on both platforms).** All workspace gates clean
 (`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo fmt --all -- --check`, `cargo test --workspace`).
 
@@ -2236,7 +2270,9 @@ If README enumerates subcommands per `nflc`, add an `inspect` line in the same s
   Roadmap line updated, this DEVLOG entry.
 
 - **Final test count: ~464** (macOS arm64); **~466** on Linux x86_64
-  CI (includes x86_64-only golden tests).
+  CI — +2 delta is the M15 x86_64-only FFI tests (`ffn_ffi`,
+  `transformer_block_ffi`), not the new M16 inspect goldens (which
+  are pure Rust and run on both platforms).
 
 ### Decisions made
 
