@@ -464,6 +464,97 @@ fn walk_model(
     Ok((body, sig))
 }
 
+/// Inspect one model under x86_64. Mirror of walk_model.
+pub(crate) fn inspect_model(model: &UirModel) -> Result<profile_api::FnAnnotations, LowerError> {
+    use compiler::NodeKind;
+    use profile_api::{FnAnnotations, NodeAnnotation};
+
+    let analysis = analyze(model)?;
+    let ModelAnalysis {
+        fn_sig,
+        assignment,
+        callee_saved,
+        abi: _,
+    } = analysis;
+
+    // x86_64 RegSet → Vec<String>. The callee_saved_int flag covers the
+    // entire %rbx, %r12-%r15 set as a single group (see
+    // profiles/x86_64/src/buffer.rs RegSet doc).
+    let mut callee_saved_str: Vec<String> = Vec::new();
+    if callee_saved.contains_callee_saved_int() {
+        callee_saved_str.push("%rbx".to_string());
+        callee_saved_str.push("%r12-%r15".to_string());
+    }
+
+    // x86_64 has no LeafKind (its prologue is leaf-agnostic). Compute
+    // leaf bool directly from the UIR-side predicate — same source
+    // arm64's compute_is_leaf delegates to.
+    let leaf_bool = !model.calls_extern_math();
+
+    const BYTES_PER_ELEMENT: usize = 4;
+
+    let nodes: Vec<NodeAnnotation> = model
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(node_idx, node)| {
+            let element_count: u64 = node.ty.shape.0.iter().copied().product();
+            let output_bytes = (element_count as usize)
+                .checked_mul(BYTES_PER_ELEMENT)
+                .expect("output_bytes overflow: shape product * f32 size");
+
+            let params_floats: Option<usize> = match &node.kind {
+                NodeKind::Op { op, .. }
+                    if matches!(op, compiler::StdOp::Linear)
+                        || matches!(op, compiler::StdOp::LayerNorm) =>
+                {
+                    let total: usize = fn_sig
+                        .params_layout
+                        .iter()
+                        .filter(|s| s.origin_node == node_idx)
+                        .map(|s| s.size)
+                        .sum();
+                    if total == 0 {
+                        None
+                    } else {
+                        Some(total)
+                    }
+                }
+                _ => None,
+            };
+
+            let buffer_loc: BufferLoc = assignment.locs[node_idx];
+            let label = format!("{}", node);
+
+            NodeAnnotation {
+                label,
+                buffer_loc,
+                output_bytes,
+                params_floats,
+                extra_notes: Vec::new(),
+            }
+        })
+        .collect();
+
+    Ok(FnAnnotations {
+        fn_sig,
+        stack_bytes: assignment.stack_bytes,
+        callee_saved: callee_saved_str,
+        leaf: leaf_bool,
+        input_nodes: model.inputs.clone(),
+        output_node: model.output,
+        nodes,
+    })
+}
+
+pub fn inspect_uir(uir: &Uir) -> Result<profile_api::Inspection, LowerError> {
+    let mut functions = Vec::with_capacity(uir.models.len());
+    for model in &uir.models {
+        functions.push(inspect_model(model)?);
+    }
+    Ok(profile_api::Inspection { functions })
+}
+
 /// Resolve `Alias` chains to a concrete BufferLoc.
 fn resolve_loc(locs: &[BufferLoc], id: NodeId) -> BufferLoc {
     let mut cur = id;

@@ -470,6 +470,105 @@ fn walk_model(
     Ok((body, sig))
 }
 
+/// Inspect one model under arm64. Mirror of walk_model — both call
+/// analyze() then diverge: walk_model emits asm, inspect_model packages
+/// the analysis as FnAnnotations.
+pub(crate) fn inspect_model(model: &UirModel) -> Result<profile_api::FnAnnotations, LowerError> {
+    use compiler::NodeKind;
+    use profile_api::{BufferLoc, FnAnnotations, NodeAnnotation};
+
+    let analysis = analyze(model)?;
+    let ModelAnalysis {
+        fn_sig,
+        assignment,
+        callee_saved,
+        leaf,
+        abi: _,
+    } = analysis;
+
+    // Render arm64's RegSet → Vec<String>. Order matches AAPCS save order
+    // (FP regs before GP regs) for stable output.
+    let mut callee_saved_str: Vec<String> = Vec::new();
+    if callee_saved.contains_d8_d9() {
+        callee_saved_str.push("d8-d9".to_string());
+    }
+    if callee_saved.contains_x19_x23() {
+        callee_saved_str.push("x19-x23".to_string());
+    }
+
+    let leaf_bool = matches!(leaf, crate::asm::LeafKind::Leaf);
+
+    // BYTES_PER_ELEMENT = 4 (f32). Match the constant in buffer.rs.
+    const BYTES_PER_ELEMENT: usize = 4;
+
+    let nodes: Vec<NodeAnnotation> = model
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(node_idx, node)| {
+            let element_count: u64 = node.ty.shape.0.iter().copied().product();
+            let output_bytes = (element_count as usize)
+                .checked_mul(BYTES_PER_ELEMENT)
+                .expect("output_bytes overflow: shape product * f32 size");
+
+            let params_floats: Option<usize> = match &node.kind {
+                NodeKind::Op { op, .. }
+                    if matches!(op, compiler::StdOp::Linear)
+                        || matches!(op, compiler::StdOp::LayerNorm) =>
+                {
+                    let total: usize = fn_sig
+                        .params_layout
+                        .iter()
+                        .filter(|s| s.origin_node == node_idx)
+                        .map(|s| s.size)
+                        .sum();
+                    if total == 0 {
+                        None
+                    } else {
+                        Some(total)
+                    }
+                }
+                _ => None,
+            };
+
+            // BufferLoc is the lifted profile_api::BufferLoc (Task 2).
+            let buffer_loc: BufferLoc = assignment.locs[node_idx];
+
+            // label = pre-rendered `Display for Node` output. This is the
+            // exact format used by `nflc parse --uir-verbose` per-node
+            // line — visual continuity is intentional.
+            let label = format!("{}", node);
+
+            NodeAnnotation {
+                label,
+                buffer_loc,
+                output_bytes,
+                params_floats,
+                extra_notes: Vec::new(),
+            }
+        })
+        .collect();
+
+    Ok(FnAnnotations {
+        fn_sig,
+        stack_bytes: assignment.stack_bytes,
+        callee_saved: callee_saved_str,
+        leaf: leaf_bool,
+        input_nodes: model.inputs.clone(),
+        output_node: model.output,
+        nodes,
+    })
+}
+
+/// Inspect a full Uir under arm64.
+pub fn inspect_uir(uir: &Uir) -> Result<profile_api::Inspection, LowerError> {
+    let mut functions = Vec::with_capacity(uir.models.len());
+    for model in &uir.models {
+        functions.push(inspect_model(model)?);
+    }
+    Ok(profile_api::Inspection { functions })
+}
+
 /// Resolve `Alias` chains to a concrete BufferLoc.
 fn resolve_loc(locs: &[crate::buffer::BufferLoc], id: NodeId) -> crate::buffer::BufferLoc {
     use crate::buffer::BufferLoc;

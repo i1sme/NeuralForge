@@ -140,6 +140,80 @@ impl LowerError {
     }
 }
 
+// ----------------------------------------------------------------------------
+// M16 (A3): Profile-aware inspection schema.
+//
+// Returned by `Profile::inspect()`. Mirror of `Asm` in role: where Asm
+// is "what lowering produces (text)", Inspection is "what lowering
+// would compute (structured analysis)". Both consume the same
+// per-profile analyze() preamble (M16 Task 1) — drift between them
+// is impossible by construction.
+// ----------------------------------------------------------------------------
+
+/// Profile-aware annotation of one Uir, returned by `Profile::inspect`.
+/// One entry per UirModel in the input UIR, in declaration order.
+#[derive(Debug, Clone)]
+pub struct Inspection {
+    pub functions: Vec<FnAnnotations>,
+}
+
+/// Annotation for one UirModel under one profile.
+///
+/// `nodes.len() == post_pass_model.nodes.len()` — strictly index-aligned
+/// with the **post-pass** UirModel that gets lowered. Pre-pass alignment
+/// would produce a report whose node IDs don't match what `lower()`
+/// actually compiles, defeating the point of A3.
+#[derive(Debug, Clone)]
+pub struct FnAnnotations {
+    pub fn_sig: FnSig,
+    pub stack_bytes: usize,
+    /// Textual rendering of the profile's RegSet — lossy by design.
+    /// arm64: e.g. `["d8-d9", "x19-x23"]`. x86_64: e.g. `["%rbx", "%r12-%r15"]`.
+    /// Empty Vec if no callee-saved registers are touched by this function.
+    pub callee_saved: Vec<String>,
+    /// True iff the function emits no `bl _expf` / `call expf@PLT`
+    /// (== `!UirModel::calls_extern_math()` for both profiles today).
+    pub leaf: bool,
+    /// Real NodeId of each input in the post-pass UirModel, in
+    /// declaration order. Renderer uses these to produce `n<id>` refs;
+    /// without this field, positional indices would not match actual
+    /// NodeIds in models where inputs are not the first N nodes.
+    pub input_nodes: Vec<compiler::NodeId>,
+    /// Real NodeId of the model output in the post-pass UirModel.
+    pub output_node: compiler::NodeId,
+    pub nodes: Vec<NodeAnnotation>,
+}
+
+/// Per-node annotation. Index in `FnAnnotations.nodes` corresponds to
+/// `NodeId` in the post-pass `UirModel`.
+///
+/// **Growth rule:** new fields land here only when meaningful for both
+/// profiles. Profile-specific information goes into `extra_notes` rather
+/// than as a top-level field, to keep the schema honest cross-profile.
+#[derive(Debug, Clone)]
+pub struct NodeAnnotation {
+    /// Pre-rendered description of the node — op kind, shape, operands,
+    /// attrs, fused post-ops. Format mirrors `Display for compiler::Node`
+    /// (the `--uir-verbose` style); produced once at inspect time so the
+    /// renderer doesn't need access to the source UirModel.
+    /// Examples:
+    /// - `input "x"        :: Tensor[8, 4]`
+    /// - `linear           :: Tensor[8, 2]    operands=[n0]    attrs=[out_dim=2]    fused=[softmax_row]`
+    pub label: String,
+    pub buffer_loc: BufferLoc,
+    /// `element_count * 4` (BYTES_PER_ELEMENT). For aliased nodes this
+    /// is still the *logical* output size — the node "produces" this
+    /// many bytes; physical placement is captured by `buffer_loc`.
+    pub output_bytes: usize,
+    /// `Some(N)` for ops that consume packed `params` slots:
+    /// `Linear` (weights ± bias) and `LayerNorm[affine=true]`
+    /// (γ + β). `None` for all other ops.
+    pub params_floats: Option<usize>,
+    /// Profile-specific freeform annotations. Empty for now; reserved
+    /// for the growth-rule escape hatch.
+    pub extra_notes: Vec<String>,
+}
+
 /// The profile contract.
 ///
 /// Each backend profile (arm64 Mach-O, x86_64 Linux ELF, ...) provides
@@ -157,6 +231,13 @@ pub trait Profile {
     /// `"_"` on Mach-O (linker prepends underscore for C linkage),
     /// `""` on ELF (linker uses raw symbol name).
     fn sym_prefix(&self) -> &'static str;
+
+    /// M16 (A3): inspect the UIR under this profile, returning per-model
+    /// and per-node annotations matching what `lower()` would produce.
+    /// Both methods share an internal `analyze()` preamble — drift
+    /// between inspection output and lowered asm is structurally
+    /// impossible.
+    fn inspect(&self, uir: &Uir) -> Result<Inspection, LowerError>;
 }
 
 #[cfg(test)]
