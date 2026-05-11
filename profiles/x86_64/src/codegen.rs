@@ -40,13 +40,19 @@ pub fn walk_uir(uir: &Uir, sym_prefix: &'static str) -> Result<Asm, LowerError> 
     Ok(Asm { source, functions })
 }
 
-fn walk_model(
-    model_idx: usize,
-    model: &UirModel,
-    sym_prefix: &'static str,
-) -> Result<(String, FnSig), LowerError> {
-    use crate::asm::{format_function_epilogue, format_function_prologue};
+/// Analysis preamble shared by `walk_model` and `inspect_model`.
+/// Mirror of arm64's analyze(), minus LeafKind (x86_64 prologue does
+/// not depend on leaf classification — see profiles/x86_64/src/asm.rs).
+/// Leaf classification for inspect output is computed via the UIR-side
+/// `model.calls_extern_math()` predicate directly in inspect_model.
+struct ModelAnalysis {
+    fn_sig: FnSig,
+    assignment: crate::buffer::BufferAssignment,
+    callee_saved: crate::buffer::RegSet,
+    abi: AbiContext,
+}
 
+fn analyze(model: &UirModel) -> Result<ModelAnalysis, LowerError> {
     // 1. Validate ops upfront.
     for node in &model.nodes {
         if let NodeKind::Op { op, attrs, .. } = &node.kind {
@@ -54,10 +60,7 @@ fn walk_model(
         }
     }
 
-    // 1b. Arity check (M12 spec §5.3): N + 2 ≤ INPUT_REGS.len(). The
-    // current cap is N=4 (INPUT_REGS = %rdi/%rsi/%rdx/%rcx/%r8/%r9).
-    // Larger N would require stack-spill on the input side, deferred
-    // to a future milestone.
+    // 1b. Arity check.
     let n_inputs = model.inputs.len();
     if n_inputs + 2 > INPUT_REGS.len() {
         return Err(LowerError::TooManyInputs {
@@ -68,8 +71,7 @@ fn walk_model(
     }
     let abi = AbiContext { n_inputs };
 
-    // 2. Compute layout, ABI sizes. inputs_floats is now a per-input
-    // vec (M12 multi-input ABI); for N=1 this is just `vec![input_0]`.
+    // 2. Compute layout, ABI sizes.
     if model.inputs.is_empty() {
         return Err(LowerError::ShapeNotConcrete {
             span: model.source_span,
@@ -85,8 +87,6 @@ fn walk_model(
 
     let mut params_layout: Vec<ParamSlot> = Vec::new();
     let mut params_floats: usize = 0;
-    // Single pass in UIR-node order — preserves params_layout contract
-    // (one entry per parameter slot in node-index order).
     for (node_idx, node) in model.nodes.iter().enumerate() {
         if let NodeKind::Op {
             op: StdOp::Linear,
@@ -121,9 +121,6 @@ fn walk_model(
                 params_floats += n;
             }
         }
-        // LayerNorm ParamSlot allocation — in the same loop to preserve
-        // UIR-node order in params_layout. Order is contract: γ (Scale)
-        // BEFORE β (Bias). See ParamKind doc.
         if let NodeKind::Op {
             op: StdOp::LayerNorm,
             attrs,
@@ -139,8 +136,6 @@ fn walk_model(
                     .copied()
                     .expect("LayerNorm input rank ≥ 2 enforced at IR build")
                     as usize;
-
-                // γ — pushed FIRST (contract).
                 params_layout.push(ParamSlot {
                     kind: ParamKind::LayerNormScale,
                     origin_node: node_idx,
@@ -148,8 +143,6 @@ fn walk_model(
                     size: last_dim,
                 });
                 params_floats += last_dim;
-
-                // β — pushed SECOND (contract).
                 params_layout.push(ParamSlot {
                     kind: ParamKind::LayerNormBias,
                     origin_node: node_idx,
@@ -161,7 +154,7 @@ fn walk_model(
         }
     }
 
-    let sig = FnSig {
+    let fn_sig = FnSig {
         name: format!("nfl_forward_{}", model.name),
         model: model.name.clone(),
         inputs_floats,
@@ -170,9 +163,31 @@ fn walk_model(
         params_layout,
     };
 
-    // 3. Buffer assignment + callee-saved set.
     let assignment = assign_buffers(model);
-    let regs = compute_callee_saved(model);
+    let callee_saved = compute_callee_saved(model);
+
+    Ok(ModelAnalysis {
+        fn_sig,
+        assignment,
+        callee_saved,
+        abi,
+    })
+}
+
+fn walk_model(
+    model_idx: usize,
+    model: &UirModel,
+    sym_prefix: &'static str,
+) -> Result<(String, FnSig), LowerError> {
+    use crate::asm::{format_function_epilogue, format_function_prologue};
+
+    let analysis = analyze(model)?;
+    let ModelAnalysis {
+        fn_sig: sig,
+        assignment,
+        callee_saved: regs,
+        abi,
+    } = analysis;
 
     // 4. Emit prologue + body + epilogue. assignment.stack_bytes already
     // includes the 16-byte fused-softmax xmm-spill reserve when softmax
