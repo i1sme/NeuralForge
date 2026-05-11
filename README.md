@@ -46,7 +46,7 @@ model Classifier [batch=32, input=784, output=10]:
 | `DEVLOG.md` | Chronological record of all work and decisions |
 | `CLAUDE.md` | Context file for Claude Code (AI development assistant) |
 | `compiler/` | `compiler` crate — lexer, parser, AST, Universal IR, optimisation passes |
-| `nflc/` | `nflc` crate — CLI binary (`nflc parse`, `nflc compile`) |
+| `nflc/` | `nflc` crate — CLI binary (`nflc parse`, `nflc compile`, `nflc inspect`) |
 | `profile-api/` | `profile-api` crate — shared `Profile` trait, `Asm`, `FnSig`, `ParamSlot`, `ParamKind`, `LowerError` |
 | `profiles/arm64/` | `profiles-arm64` crate — AArch64 / Apple Silicon code generator |
 | `profiles/x86_64/` | `profiles-x86_64` crate — Linux ELF scalar SSE2 code generator |
@@ -108,7 +108,7 @@ What's working today:
 - **UIR-pass framework** with `EliminateDropout`, `FuseLinearRelu`, and
   `FuseLinearSoftmax`
 - **CLI:** `nflc parse` (with `--uir` compact and `--uir-verbose` annotated
-  rendering) and `nflc compile --profile <arm64|x86_64>`
+  rendering), `nflc compile --profile <arm64|x86_64>`, and `nflc inspect --profile <arm64|x86_64>`
 - **Bit-exact FFI integration tests** with `to_bits()` comparison
   (M14 layernorm precedent); per-profile divergent `reference_matmul` body
   matches each emitter's rounding semantics (arm64 `fmadd` single-rounding;
@@ -119,7 +119,7 @@ What's working today:
   Summaries on `macos-14` (arm64) and `ubuntu-latest` (x86_64)
 - **Viewer v0.1:** `nflc parse --uir-verbose` renders annotated UIR with
   top-level and per-model summaries, and fused post-ops on indented lines
-- **446 tests passing on macOS arm64 (~448 on Linux x86_64 CI)**; CI green;
+- **466 tests passing on macOS arm64 (~468 on Linux x86_64 CI)**; CI green;
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   `cargo test --workspace` all clean
 

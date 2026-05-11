@@ -14,6 +14,101 @@ Format for each entry:
 
 ---
 
+## 2026-05-11 — Milestone 16 closed: A3 — profile-level viewer annotations
+
+### What was done
+
+- **Task 1 — extract `analyze()` from `walk_model` (both profiles).**
+  Pure refactor; asm output bit-identical for all 446 fixtures.
+  Per-profile `ModelAnalysis` private struct: arm64 carries
+  `LeafKind`; x86_64 omits it (its prologue is leaf-agnostic).
+  Both `lower()` and the new `inspect()` consume `analyze()` —
+  drift-prevention by construction.
+
+- **Task 2 — lift `BufferLoc` enum to `profile-api`.** The two
+  profile copies were structurally bit-identical (verified by diff
+  before lift); only doc-comment richness differed. Each profile's
+  `buffer.rs` swapped its local definition for
+  `pub use profile_api::BufferLoc`.
+
+- **Task 3 — `Inspection`/`FnAnnotations`/`NodeAnnotation` schema +
+  `Profile::inspect()` trait method + per-profile impl.** Schema
+  lives in `profile-api` (M9 trait-grows-by-request invariant
+  satisfied — `nflc inspect` is the consumer). Per-profile callee-saved
+  rendering: arm64 `["d8-d9", "x19-x23"]`; x86_64 `["%rbx", "%r12-%r15"]`.
+  8 new unit tests (4 per profile): leaf detection (positive + negative),
+  alias placement (dropout, not relu — post-fusion relu doesn't survive),
+  params count for Linear with bias.
+
+- **Task 4 — new `inspect-render` workspace crate + `nflc inspect` CLI.**
+  Renderer crate (lib only) with 2 unit tests. CLI subcommand mirrors
+  `compile` shape (`--profile` + `--no-passes`/`--passes`); shared
+  `parse_pass_flag` + `validate_pass_args` + `run_pass_pipeline`
+  helpers extracted from `run_compile`/`parse_compile_args` for reuse
+  between compile and inspect. 2 CLI smoke tests.
+
+- **Task 5 — 8 goldens captured + integration tests.** 4 fixtures
+  (`tiny_mlp`, `transformer_block`, `self_attention`, `dropout_only`)
+  × 2 profiles. Process rule: zero hand-computed numbers, every byte
+  from `cargo run -p nflc -- inspect ...` output. Path-decoupling
+  pattern (`read_path()` for on-disk read, `header_path()` for stable
+  workspace-relative rendered header) keeps goldens cwd-independent.
+
+- **Task 6 — documentation.** Profile guides updated, CLAUDE.md
+  bumped to M16 status, PROJECT_SPEC.md milestone table + Strategic
+  Roadmap line updated, this DEVLOG entry.
+
+- **Final test count: 466** (macOS arm64); **~468** on Linux x86_64
+  CI — +2 delta is the M15 x86_64-only FFI tests (`ffn_ffi`,
+  `transformer_block_ffi`), not the new M16 inspect goldens (which
+  are pure Rust and run on both platforms).
+
+### Decisions made
+
+- **`inspect-render` as separate workspace crate** rather than folding
+  into `profile-api`. Rationale: `profile-api` is the schema + trait
+  contract; rendering is formatting policy and has no business in the
+  contract crate. One tiny new crate, single responsibility.
+
+- **`BufferLoc` lifted to `profile-api`** as part of A3 rather than
+  deferred. Rationale: natural cleanup at the point a third consumer
+  (the inspect-render crate) needs the type. Verified bit-identical
+  before lift.
+
+- **`(N B each)` clause suppression for non-uniform inputs.** Initial
+  Task 4 implementation emitted the arithmetic mean labeled "each" for
+  multi-input models with mixed input sizes (e.g. `four_input_matmul.nfl`).
+  Fix landed before Task 5 captured goldens — for non-uniform inputs
+  no per-input clause is emitted; per-node `out=N B` rows carry the
+  individual sizes.
+
+- **Path-decoupling in inspect goldens.** Discovered during Task 5
+  capture: goldens captured via `cargo run -p nflc -- inspect tests/fixtures/...`
+  (workspace-relative path in header) didn't match test harness output
+  (`../../tests/fixtures/...` from package cwd). Split harness into
+  `read_path()` (on-disk) + `header_path()` (workspace-relative,
+  fixed). Goldens are now cwd-independent.
+
+### Problems encountered
+
+- **None blocking.** Pre-task grep verification (Task 2) confirmed no
+  external imports of `profiles_*::buffer::BufferLoc` — lift was
+  mechanical as expected. Path-mismatch and non-uniform-inputs issues
+  caught by code review or by golden-capture mismatch — both fixed
+  before merge.
+
+### Next step
+
+Open candidates per Strategic Roadmap:
+- **Axis 3 — bare-metal `expf`**. Now unblocked: A3 enables structural
+  `nflc inspect --diff before.s after.s` validation (future tooling)
+  for verifying that Taylor-series `expf` produces the expected
+  footprint reduction.
+- **A2-extended: training syntax (loss/optimiser)**. NFL v0.3 — larger
+  language milestone.
+
+---
+
 ## 2026-05-10 — Milestone 15 closed: A2 third brick — FFN compositional + LH-4 cleanup
 
 ### What was done

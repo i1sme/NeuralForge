@@ -1076,3 +1076,40 @@ record, no callee-saved register save. `compute_is_leaf` returns
 structurally safe on arm64 because the register plan lives entirely in
 `x6`/`x9`–`x17` + `s0`–`s7`, which never overlap the ABI argument window
 (`x0`–`x5`) at any N ∈ {1..4}.
+
+---
+
+## Inspection output (M16 / A3)
+
+`nflc inspect <file.nfl> --profile arm64` runs the same per-profile
+analyzers that `nflc compile` runs (`assign_buffers`,
+`compute_callee_saved`, `compute_is_leaf`), packages the result as a
+structured `profile_api::Inspection`, and renders it to text. Both
+commands run the default pass pipeline by default; pass `--no-passes`
+or `--passes <list>` to skip / filter (same semantics as `compile`).
+
+The renderer produces a header line + per-model summary + per-node table.
+
+Field reference:
+- **`loc=`** — output buffer placement: `InputReg(i)` (the i-th input's
+  ABI register, mapped via `AbiContext::input_reg(i)`), `OutputReg`
+  (the output ABI register at `INPUT_REGS[n_inputs + 1]`),
+  `StackOffset(N)` (`[sp + N]` in the model's intermediate frame), or
+  `Alias(nK)` (consumer reads from node K's buffer directly — no asm
+  emitted for this node by `assign_buffers`-aliased ops like `relu`,
+  `dropout`, `mul_scalar`).
+- **`out=`** — logical output bytes (`element_count * 4`). Aliased
+  nodes still report logical bytes; physical placement is captured by
+  `loc=`.
+- **`params=`** — for `Linear` and `LayerNorm[affine=true]`: floats
+  consumed from the packed `params` buffer (weights + bias for Linear,
+  γ + β for LayerNorm). Other ops omit this field.
+- **`callee-saved`** (per-model) — registers saved in the prologue for
+  this function. `d8-d9` and `x19-x23` appear when any node in the
+  model calls `_expf` (standalone Softmax or fused SoftmaxRow); empty
+  for leaf functions.
+- **`leaf`** — `yes` iff no `bl _expf` is emitted; `no` otherwise.
+  Drives whether `x29`/`x30` are saved in the prologue.
+
+See `docs/superpowers/specs/2026-05-11-a3-viewer-annotations-design.md`
+for the full schema and design rationale.
