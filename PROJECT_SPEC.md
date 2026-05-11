@@ -238,7 +238,7 @@ Leaving an entry here longer than one milestone is a process failure.
 | # | Location | Condition | Symptom | Opened |
 |---|----------|-----------|---------|--------|
 
-*(Table is empty as of M15 — all latent hazards closed.)*
+*(Table is empty as of M16 — all latent hazards closed.)*
 
 ### Trigger-driven cleanup
 Items raised during a milestone that intentionally do not get scheduled — they

@@ -22,8 +22,9 @@ fn read_path(name: &str) -> PathBuf {
     PathBuf::from(format!("../../tests/fixtures/{}.nfl", name))
 }
 
-/// Stable workspace-relative path for the rendered header — keeps
-/// goldens cwd-independent.
+/// Stable path string used in the rendered header — workspace-relative,
+/// matching what `nflc inspect <file>` would emit when invoked from the
+/// workspace root. Keeps goldens cwd-independent.
 fn header_path(name: &str) -> PathBuf {
     PathBuf::from(format!("tests/fixtures/{}.nfl", name))
 }
