@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Golden-snapshot tests for `X86_64Profile::inspect()` rendering.
+//!
+//! Each fixture under `tests/inspect/<name>.expected.txt` is the
+//! verbatim stdout of:
+//!     cargo run -p nflc -- inspect tests/fixtures/<name>.nfl --profile x86_64
+//! captured at the time of M16 closure. Regen on intentional format
+//! change with the same command.
+//!
 //! Mirror of profiles/arm64/tests/inspect.rs.
 
 use inspect_render::{render_inspection, RenderHeader};
@@ -8,7 +15,9 @@ use profile_api::Profile;
 use profiles_x86_64::X86_64Profile;
 use std::path::PathBuf;
 
-/// On-disk path used to read the fixture.
+/// On-disk path used to read the fixture. cwd during cargo integration
+/// tests is the package root (profiles/x86_64/), so workspace root is
+/// two up.
 fn read_path(name: &str) -> PathBuf {
     PathBuf::from(format!("../../tests/fixtures/{}.nfl", name))
 }
@@ -57,6 +66,7 @@ fn assert_golden(name: &str) {
         )
     });
     if actual != expected {
+        // Pretty diff for triage.
         panic!(
             "golden mismatch for {} (x86_64).\n--- expected ---\n{}\n--- actual ---\n{}\n",
             name, expected, actual
