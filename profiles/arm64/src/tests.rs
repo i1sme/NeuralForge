@@ -1771,7 +1771,7 @@ fn inspect_pure_linear_model_is_leaf() {
 }
 
 #[test]
-fn inspect_pre_pass_relu_uses_alias_placement() {
+fn inspect_pre_pass_dropout_uses_alias_placement() {
     use compiler::{NodeKind, StdOp};
     use profile_api::{BufferLoc, Profile};
 
