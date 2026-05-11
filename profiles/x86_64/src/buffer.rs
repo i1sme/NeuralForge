@@ -5,30 +5,11 @@
 //! Pure analyzers over `UirModel`. No asm emission. Mirrors the structure
 //! of `profiles/arm64/src/buffer.rs` modulo register-naming differences.
 
-use compiler::{NodeId, NodeKind, StdOp, UirModel};
+use compiler::{NodeKind, StdOp, UirModel};
+pub use profile_api::BufferLoc;
 
 /// Bytes per f32 element. f32-only project-wide.
 const BYTES_PER_ELEMENT: usize = 4;
-
-/// Where an Op-node's output buffer lives at run time.
-///
-/// `InputReg(idx)` carries the input's position in `model.inputs`
-/// (M12+). The codegen profile maps `idx` → ABI register via
-/// `AbiContext::input_reg`. For N=1 this is always `0` (= `%rdi`),
-/// preserving M3-M11 behaviour.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BufferLoc {
-    /// Input pointer at `model.inputs[idx]`. Mapped to a SysV arg
-    /// register by `AbiContext::input_reg(idx)`.
-    InputReg(usize),
-    /// Output pointer (the FFI register at `INPUT_REGS[n_inputs + 1]`).
-    OutputReg,
-    /// Stack slot at `[%rsp + offset]`.
-    StackOffset(usize),
-    /// This buffer is an alias for another node's buffer. Resolved by
-    /// `codegen::resolve_loc` before any emit.
-    Alias(NodeId),
-}
 
 /// Result of buffer assignment.
 #[derive(Debug, Clone)]

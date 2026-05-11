@@ -5,24 +5,11 @@
 //! Pure analyzers over `UirModel`. No asm emission. Consumed by `codegen.rs`
 //! in Task 3.
 
-use compiler::{NodeId, NodeKind, StdOp, UirModel};
+use compiler::{NodeKind, StdOp, UirModel};
+pub use profile_api::BufferLoc;
 
 /// Bytes per f32 element. M4b is f32-only project-wide. M5+ may parameterise.
 const BYTES_PER_ELEMENT: usize = 4;
-
-/// Where an Op-node's output buffer lives at run time.
-///
-/// `InputReg(idx)` carries the input's position in `model.inputs`
-/// (M12+). The codegen profile maps `idx` → ABI register via
-/// `AbiContext::input_reg`. For N=1 this is always `0` (= `x0`),
-/// preserving M3-M11 behaviour.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BufferLoc {
-    InputReg(usize),
-    OutputReg,
-    StackOffset(usize),
-    Alias(NodeId),
-}
 
 /// Result of buffer assignment.
 #[derive(Debug, Clone)]

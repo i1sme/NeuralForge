@@ -10,6 +10,26 @@ use compiler::ast::Span;
 use compiler::ir::types::Uir;
 use compiler::NodeId;
 
+/// Where an Op-node's output buffer lives at run time.
+///
+/// `InputReg(idx)` carries the input's position in `model.inputs`
+/// (M12+). The codegen profile maps `idx` → ABI register via
+/// `AbiContext::input_reg`. For N=1 this is always `0` (= `x0` on
+/// arm64, `%rdi` on x86_64), preserving M3-M11 single-input behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BufferLoc {
+    /// Input pointer at `model.inputs[idx]`. Mapped to a profile arg
+    /// register by `AbiContext::input_reg(idx)`.
+    InputReg(usize),
+    /// Output pointer (the FFI register at `INPUT_REGS[n_inputs + 1]`).
+    OutputReg,
+    /// Stack slot at `[sp + offset]` (arm64) or `[%rsp + offset]` (x86_64).
+    StackOffset(usize),
+    /// This buffer is an alias for another node's buffer. Resolved by
+    /// `codegen::resolve_loc` before any emit.
+    Alias(NodeId),
+}
+
 /// Generated assembly source plus per-function metadata.
 #[derive(Debug, Clone)]
 pub struct Asm {
