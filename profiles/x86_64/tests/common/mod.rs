@@ -32,7 +32,6 @@ pub fn compile_to_so(asm_source: &str, name: &str) -> PathBuf {
         .args(["-shared", "-fPIC", "-o"])
         .arg(&so_path)
         .arg(&s_path)
-        .args(["-lm"])
         .status()
         .expect("cc invocation failed");
     assert!(
