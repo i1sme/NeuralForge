@@ -1831,3 +1831,23 @@ fn inspect_linear_with_bias_reports_correct_params() {
     // K=4, N=8, bias=true → 4*8 + 8 = 40 floats
     assert_eq!(f.nodes[linear_idx].params_floats, Some(40));
 }
+
+// ── M17 Task 3: arm64 exp constant pool ─────────────────────────────────────
+
+#[test]
+fn softmax_model_emits_local_exp_pool() {
+    let src = "model S [batch=2, k=3]:\n    x: Tensor[batch, k]\n    x -> softmax\n";
+    let uir = compiler::ir::build(&compiler::parse(src).unwrap()).unwrap();
+    let asm = crate::lower(&uir).unwrap().source;
+    assert!(
+        asm.contains(".section __TEXT,__const"),
+        "no const pool:\n{asm}"
+    );
+    assert!(asm.contains(".Lexp_log2e:"), "no log2e constant:\n{asm}");
+    assert!(asm.contains(".Lexp_c7:"), "no c7 constant:\n{asm}");
+    assert_eq!(
+        asm.matches(".Lexp_log2e:").count(),
+        1,
+        "pool must be unique per file"
+    );
+}

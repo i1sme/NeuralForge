@@ -158,3 +158,17 @@ _nfl_forward_Commented:
     ldp     x19, x20, [sp], #16
     ret
 
+
+.section __TEXT,__const
+.p2align 2
+.Lexp_log2e: .long 0x3fb8aa3b
+.Lexp_ln2hi: .long 0x3f318000
+.Lexp_ln2lo: .long 0xb95e8083
+.Lexp_c0: .long 0x3f800000
+.Lexp_c1: .long 0x3f800000
+.Lexp_c2: .long 0x3f000000
+.Lexp_c3: .long 0x3e2aaaab
+.Lexp_c4: .long 0x3d2aaaab
+.Lexp_c5: .long 0x3c088889
+.Lexp_c6: .long 0x3ab60b61
+.Lexp_c7: .long 0x39500d01
