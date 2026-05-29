@@ -4,6 +4,7 @@
 
 pub mod add;
 pub mod dropout;
+pub mod exp; // M17
 pub mod layernorm; // M14
 pub mod linear;
 pub mod matmul;
@@ -13,6 +14,7 @@ pub mod softmax;
 
 pub use add::emit_add;
 pub use dropout::emit_dropout_copy;
+pub use exp::exp_pool_x86_64; // M17
 pub use layernorm::emit_layernorm; // M14
 pub use linear::emit_linear;
 pub use matmul::emit_matmul;

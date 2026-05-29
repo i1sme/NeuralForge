@@ -23,6 +23,15 @@ pub fn walk_uir(uir: &Uir, sym_prefix: &'static str) -> Result<Asm, LowerError> 
         functions.push(sig);
     }
 
+    // M17: emit the file-local .rodata pool once per assembly file when any
+    // model has softmax (standalone StdOp::Softmax or fused PostOp::SoftmaxRow).
+    // The pool is appended after all models; its labels are harmlessly
+    // unreferenced until Task 8 lands emit_exp_inline.
+    if uir.has_softmax() {
+        source.push('\n');
+        source.push_str(&crate::ops::exp_pool_x86_64());
+    }
+
     // ELF-only directive: opt out of an executable stack. Without this,
     // gas/ld emit "missing .note.GNU-stack section implies executable
     // stack" warnings, and modern hardened glibc/loader stacks treat the

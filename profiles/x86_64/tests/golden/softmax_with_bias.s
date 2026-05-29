@@ -188,4 +188,18 @@ nfl_forward_SoftmaxWithBias:
     retq
 
 
+.section .rodata
+.align 4
+.Lexp_log2e: .long 0x3fb8aa3b
+.Lexp_ln2hi: .long 0x3f318000
+.Lexp_ln2lo: .long 0xb95e8083
+.Lexp_c0: .long 0x3f800000
+.Lexp_c1: .long 0x3f800000
+.Lexp_c2: .long 0x3f000000
+.Lexp_c3: .long 0x3e2aaaab
+.Lexp_c4: .long 0x3d2aaaab
+.Lexp_c5: .long 0x3c088889
+.Lexp_c6: .long 0x3ab60b61
+.Lexp_c7: .long 0x39500d01
+
 .section .note.GNU-stack,"",@progbits
