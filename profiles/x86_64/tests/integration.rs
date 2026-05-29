@@ -1936,7 +1936,7 @@ fn softmax_only_ffi_bit_exact_vs_exp_ref() {
     let so_path = common::compile_to_so(&asm.source, "softmax_only_bit_exact");
 
     let input = deterministic_input(TOTAL);
-    let params = vec![0.0f32; 1]; // non-empty dummy; never dereferenced
+    let params = [0.0f32; 1]; // non-empty dummy; never dereferenced
     let mut output = vec![0.0f32; TOTAL];
 
     unsafe {
@@ -1983,7 +1983,7 @@ fn softmax_only_ffi_underflow_clamp_agrees_with_libm() {
     for v in input.iter_mut().take(8).skip(1) {
         *v = -120.0_f32;
     }
-    let params = vec![0.0f32; 1]; // non-empty dummy; never dereferenced
+    let params = [0.0f32; 1]; // non-empty dummy; never dereferenced
     let mut output = vec![0.0f32; 32];
 
     unsafe {
