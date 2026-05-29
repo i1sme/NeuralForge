@@ -191,9 +191,16 @@ when a file contains multiple softmax-bearing models.
 Inline-immediate materialisation (`movz`/`movk` + `fmov` per constant per
 element) was rejected: ~30 extra instructions per element would likely make
 M17 *slower* than the libm call it removes — a regression merged for the sake
-of bare-metal, which is not worth merging. The `.rodata` pool is the standard
-mechanism on both ISAs and is orthogonal to register layout (so it does not
-disturb the M17/M18 boundary).
+of bare-metal, which is not worth merging. The `.rodata` pool is standard on
+both ISAs and orthogonal to register layout (so it does not disturb the M17/M18
+boundary).
+
+**Correction found during plan synthesis:** the pool is *pre-existing* on
+x86_64 — `emit_layernorm` already emits a `.section .rodata` pool with
+`.L`-local labels (`profiles/x86_64/src/ops/layernorm.rs`) — but *new* on arm64,
+whose `emit_layernorm` materialises its 3 constants inline via `movz`/`movk`/
+`fmov` (`profiles/arm64/src/ops/layernorm.rs`). M17 therefore introduces a
+Mach-O `.section __TEXT,__const` pool for arm64, referenced via `adrp`/`ldr`.
 
 ### 3.4 FFI save/restore and recompute — retained, repurposed
 
@@ -278,14 +285,15 @@ port uses separate `*`/`+`/`-`:
 - **x86_64** port: separate `*` then `−`/`+` for reduction and Horner (SSE2 has
   no scalar FMA).
 
-The existing softmax FFI integration tests swap their reference's exponential
-from libm `f32::exp` to `exp_ref`, keeping the `to_bits()` bit-exact
-comparison. Result: asm softmax output is pinned bit-for-bit to a Rust
-expression a reviewer can audit.
-
-> **Plan-time check:** confirm whether the current softmax FFI tests already
-> compare bit-exact (`to_bits()`) or use a tolerance. If tolerance, layer 1
-> additionally *tightens* them to bit-exact (consistent with the M15 culture).
+**Correction found during plan synthesis:** the current softmax FFI tests are
+tolerance-based (`abs() < 1e-4`, row-sum ≈ 1) — there is no libm-`f32::exp`
+reference to "swap." Layer 1 is therefore a **new** bit-exact FFI test, anchored
+on a new isolated fixture `tests/fixtures/softmax_only.nfl` (`input → softmax`,
+no surrounding ops), so the asm output equals `softmax_ref` — a reference
+softmax composing sequential max/sub/sum/div with `exp_ref` — bit-for-bit via
+`to_bits()`. The isolated fixture pins exactly the changed code; the existing
+tolerance tests stay as complementary coverage. (This refines §6.3's original
+"no new fixture" stance.)
 
 ### 5.2 Layer 2 — `exp_ref` vs libm, ≤ 1 ulp
 
@@ -333,12 +341,14 @@ in the output.
 
 ### 6.3 FFI — underflow-clamp runtime evidence
 
-No new NFL fixture: existing softmax-bearing fixtures (`classifier`,
-`self_attention`, `softmax_with_bias`) cover the emitter. To exercise the
-`z ≤ −127` clamp at runtime, **extend the input data** of one existing softmax
-FFI test with a row whose logit spread drives `x − row_max` far negative, and
-assert flush-to-`0` agreement with the libm reference there (where libm also
-underflows).
+**Correction found during plan synthesis** (refines the original "no new
+fixture" stance): M17 adds one small fixture, `tests/fixtures/softmax_only.nfl`
+(`input → softmax`), introduced for the layer-1 bit-exact test (§5.1). The clamp
+test **reuses** it with a wide-logit-spread input row that drives `x − row_max`
+far negative (`z < −127`), asserting flush-to-`0` (and that the row still sums
+to 1). No *other* new fixture is needed — the existing softmax-bearing fixtures
+(`classifier`, `self_attention`, `softmax_with_bias`) continue to cover the
+emitter via their tolerance tests.
 
 ### 6.4 Accuracy sweep
 
