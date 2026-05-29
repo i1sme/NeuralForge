@@ -52,8 +52,9 @@ impl AbiContext {
 
     /// All ABI-argument registers in use by this function. Equals
     /// `INPUT_REGS[..n_inputs + 2]`. This is the conservative
-    /// caller-saved set we spill across any FFI call (`call expf@PLT`
-    /// today; generalises to any future external call).
+    /// caller-saved set we spill across the inline exp's scratch usage
+    /// (M17 — the exp helper clobbers caller-saved %eax/%ecx/%edx/%xmm1-5;
+    /// the FFI save/restore block is retained in M17, removed in M18).
     pub fn ffi_save_set(&self) -> &[&'static str] {
         &INPUT_REGS[..self.n_inputs + 2]
     }

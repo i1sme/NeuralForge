@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Softmax (per-row stable, libm expf via PLT) codegen — x86_64 SSE2.
+//! Softmax (per-row stable, inline bare-metal exp M17) codegen — x86_64 SSE2.
 
 use crate::abi::AbiContext;
 use crate::asm::emit_imm32_to_r10;

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Softmax (per-row stable, inline exp M17) codegen.
+//! Softmax (per-row stable, inline bare-metal exp M17) codegen.
 
 use crate::abi::AbiContext;
 use crate::asm::emit_imm32;
@@ -12,32 +12,31 @@ use crate::buffer::BufferLoc;
 /// all models emitted into a single assembly file (multi-model fixtures like
 /// `pipeline_styles.nfl` would otherwise collide on `.Lsm_i_0` etc.).
 ///
-/// Uses `bl _expf` (libm). State across the call is held in callee-saved
-/// registers so that `_expf` cannot clobber it:
+/// **M17: exp is inlined** (Cody-Waite range reduction → degree-7 Taylor
+/// Horner → 2^z bit-trick + branchless underflow clamp). No `bl _expf`.
+/// Loop state is held in callee-saved registers so the inline exp body's
+/// scratch usage (x9/w11/w12/s1-s5) cannot clobber it:
 ///   x19 = i (outer row counter)
 ///   x20 = row base = i * k (element index)
 ///   x21 = j (inner column counter)
 ///   x22 = src base pointer
 ///   x23 = dst base pointer
 /// x6 (element offset = x20 + x21) is recomputed each iteration — it is
-/// scratch and need not survive the call.
+/// scratch and need not survive the inline exp.
 ///
 /// Callee-saved s8 (per-row max) and s9 (per-row sum) are handled by the
 /// function-level prologue via `compute_callee_saved` / `d8_d9` in RegSet.
 /// The function-level prologue also saves x19-x23 when `x19_x23` is set.
 ///
-/// FFI register preservation (M12): `bl _expf` is a function call which
-/// per AAPCS64 clobbers caller-saved regs x0-x18. Any downstream emitter
-/// reading from an ABI argument register (input/params/output) via
-/// `abi.materialise_ptr` would see garbage. Spec §5.4 + §6: any emitter
-/// that clobbers an ABI register that a follow-up emitter reads must
-/// save/restore. Self-attention exercises this: matmul → softmax →
-/// matmul where the second matmul reads input(s) and output via
-/// `abi.materialise_ptr`. We use `abi.emit_ffi_save` / `emit_ffi_restore`
-/// to spill the entire `ffi_save_set()` (= INPUT_REGS[..N+2]) onto the
-/// stack so the full AArch64 ABI register state survives. For N=1 this
-/// emits the same `stp x0, x1` + `stp x2, xzr` pair the M11 hand-written
-/// block produced (bit-identical).
+/// **FFI register preservation (M12, retained in M17):** `abi.emit_ffi_save`
+/// / `emit_ffi_restore` spill the entire `ffi_save_set()` (= INPUT_REGS[..N+2])
+/// onto the stack so the AArch64 ABI register state survives across the
+/// inline exp's scratch usage (the inline exp clobbers x9/w11/w12/s1-s5
+/// which are caller-saved; the FFI save protects the actual input/params/
+/// output pointers for downstream emitters). Self-attention exercises this:
+/// matmul → softmax → matmul where the second matmul reads input(s) and
+/// output via `abi.materialise_ptr`. The save/restore block is retained as-is
+/// in M17; its removal is deferred to M18 (softmax leaf-cleanup).
 #[allow(clippy::too_many_arguments)]
 pub fn emit_softmax(
     abi: &AbiContext,
@@ -55,7 +54,8 @@ pub fn emit_softmax(
         "    ; softmax (3-pass): input [{b},{k}] -> output [{b},{k}]\n"
     ));
 
-    // Materialise src/dst into callee-saved x22/x23 so they survive bl _expf.
+    // Materialise src/dst into callee-saved x22/x23 so they survive the
+    // inline exp's scratch usage (M17; FFI save retained, removed in M18).
     // MUST happen before the FFI-reg spill below: `materialise_ptr` for any
     // `BufferLoc::StackOffset(off)` emits `add x22, sp, #off` against the
     // current sp. Spilling first would shift sp and corrupt the offset.
@@ -63,7 +63,8 @@ pub fn emit_softmax(
     abi.materialise_ptr(dst_loc, "x23", &mut s);
 
     // Spill the full ABI argument set (inputs + params + output) so they
-    // survive bl _expf. Arity-aware via AbiContext (spec §5.4, §6.1).
+    // survive the inline exp's scratch usage. Arity-aware via AbiContext
+    // (spec §5.4, §6.1). Retained in M17; removed in M18.
     abi.emit_ffi_save(&mut s);
 
     // Outer per-row loop: x19 = i.
@@ -95,7 +96,8 @@ pub fn emit_softmax(
 
     // Pass 2: exp(x - max) -> output, accumulate sum into s9.
     // All live state (x19, x20, x21, x22, x23, s8, s9) is in callee-saved
-    // registers, so bl _expf cannot clobber it per AAPCS64.
+    // registers — the inline exp's scratch (x9/w11/w12/s1-s5) does not
+    // touch the callee-saved set.
     s.push_str("    fmov    s9, wzr\n");
     s.push_str("    mov     x21, #0\n");
     s.push_str(&format!(".Lsm_exp_{sid}:\n"));

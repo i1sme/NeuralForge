@@ -89,10 +89,10 @@
 //! by the matmul body for base-pointer storage — a different role, but
 //! the same register names happen to apply.
 //!
-//! Cross-FFI register preservation (e.g. across `call expf@PLT` in a
-//! softmax that follows matmul) is now handled by `AbiContext::
-//! emit_ffi_save` / `emit_ffi_restore` in `emit_softmax`, arity-aware
-//! via the spec §6 invariants.
+//! Cross-exp-scratch preservation (e.g. across the inline exp in a
+//! softmax that follows matmul) is handled by `AbiContext::
+//! emit_ffi_save` / `emit_ffi_restore` in `emit_softmax` (retained
+//! in M17; removed in M18), arity-aware via the spec §6 invariants.
 //!
 //! Verified by `emit_matmul_body_contains_zero_pushq` unit test
 //! (matmul body emits zero `pushq` instructions; the function-level

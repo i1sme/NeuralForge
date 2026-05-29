@@ -1,10 +1,10 @@
 # `arm64` Profile — AArch64 Scalar Codegen
 
-> **Status:** M14 complete (LayerNorm + affine). Lowers `linear` (with or without
+> **Status:** M17 complete (bare-metal inline exp). Lowers `linear` (with or without
 > `bias=true`), `relu`, `dropout` (no-op pass-through at inference, or
 > explicit copy-loop when dropout IS model output — see §M8),
-> `softmax` (numerically stable 3-pass via libm `expf`, generalised to
-> rank ≥ 2 in M10), `linear → softmax` fused via `PostOp::SoftmaxRow`,
+> `softmax` (numerically stable 3-pass, inline bare-metal exp — Cody-Waite
+> + degree-7 Taylor, no libm; generalised to rank ≥ 2 in M10), `linear → softmax` fused via `PostOp::SoftmaxRow`,
 > the two M10 attention-pattern ops `matmul` (multi-dim, optional
 > `transpose_b`) and `mul_scalar` (scalar pre-load + flat loop),
 > `add` (elementwise tensor addition, M13), and `layernorm` (3-pass
@@ -51,8 +51,10 @@ void nfl_forward_<ModelName>(
 ```
 
 Standard AAPCS64: pointers in `x0`, `x1`, `x2`. Function may be leaf (no
-`bl`) or non-leaf (softmax → `bl _expf`); the prologue/epilogue is built
-conditionally per model based on which ops are present.
+frame) or non-leaf (softmax — conservatively non-leaf in M17 because the
+loop holds state in callee-saved registers; precise leaf reclassification
+is M18); the prologue/epilogue is built conditionally per model based on
+which ops are present.
 
 The symbol name in the asm is `_nfl_forward_<ModelName>` (Mach-O underscore
 prefix). C / FFI callers pass the underscore-less name to `dlsym`; the
@@ -116,7 +118,7 @@ downstream `match` consumers.
 | `Linear` (`bias=true`)     | ✅        | Matmul + per-output bias-add inline. With `fused_post_ops: [Relu]` (default-pipeline output of `linear[bias=true] → relu`): bias-add then inline `fmax` then store — see §4.9. |
 | `Relu`                     | ✅        | Standalone (only in `--no-passes` mode, or `--passes` filter excluding `fuse_linear_relu`): separate elementwise loop, copy-with-clamp src→dst (§4.2). Default mode: fused into preceding Linear via `FuseLinearRelu` UIR pass — see §4.9. |
 | `Dropout`                  | ✅        | Standalone (only in `--no-passes` mode, or `--passes` filter excluding `eliminate_dropout`): no asm, `BufferLoc::Alias(operand)` propagation (§4.5). Default mode: removed from UIR by `EliminateDropout` UIR pass before reaching the profile. |
-| `Softmax`                  | ✅        | Numerically stable 3-pass (max → exp → normalise), `bl _expf` from libm. With `--no-passes` or `--passes` filter excluding `fuse_linear_softmax`: emitted as a standalone function via `emit_softmax` (labels `.Lsm_*`; see §4.4). Default pipeline (M6+): fused into the preceding Linear's `emit_linear` via `PostOp::SoftmaxRow` (row-wise tail; labels `.Lfsmx_*`; see §4.10). |
+| `Softmax`                  | ✅        | Numerically stable 3-pass (max → inline-exp → normalise), inline bare-metal exp (M17: no `bl _expf`). With `--no-passes` or `--passes` filter excluding `fuse_linear_softmax`: emitted as a standalone function via `emit_softmax` (labels `.Lsm_*`; see §4.4). Default pipeline (M6+): fused into the preceding Linear's `emit_linear` via `PostOp::SoftmaxRow` (row-wise tail; labels `.Lfsmx_*`; see §4.10). |
 | `Add`                      | ✅        | Flat elementwise loop (M13). See §M13 ops. |
 | `LayerNorm` (no `affine`)  | ✅        | 3-pass per-row: mean → variance + inv_std → normalize. Native `fsqrt`. Leaf (M14). See §M14 ops. |
 | `LayerNorm` (`affine=true`) | ✅       | 3-pass + per-element γ/β affine transform. `s_b` reuses `s2` (see §M14 ops). |
@@ -230,12 +232,12 @@ After the k-loop accumulates `s0 = sum`, before the output store:
 `bias_offset.is_some()`. Bias offset is looked up from `sig.params_layout`
 by the dispatcher in `walk_model`.
 
-### 4.4 Softmax (per-row 3-pass, libm `expf`)
+### 4.4 Softmax (per-row 3-pass, inline bare-metal exp — M17)
 
 Per row `i`, three passes over `K` elements:
 
 1. **Max scan:** `s8 = max(row)`, initialised to `-inf`.
-2. **Exp + sum:** for each `k`, `output[i,k] = expf(input[i,k] - s8)` and
+2. **Exp + sum:** for each `k`, `output[i,k] = inline_exp(input[i,k] - s8)` and
    `s9 += output[i,k]`.
 3. **Normalize:** for each `k`, `output[i,k] /= s9`.
 
@@ -243,12 +245,63 @@ Per row `i`, three passes over `K` elements:
 64 bits of `v8`/`v9`). Function prologue saves `d8`/`d9` when
 `compute_callee_saved` returns `RegSet { d8_d9: true }`.
 
-**Caller-saved x-registers across `bl _expf`.** Per AAPCS64, `x0..x18` are
-caller-saved and may be clobbered by `_expf`. Loop state that must survive
-the call (`i`, `row_base`, `k`, `src` pointer, `dst` pointer) lives in
-callee-saved `x19`..`x23`. The element offset (`x6`) is recomputed after
-each call. The function prologue saves `x19`..`x23` when `RegSet.x19_x23`
-is set (true iff softmax is present in the model).
+**Inline exp algorithm (M17).** No `bl _expf` — the exponentiation is
+inlined via `emit_exp_inline()` from `ops/exp.rs`:
+
+1. **Cody-Waite range reduction:** `z = round_ties_even(x · LOG2E)` via
+   `fcvtns`; `zf = scvtf(z)`; `r = (x − zf·LN2_HI) − zf·LN2_LO` via two
+   `fmsub` (fused, single rounding each).
+2. **Degree-7 Taylor Horner:** `p = C7; p = p*r + C6; ...; p = p*r + C0`
+   (7× `fmadd`). Coefficients `1/k!` are loaded from the file-local
+   `.section __TEXT,__const` pool (see §4.4.1).
+3. **`2^z` reconstruction:** `bits = (z+127) << 23` via `add`/`lsl`;
+   `pow = fmov(bits → f32)`. Branchless underflow clamp: if `z+127 ≤ 0`
+   then `pow = 0.0` (via `csel wzr`). Result: `s0 = p * pow`.
+
+**Scratch contract.** `emit_exp_inline` uses: `x9` (pool base), `w11`
+(z), `w12` (pow bits), `s1`–`s5` (FP temps). All are caller-saved and
+non-loop-live. The inline helper does NOT touch the softmax loop's
+callee-saved state (`x19`–`x23`, `s8`, `s9`).
+
+**Loop state in callee-saved registers.** The loop state (`i`, `row_base`,
+`k`, `src` pointer, `dst` pointer) lives in `x19`–`x23` because the inline
+exp body clobbers caller-saved registers. The element offset (`x6`) is
+recomputed after each call. The function prologue saves `x19`–`x23` when
+`RegSet.x19_x23` is set (true iff softmax is present in the model).
+
+**FFI save/restore (retained in M17).** `abi.emit_ffi_save` /
+`emit_ffi_restore` spill the ABI argument registers (inputs + params +
+output pointers) across the inline exp's scratch usage so downstream
+emitters can re-materialise pointers. The spill block is RETAINED
+unchanged in M17; its removal (along with the callee-saved prologue
+contribution) is **M18** (softmax leaf-cleanup).
+
+#### 4.4.1 File-local `.section __TEXT,__const` pool
+
+The 11 `f32` constants (3 reduction + 8 Taylor coefficients) are emitted
+once per assembly file from `walk_uir` when `uir.has_softmax()`, under
+file-local `.L`-prefixed labels:
+
+```asm
+.section __TEXT,__const
+.p2align 2
+.Lexp_log2e: .long 0x3fb8aa3b    ; LOG2E = log2(e)
+.Lexp_ln2hi: .long 0x3f318000    ; LN2_HI (exactly representable)
+.Lexp_ln2lo: .long 0xb91de9e6    ; LN2_LO (two-part split for cancellation)
+.Lexp_c0:    .long 0x3f800000    ; C0 = 1.0
+.Lexp_c1:    .long 0x3f800000    ; C1 = 1.0
+.Lexp_c2:    .long 0x3f000000    ; C2 = 0.5
+.Lexp_c3:    .long 0x3e2aaaab    ; C3 = 1/6
+.Lexp_c4:    .long 0x3d2aaaab    ; C4 = 1/24
+.Lexp_c5:    .long 0x3c088889    ; C5 = 1/120
+.Lexp_c6:    .long 0x3ab60b61    ; C6 = 1/720
+.Lexp_c7:    .long 0x39500d01    ; C7 = 1/5040
+```
+
+File-local labels do not collide when linking multiple NeuralForge object
+files together. The pool is emitted once regardless of how many softmax
+models appear in the file (the guard is at the `walk_uir` level). Constants
+are loaded via `adrp`/`ldr` with `@PAGE`/`@PAGEOFF` relocations.
 
 **`-inf` materialisation.** `fmov sN, #-inf` is invalid (8-bit FP-immediate
 encoding doesn't include ±inf). The portable pattern is to load the bit
@@ -418,12 +471,14 @@ start of the softmax i-loop; the output buffer is touched in-place throughout.
 
 **ABI notes.**
 - `compute_is_leaf` returns `false` (i.e., `LeafKind::NonLeaf`) for any model
-  containing `PostOp::SoftmaxRow` in `fused_post_ops`, because Phase 3 emits
-  `bl _expf`.
+  containing `PostOp::SoftmaxRow` in `fused_post_ops`. Conservative in M17:
+  the inline exp no longer emits `bl _expf`, but the loop still holds state
+  in callee-saved registers and a non-leaf frame. Precise leaf reclassification
+  is **M18**.
 - `compute_callee_saved` requests `{ d8_d9: true, x19_x23: true }` — same
   as standalone `softmax`.
-- `x6` (element offset, caller-saved) is recomputed after each `bl _expf`
-  call because `_expf` may clobber all caller-saved registers (`x0..x18`).
+- `x6` (element offset, caller-saved) is recomputed after each `emit_exp_inline`
+  call because the helper clobbers caller-saved registers (`x9/w11/w12/s1-s5`).
 
 **Memory access per row.**
 The dst buffer is accessed 6 times per row element across the four phases:
@@ -493,8 +548,11 @@ maximum:
     add     x6, x20, x21
     ldr     s0, [x22, x6, lsl #2]
     fsub    s0, s0, s8
-    bl      _expf                  ; clobbers x0..x18, s0..s7
-    add     x6, x20, x21          ; x6 is caller-saved; recompute after bl
+    ; --- inline exp(x), x<=0 (M17) ---   ; (see ops/exp.rs emit_exp_inline)
+    ; ... Cody-Waite reduction + degree-7 Horner + 2^z bit-trick ...
+    ; clobbers x9/w11/w12/s1-s5 (non-loop-live caller-saved)
+    ; --- end inline exp ---
+    add     x6, x20, x21          ; x6 is caller-saved; recompute after inline exp
     str     s0, [x23, x6, lsl #2]
     fadd    s9, s9, s0
     add     x21, x21, #1
@@ -559,13 +617,19 @@ parser/IR errors. For `BuildErrorKind::DuplicateModelName` the helper also
 emits a trailing `note: previously defined at <file>:<line>:<col>`
 plain-text line.
 
-### 5.5. Runtime dependency: libm
+### 5.5. Runtime dependency: libm (removed in M17)
 
-The softmax codegen emits `bl _expf`, which resolves to libm's `expf`
-symbol at link time. On macOS and Linux, `cc` links libm by default. Bare-
-metal targets without libm need a separate profile (M7+) — Taylor-series
-`exp` implementation is reserved for that profile. The `arm64` profile
-assumes POSIX with libm.
+**M17: softmax no longer calls libm.** The `bl _expf` instruction was
+replaced by `emit_exp_inline()` — a Cody-Waite + degree-7 Taylor
+polynomial inlined directly at each exp site. The constant pool lives in
+`.section __TEXT,__const` (see §4.4.1). No external symbol is referenced
+and no `-lm` link flag is needed. A compiled arm64 softmax binary is now
+genuinely bare-metal.
+
+The FFI save/restore block and the callee-saved prologue contribution are
+RETAINED in M17 — their removal is deferred to **M18** (softmax
+leaf-cleanup), which will also flip `compute_is_leaf` to `true` for
+softmax models and update the inspect goldens.
 
 ---
 
@@ -617,8 +681,8 @@ To add a new profile (e.g. `x86_64`, `riscv64`):
 - **No matmul tiling / cache blocking.** Three-nested-loop matmul;
   `mul` for indexing; per-element load/store. Performance optimisation
   is M7+.
-- **`bl _expf` per softmax element.** No batched / vectorised exp.
-  M7+.
+- **No batched / vectorised exp.** The inline exp is scalar (one `s0`
+  element at a time); SIMD or batched evaluation is M7+/NEON.
 - **Two `PostOp` variants are supported by `emit_linear`: `Relu`
   (Elementwise — inline `fmax s0, s0, s4` inside the j-loop;
   see §4.9) and `SoftmaxRow` (RowWise — three sweeps after the
@@ -629,11 +693,9 @@ To add a new profile (e.g. `x86_64`, `riscv64`):
 - **Graph-level dead-op elimination is limited to `EliminateDropout`.**
   No general DCE pass. Other no-op shapes (e.g. `linear[out_dim=K] →
   linear[out_dim=N]` collapsing via matmul-of-matmul) are M7+.
-- **libm `expf` is the only `expf` source** for both standalone `softmax`
-  and `SoftmaxRow` post-op. Bare-metal targets requiring a
-  Taylor/minimax `expf` are M7+ work (spec §12 OQ-3).
-- **No bare-metal target.** Requires libm at link time. M7+ for a
-  Taylor-series-`exp`-based bare-metal profile.
+- **No softmax leaf optimization.** Softmax models are conservatively
+  classified as non-leaf in M17 (the loop still uses callee-saved regs
+  and a frame). Precise leaf reclassification is M18.
 - **Single-snippet error rendering for duplicate-model-name.** The
   `note: previously defined at` line is plain text, not a second `^`
   snippet. Multi-snippet (rustc-style) upgrade is M4c-or-later (still
@@ -674,12 +736,12 @@ movk) instead of literal-imm encoding. Two placement strategies:
   distinct registers (x10 ← b, x15 ← n, x16 ← k); stride-load movs
   reuse the hoisted regs (`mov x8, x16` etc) instead of re-
   materialising. Inner-loop cmp has zero runtime cost.
-- **Group B (bl-containing loops)**: re-materialise into x10 at
-  each loop top (after label, before cmp). `bl _expf` clobbers
-  caller-saved registers including x10, so hoisting outside the
-  loop is impossible without expanding the prologue's callee-saved
-  set (deferred). 1-2 movz/movk per iteration is < 1% overhead vs
-  the cost of `bl _expf` itself.
+- **Group B (inline-exp loops)**: re-materialise into x10 at
+  each loop top (after label, before cmp). The inline exp (M17)
+  clobbers caller-saved registers including x10, so hoisting
+  outside the loop is impossible without expanding the prologue's
+  callee-saved set (deferred to M18). 1-2 movz/movk per iteration
+  is < 1% overhead vs the cost of the exp body itself.
 
 `emit_imm32` asserts `value <= u32::MAX as usize`, providing a
 clear failure mode for hypothetical dimensions beyond 4 billion
@@ -806,7 +868,7 @@ convention.
 **Post-Group-10 codegen fix.** During M10 end-to-end FFI integration
 (commit `feb65de`, Group 10) we discovered that `emit_softmax` itself
 was clobbering `x0`/`x1`/`x2` (the FFI input/params/output registers)
-because `bl _expf` is caller-saved per AAPCS64 — caller-saved spans
+because `bl _expf` was caller-saved per AAPCS64 — caller-saved spans
 include `x0..x18`. Any downstream emitter that re-materialises from
 `InputReg`/`OutputReg` after softmax (e.g. attention's second
 `emit_matmul` reading from the same input `x` as the first) was
@@ -814,7 +876,9 @@ silently miscompiling. Fix: `emit_softmax` now spills `x0/x1/x2` via
 two `stp` pairs at function-body entry and matches with two `ldp`
 pairs at exit — same pattern as `emit_matmul`. This is the M9 lesson
 (commit `ecb69ac`, `c3ff521`) re-applied to the only standalone op
-that emits `bl`.
+that emits a call. **M17 retained this spill block** (the inline exp
+still clobbers caller-saved scratch; the block's purpose is unchanged).
+Its removal is M18.
 
 ### What is unchanged
 

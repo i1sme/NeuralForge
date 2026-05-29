@@ -114,8 +114,9 @@ pub fn assign_buffers(model: &UirModel) -> BufferAssignment {
 ///
 /// Unlike arm64, **there is no callee-saved FP register set**. All
 /// `%xmm0`-`%xmm15` are caller-saved per SysV. The fused softmax tail
-/// spills row_max / row_sum to the stack across `call expf@PLT`
-/// (see spec §7.4).
+/// spills row_max / row_sum to the stack across the inline exp's
+/// scratch usage (M17; the stack slots are retained, removed in M18
+/// — see spec §7.4).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RegSet {
     /// True iff `%rbx, %r12, %r13, %r14, %r15` are saved in the
