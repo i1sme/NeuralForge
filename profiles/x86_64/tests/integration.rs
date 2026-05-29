@@ -1701,6 +1701,26 @@ fn pre_ln_block_match_numerically() {
     drop(lib);
 }
 
+// ─── M17 exp_ref unit test (pure Rust — runs on all platforms) ───────────────
+
+#[test]
+fn exp_ref_within_one_ulp_of_libm() {
+    let ulp_diff = |a: f32, b: f32| (a.to_bits() as i64 - b.to_bits() as i64).abs();
+    let mut x = -80.0_f32;
+    while x <= 0.0 {
+        let (got, want) = (common::exp_ref(x), x.exp());
+        assert!(
+            ulp_diff(got, want) <= 1,
+            "x={x}: {} ulp",
+            ulp_diff(got, want)
+        );
+        x += 0.0009765625;
+    }
+    for &x in &[0.0_f32, -std::f32::consts::LN_2, -1.0, -10.0, -50.0] {
+        assert!(ulp_diff(common::exp_ref(x), x.exp()) <= 1, "x={x}");
+    }
+}
+
 // ─── M15 FFN integration tests ───────────────────────────────────────────────
 
 #[test]
