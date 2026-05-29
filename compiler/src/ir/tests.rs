@@ -619,25 +619,25 @@ fn display_for_node_omits_fused_when_empty() {
 }
 
 #[test]
-fn calls_extern_math_true_for_standalone_softmax() {
+fn has_softmax_true_for_standalone_softmax() {
     let src = "model M [b=2]:\n    x: Tensor[b, 4]\n    x -> softmax\n";
     let ast = crate::parse(src).expect("parse");
     let uir = crate::ir::build(&ast).expect("build");
-    assert!(uir.calls_extern_math());
-    assert!(uir.models[0].calls_extern_math());
+    assert!(uir.has_softmax());
+    assert!(uir.models[0].has_softmax());
 }
 
 #[test]
-fn calls_extern_math_false_for_linear_only() {
+fn has_softmax_false_for_linear_only() {
     let src = "model M [b=2]:\n    x: Tensor[b, 4]\n    x -> linear[2]\n";
     let ast = crate::parse(src).expect("parse");
     let uir = crate::ir::build(&ast).expect("build");
-    assert!(!uir.calls_extern_math());
-    assert!(!uir.models[0].calls_extern_math());
+    assert!(!uir.has_softmax());
+    assert!(!uir.models[0].has_softmax());
 }
 
 #[test]
-fn calls_extern_math_true_for_fused_softmax_row() {
+fn has_softmax_true_for_fused_softmax_row() {
     // After default pipeline runs, linear→softmax fuses to
     // linear with PostOp::SoftmaxRow. Predicate must follow the fusion.
     let src = "model M [b=2]:\n    x: Tensor[b, 4]\n    x -> linear[3] -> softmax\n";
@@ -656,7 +656,21 @@ fn calls_extern_math_true_for_fused_softmax_row() {
         !has_standalone_softmax,
         "fusion should have removed standalone softmax"
     );
-    assert!(fused.calls_extern_math());
+    assert!(fused.has_softmax());
+}
+
+#[test]
+fn verbose_uir_uses_has_softmax_label() {
+    use crate::ir::types::VerboseUir;
+    let src = "model S [batch=1, k=3]:\n    x: Tensor[batch, k]\n    x -> softmax\n";
+    let nfl = crate::parse(src).expect("parse");
+    let uir = crate::ir::build(&nfl).expect("build");
+    let rendered = format!("{}", VerboseUir(&uir));
+    assert!(rendered.contains("has-softmax: yes"), "got:\n{rendered}");
+    assert!(
+        !rendered.contains("calls-extern-math"),
+        "stale label:\n{rendered}"
+    );
 }
 
 #[test]
@@ -682,8 +696,8 @@ fn verbose_uir_snapshot_matches_expected_format() {
     assert!(rendered.contains("models: 1"), "missing models count");
     assert!(rendered.contains("total nodes: 3"), "missing total nodes");
     assert!(
-        rendered.contains("calls-extern-math: yes"),
-        "missing top-level extern-math line"
+        rendered.contains("has-softmax: yes"),
+        "missing top-level has-softmax line"
     );
     assert!(rendered.contains("uir-model Demo"), "missing model header");
     assert!(rendered.contains("inputs: [n0]"), "missing inputs");

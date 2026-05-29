@@ -32,7 +32,6 @@ pub fn compile_to_so(asm_source: &str, name: &str) -> PathBuf {
         .args(["-shared", "-fPIC", "-o"])
         .arg(&so_path)
         .arg(&s_path)
-        .args(["-lm"])
         .status()
         .expect("cc invocation failed");
     assert!(
@@ -122,6 +121,48 @@ pub fn reference_matmul(input: &[f32], weights: &[f32], b: usize, k: usize, n: u
         }
     }
     out
+}
+
+/// Reference f32 exp for x ≤ 0 — bit-exact match for the x86_64 inline emitter.
+/// Cody-Waite range reduction + degree-7 Taylor (Horner) + 2^z.
+///
+/// CRITICAL: SSE2 has no scalar FMA, so every multiply-accumulate is a separate
+/// `mulss`+`addss` (two roundings). This port uses separate `*` and `+`/`-` —
+/// NOT `f32::mul_add`. (Mirror of the per-profile reference_matmul split, M15.)
+///
+/// Constants are INTENTIONALLY spelled out at full double precision before
+/// truncation to f32 — they must match the emitter literals exactly.
+/// Clippy lints are suppressed so the bit-patterns are preserved as-is.
+#[allow(clippy::excessive_precision, clippy::approx_constant)]
+pub fn exp_ref(x: f32) -> f32 {
+    const LOG2E: f32 = 1.4426950408889634;
+    const LN2_HI: f32 = 0.693359375;
+    const LN2_LO: f32 = -0.00021219444005469057;
+    const C: [f32; 8] = [
+        1.0,
+        1.0,
+        0.5,
+        1.0 / 6.0,
+        1.0 / 24.0,
+        1.0 / 120.0,
+        1.0 / 720.0,
+        1.0 / 5040.0,
+    ];
+    let z = (x * LOG2E).round_ties_even() as i32; // cvtss2si: ties-even
+    let zf = z as f32;
+    let r = x - zf * LN2_HI; // two roundings (mul then sub)
+    let r = r - zf * LN2_LO;
+    let mut p = C[7];
+    for k in (0..7).rev() {
+        p = p * r + C[k]; // mul then add — two roundings
+    }
+    let zp = z + 127;
+    let pow = if zp <= 0 {
+        0.0_f32
+    } else {
+        f32::from_bits((zp as u32) << 23)
+    };
+    p * pow
 }
 
 /// Reference bias add — broadcast `bias[n]` across `b` rows of `acc[b*n]`,

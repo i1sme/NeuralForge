@@ -70,12 +70,13 @@ NeuralForge/
 │   │   │   ├── ops/
 │   │   │   │   ├── mod.rs        ← per-op submodule entry + re-exports
 │   │   │   │   ├── add.rs        ← emit_add (elementwise tensor add, M13)
+│   │   │   │   ├── exp.rs        ← emit_exp_inline + exp_pool_arm64 (inline bare-metal exp primitive, M17)
 │   │   │   │   ├── layernorm.rs  ← emit_layernorm (3-pass mean/var/normalize, optional affine, native fsqrt; M14)
 │   │   │   │   ├── linear.rs     ← emit_linear (matmul ± bias) + materialise_ptr
 │   │   │   │   ├── matmul.rs     ← emit_matmul (rank ≥ 2, optional transpose_b, M10; scratch rework M12)
 │   │   │   │   ├── mulscalar.rs  ← emit_mulscalar (scalar pre-load + flat loop, M10)
 │   │   │   │   ├── relu.rs       ← emit_relu (elementwise copy-clamp)
-│   │   │   │   ├── softmax.rs    ← emit_softmax (3-pass + bl _expf)
+│   │   │   │   ├── softmax.rs    ← emit_softmax (3-pass, inline bare-metal exp M17 — no bl _expf)
 │   │   │   │   └── dropout.rs    ← marker (no emitter — aliasing only)
 │   │   │   └── tests.rs    ← unit tests on asm shape + analyzers
 │   │   └── tests/
@@ -84,7 +85,7 @@ NeuralForge/
 │   └── x86_64/             ← Linux ELF scalar SSE2 codegen profile, M9
 │       └── src/
 │           ├── abi.rs      ← AbiContext (SysV AMD64 variant, M12)
-│           └── ops/        ← add.rs (M13), layernorm.rs (M14; 3-pass SysV native sqrtss, op-local %r12/%r13 for affine; M15 LH-4 closed — %r15/%rbp scratch), linear.rs, matmul.rs (M10; callee-saved scratch rework M12; %rbp j-counter fix M13), mulscalar.rs (M10), relu.rs, softmax.rs, dropout.rs
+│           └── ops/        ← add.rs (M13), exp.rs (emit_exp_inline + exp_pool_x86_64, inline bare-metal exp primitive M17), layernorm.rs (M14; 3-pass SysV native sqrtss, op-local %r12/%r13 for affine; M15 LH-4 closed — %r15/%rbp scratch), linear.rs, matmul.rs (M10; callee-saved scratch rework M12; %rbp j-counter fix M13), mulscalar.rs (M10), relu.rs, softmax.rs (inline bare-metal exp M17 — no expf@PLT), dropout.rs
 │
 ├── language/
 │   ├── grammar.ebnf        ← formal NFL grammar
@@ -180,23 +181,22 @@ It knows how to map abstract operations (e.g. `matmul[A, B]`) to hardware-specif
 
 ## Current Status
 
-**Milestone 16 complete. 466 tests passing on macOS arm64 (~468 on Linux x86_64 CI — the +2 delta is the M15 x86_64-only FFI integration tests `ffn_ffi` / `transformer_block_ffi`, gated on `#[cfg(target_os = "linux")]`; the new M16 inspect goldens are pure Rust and run on both platforms).** All workspace gates clean
+**Milestone 17 complete. 472 tests passing on macOS arm64 (~476 on Linux x86_64 CI — the +4 delta is the M15 x86_64-only FFI integration tests `ffn_ffi` / `transformer_block_ffi` plus the M17 x86_64-only `softmax_only_ffi_bit_exact_vs_exp_ref` / `softmax_only_ffi_underflow_clamp_agrees_with_libm`, all gated on `#[cfg(target_os = "linux")]`; all M17 pure-Rust tests including the layer-2 ulp sweep run on both platforms).** All workspace gates clean
 (`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo fmt --all -- --check`, `cargo test --workspace`).
 
-M16 closed A3 — profile-level viewer annotations. New `nflc inspect <file.nfl> --profile <name>`
-subcommand surfaces post-pass per-node BufferLoc + footprint + params and per-model stack
-frame + callee-saved + leaf classification, packaged from the same `analyze()` preamble that
-`lower()` consumes (drift-prevention by construction). New workspace crate `inspect-render/`
-hosts the renderer. `BufferLoc` lifted from per-profile duplicates to `profile-api`. Eight
-golden-snapshot integration tests (4 fixtures × 2 profiles) anchor format stability.
+M17 closed Axis 3 first leg — bare-metal inline `expf`. Replaced libm `bl _expf` / `call expf@PLT` with
+an inlined Cody-Waite + degree-7 Taylor polynomial on both profiles (no `expf` symbol referenced;
+x86_64 `.so` links without `-lm`). New `ops/exp.rs` per profile hosts `emit_exp_inline` and the
+file-local `.rodata`/`__const` constant pool (11 f32 constants). `calls_extern_math` renamed to
+`has_softmax` (predicate describes what is detected). Two-layer validation: bit-exact asm vs Rust
+`exp_ref` + ≤ 1 ulp vs libm. Minimal-swap discipline: FFI save/restore and callee-saved prologue
+are RETAINED in M17 (removed in M18 — softmax leaf-cleanup). M16 inspect goldens are byte-identical.
 
-Strategic direction: see `PROJECT_SPEC.md` §"Strategic Roadmap" — A1 closed
-M12, A2 first brick (`add`) closed M13, A2 second brick (`layernorm`)
-closed M14, A2 third brick (FFN) closed M15, **A3 (viewer annotations) closed M16. Axis 2 fully complete.**
-Next candidates: Axis 3 — bare-metal `expf` to drop libm (now unblocked — A3 enables structural
-`--diff before.s after.s` validation post-implementation). Trigger-driven cleanup (OQ-7, OQ-8, OQ-9,
-M5c OQ-4) stays dormant. §"Known Latent Hazards" table empty as of end of M16.
+Strategic direction: see `PROJECT_SPEC.md` §"Strategic Roadmap" — A1 closed M12, A2 fully complete
+(M13/M14/M15), A3 closed M16, **Axis 3 first leg closed M17.** Next: M18 (softmax leaf-cleanup) —
+move loop state off callee-saved registers, drop FFI save/restore, flip leaf=true, update inspect
+goldens. §"Known Latent Hazards" table empty as of end of M17.
 
 ---
 

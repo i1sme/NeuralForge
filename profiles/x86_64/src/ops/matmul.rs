@@ -29,7 +29,7 @@
 //!   This profile saves `%rbp` unconditionally in the prologue (frame
 //!   pointer role); the body is free to clobber it as scratch since no
 //!   op-emitter reads `%rbp`. The other 5 are saved by the function-level
-//!   prologue when `compute_callee_saved` returns true (= `model.calls_extern_math() OR has_matmul(model)`,
+//!   prologue when `compute_callee_saved` returns true (= `model.has_softmax() OR has_matmul(model)`,
 //!   per `buffer.rs`).
 //!
 //! At N=3 the non-ABI caller-saved scratch is `%rax`, `%r10`, `%r11`,
@@ -89,10 +89,10 @@
 //! by the matmul body for base-pointer storage — a different role, but
 //! the same register names happen to apply.
 //!
-//! Cross-FFI register preservation (e.g. across `call expf@PLT` in a
-//! softmax that follows matmul) is now handled by `AbiContext::
-//! emit_ffi_save` / `emit_ffi_restore` in `emit_softmax`, arity-aware
-//! via the spec §6 invariants.
+//! Cross-exp-scratch preservation (e.g. across the inline exp in a
+//! softmax that follows matmul) is handled by `AbiContext::
+//! emit_ffi_save` / `emit_ffi_restore` in `emit_softmax` (retained
+//! in M17; removed in M18), arity-aware via the spec §6 invariants.
 //!
 //! Verified by `emit_matmul_body_contains_zero_pushq` unit test
 //! (matmul body emits zero `pushq` instructions; the function-level

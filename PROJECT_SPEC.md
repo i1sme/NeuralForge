@@ -65,8 +65,8 @@ Profiles translate UIR into assembly for a specific hardware target.
 Initial target profiles:
 | Profile     | Architecture       | Key capability              |
 |-------------|--------------------|-----------------------------|
-| `arm64`     | Apple Silicon / AArch64 POSIX | Scalar AArch64 assembly: linear (± bias), relu, dropout (no-op pass-through), softmax (libm `expf`, rank ≥ 2 since M10), matmul (rank ≥ 2, optional `transpose_b`, since M10), mul_scalar (since M10). All 5 M3 fixtures + the M10 self_attention fixture lower end-to-end. NEON / SVE / AMX in later slices. |
-| `x86_64`    | Intel / AMD (Linux ELF) | Linux ELF scalar SSE2: linear (± bias), relu, dropout, softmax (libm expf via PLT, rank ≥ 2 since M10), matmul (rank ≥ 2, optional `transpose_b`, since M10 — `mulss + addss`, no FMA), mul_scalar (since M10). Full op-parity with arm64 minus SIMD/AVX. macOS x86_64 (Mach-O) and SIMD remain open. |
+| `arm64`     | Apple Silicon / AArch64 POSIX | Scalar AArch64 assembly: linear (± bias), relu, dropout (no-op pass-through), softmax (inline bare-metal exp — Cody-Waite + degree-7 Taylor, no libm, since M17; rank ≥ 2 since M10), matmul (rank ≥ 2, optional `transpose_b`, since M10), mul_scalar (since M10). All 5 M3 fixtures + the M10 self_attention fixture lower end-to-end. NEON / SVE / AMX in later slices. |
+| `x86_64`    | Intel / AMD (Linux ELF) | Linux ELF scalar SSE2: linear (± bias), relu, dropout, softmax (inline bare-metal exp — Cody-Waite + degree-7 Taylor SSE2, no libm / no `expf@PLT`, since M17; rank ≥ 2 since M10), matmul (rank ≥ 2, optional `transpose_b`, since M10 — `mulss + addss`, no FMA), mul_scalar (since M10). Full op-parity with arm64 minus SIMD/AVX. macOS x86_64 (Mach-O) and SIMD remain open. |
 | `riscv64`   | RISC-V             | RVV vector extension (future) |
 
 A profile is a self-contained module. Adding support for a new architecture means writing a new profile — the language and compiler core remain unchanged.
@@ -167,16 +167,17 @@ NeuralForge is designed so that LLMs can write, read, and reason about NFL code 
 | 14 | A2 second brick — LayerNorm + LH-1/2/3 cleanup (complete) | LH-1/2/3 cleanup in x86_64 `emit_linear` (commit `916e9c7`): j-counter `%rcx` → `%rbp` (LH-1); src-ptr scratch `%r8` → op-local `pushq %r14` (LH-2); weight-ptr scratch `%r9` → op-local `pushq %r15` (LH-3). New `StdOp::LayerNorm` — single StdOp variant with internal 3-pass codegen (mean → variance + inv_std → normalize + optional affine). Native `fsqrt` on arm64, `sqrtss` on x86_64; no libm dependency. Affine toggle `layernorm[affine=true]` mirrors `linear[bias=true]`. `ParamKind` extended: `LayerNormScale` (γ) before `LayerNormBias` (β) — contract. arm64: leaf function, s0–s7 scratch only (s8–s15 avoided), `s_b` reuses `s2` after `s_inv_d` consumption. x86_64: op-local `pushq %r12/%r13` when affine; `compute_callee_saved` unchanged. LH-4 logged (N=3..4 %r8/%r9 reuse in x86_64 emit_layernorm, deferred). New fixtures: `layernorm_no_affine.nfl`, `layernorm_affine.nfl`, `pre_ln_block.nfl` (N=2, validates LH-1 closure end-to-end), `negative/layernorm_rank_too_low.nfl`. Test count: 400 → 441. |
 | 15 | A2 third brick — FFN compositional + LH-4 cleanup (complete) | LH-4 cleanup in x86_64 `emit_layernorm` (commit `e35dfaa`): per-row src ptr `%r8` → `%r15` (op-local pushq/popq); per-row dst ptr `%r9` → `%rbp` (function-level prologue handles). Push counts no-affine 2→3, affine 4→5. `OP_LOCAL_PUSH_BYTES_*` constants updated. 3 ABI-invariant unit tests `emit_layernorm_n{2,3,4}_does_not_clobber_output_reg`. A2 third brick: FFN as compositional NFL pattern (`linear → relu → linear`) — no new StdOp variant, no codegen changes. New fixtures `ffn.nfl` (N=1) and `transformer_block.nfl` (N=3 — exercises LH-4 condition output_reg=%r8 and validates closure via FFI on Linux x86_64 CI). Helper promotion: `reference_matmul/bias_add/relu` moved from `integration.rs` file-local to `common/mod.rs` `pub fn` per profile (isolation principle). Per-profile divergent `reference_matmul` body (arm64 `fmadd` / x86_64 `mulss+addss`). 4 new FFI integration tests with bit-exact `to_bits()` comparison. ABI audit at N=3,4: all emitters clean. Test count: 441 → 446 (macOS arm64); ~448 on Linux x86_64 CI. |
 | 16 | A3 viewer annotations (complete) | New `nflc inspect <file.nfl> --profile <name>` subcommand surfaces post-pass per-node BufferLoc + footprint + params and per-model stack frame + callee-saved + leaf classification. Architecture: per-profile `analyze()` preamble extracted from `walk_model` (Task 1), shared `Inspection`/`FnAnnotations`/`NodeAnnotation` schema in `profile-api` with `BufferLoc` lifted from per-profile duplicates (Task 2), `Profile::inspect()` trait method + per-profile impl (Task 3), new `inspect-render` workspace crate (Task 4), 8 golden-snapshot tests (Task 5), profile-guide docs (Task 6). Test count: 446 → 466. |
+| 17 | Axis 3 first leg — bare-metal inline `expf` (complete) | Replaced libm `expf` (`bl _expf` / `call expf@PLT`) with an inlined degree-7 Taylor polynomial on both profiles (Cody-Waite range reduction → Horner → 2^z bit-trick + branchless underflow clamp). New `ops/exp.rs` per profile: `emit_exp_inline` + file-local `.rodata`/`__const` constant pool (11 f32 constants, emitted once per file from `walk_uir` when `uir.has_softmax()`). `calls_extern_math()` renamed to `has_softmax()` everywhere (predicate name now describes what is detected, not the consequence). Two-layer validation: layer 1 = asm bit-exact vs Rust `exp_ref` port (per-profile FMA divergence: arm64 `mul_add`, x86_64 separate `*`/`+`); layer 2 = `exp_ref` within ≤ 1 ulp of libm over x∈[−80, 0]. x86_64 `.so` links without `-lm` (bare-metal proof). Minimal-swap discipline: FFI save/restore + callee-saved prologue RETAINED → M18 (softmax leaf-cleanup). Test count: 466 → 472 (macOS arm64; ~4 additional x86_64-only FFI tests on Linux CI). |
 
 ---
 
 ## Current Status
 
-**Milestone 16 complete. 466 tests passing on macOS arm64 (~468 on Linux x86_64 CI — the +2 delta is the M15 x86_64-only FFI integration tests `ffn_ffi` / `transformer_block_ffi`, gated on `#[cfg(target_os = "linux")]`; the new M16 inspect goldens are pure Rust and run on both platforms).** All workspace gates clean (`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, `cargo test --workspace`).
+**Milestone 17 complete. 472 tests passing on macOS arm64 (~476 on Linux x86_64 CI — the +4 delta is the M15 x86_64-only FFI integration tests `ffn_ffi` / `transformer_block_ffi` (gated on `#[cfg(target_os = "linux")]`) plus the M17 x86_64-only `softmax_only_ffi_bit_exact_vs_exp_ref` / `softmax_only_ffi_underflow_clamp_agrees_with_libm` tests; all M17 pure-Rust tests including the layer-2 ulp sweep run on both platforms).** All workspace gates clean (`cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, `cargo test --workspace`).
 
-M16 closed A3 — profile-level viewer annotations. New `nflc inspect <file.nfl> --profile <name>` subcommand surfaces post-pass per-node BufferLoc + footprint + params and per-model stack frame + callee-saved + leaf classification, packaged from the same `analyze()` preamble that `lower()` consumes (drift-prevention by construction). New workspace crate `inspect-render/` hosts the renderer. `BufferLoc` lifted from per-profile duplicates to `profile-api`. Eight golden-snapshot integration tests (4 fixtures × 2 profiles) anchor format stability.
+M17 closed Axis 3 first leg — bare-metal inline `expf`. Replaced libm `bl _expf` / `call expf@PLT` with an inlined degree-7 Taylor polynomial on both profiles (Cody-Waite range reduction → Horner → 2^z bit-trick). New `ops/exp.rs` per profile; file-local `.rodata`/`__const` constant pool; `calls_extern_math` renamed to `has_softmax`. Two-layer validation: bit-exact asm vs `exp_ref` + ≤ 1 ulp vs libm. x86_64 `.so` links without `-lm` (bare-metal proof). Minimal-swap discipline: FFI save/restore + callee-saved prologue retained → M18.
 
-Strategic direction: see §"Strategic Roadmap" — A1 closed in M12, A2 first brick (`add`) closed in M13, A2 second brick (`layernorm`) closed in M14, **A2 third brick (FFN) closed in M15 — A2 axis fully complete. A3 (viewer annotations) closed in M16.** Trigger-driven cleanup items (OQ-7, OQ-8, OQ-9, M5c OQ-4) live in §"Open Questions" / "Trigger-driven cleanup" and stay dormant. OQ-NEW closed in M9 (commit `a08fd24`). OQ-BENCH closed in M11 (commit `e7c29b8`).
+Strategic direction: see §"Strategic Roadmap" — A1 closed M12, A2 fully complete (M13/M14/M15), A3 closed M16, **Axis 3 first leg closed M17.** Next: M18 (softmax leaf-cleanup) — move loop state off callee-saved registers, drop FFI save/restore, drop callee-saved prologue contribution, flip leaf=true, update inspect goldens. Trigger-driven cleanup (OQ-7, OQ-8, OQ-9, M5c OQ-4) stays dormant. OQ-NEW closed M9, OQ-BENCH closed M11.
 
 ---
 
@@ -216,9 +217,24 @@ bare-metal expf → drop libm dependency
   annotations (`nflc inspect` subcommand, `inspect-render` crate, 8 golden
   tests). Axis 2 fully complete.** Open follow-ups: A2-extended — training
   syntax (loss/optimiser) for NFL v0.3.
-- **Axis 3 — deployment reach.** Replacing the `bl _expf` libm call with a
-  Taylor-series `expf` removes the only runtime dependency, unlocking bare-metal
-  targets.
+- **Axis 3 — deployment reach.** **M17 closed the first leg:** replacing `bl _expf` /
+  `call expf@PLT` with an inlined Cody-Waite + degree-7 Taylor polynomial removes
+  the last runtime dependency. The second leg (**M18 — softmax leaf-cleanup**) makes
+  the codegen honest and lean after inlining:
+  1. Move softmax loop state from callee-saved to caller-saved registers (safe —
+     no call to clobber them), keeping clear of ABI-argument registers.
+  2. Drop `emit_ffi_save` / `emit_ffi_restore` and the scratch recompute at the
+     softmax sites.
+  3. Remove softmax's contribution to the callee-saved prologue (arm64
+     `d8-d9`/`x19-x23`; x86_64 the softmax half of `callee_saved_int`).
+  4. Move x86_64 `row_max`/`row_sum` from stack slots into xmm registers; drop
+     the 16-byte reserve in `assign_buffers`.
+  5. Flip `compute_is_leaf` to `true` for softmax models + emit the leaner
+     leaf prologue. **This is where the M16 inspect goldens change.**
+  6. Re-evaluate whether `has_softmax()` is still needed (it may collapse if no
+     regime depends on it after the above).
+  7. Measure the bench speedup (leaf + no spills + hoisted constants) on the
+     `self_attention` fixture.
 
 ---
 
@@ -238,7 +254,7 @@ Leaving an entry here longer than one milestone is a process failure.
 | # | Location | Condition | Symptom | Opened |
 |---|----------|-----------|---------|--------|
 
-*(Table is empty as of M16 — all latent hazards closed.)*
+*(Table is empty as of M17 — no new latent hazards opened. `leaf = false` for softmax models is suboptimal-but-correct conservatism; precise reclassification is M18 deferred scope, not a bug.)*
 
 ### Trigger-driven cleanup
 Items raised during a milestone that intentionally do not get scheduled — they
@@ -255,6 +271,8 @@ activate when their trigger condition fires.
 
 - **NFL v0.1 grammar** — frozen as of M1 (`language/grammar.ebnf`). Future syntax extensions land in NFL v0.2+ as separate language milestones.
 - **Memory model** — static stack-allocated intermediate buffers, no heap. Established by M4b (`profiles/arm64::buffer.rs::assign_buffers`); applies to all v1 profiles.
+- **M17: `.rodata`/`__const` constant pool for inline exp** — The 11 f32 constants (3 Cody-Waite reduction + 8 Taylor coefficients) are stored in a file-local literal pool (`.section .rodata` on ELF, `.section __TEXT,__const` on Mach-O) emitted once per assembly file. Rejected alternatives: inline `movz/movk/fmov` immediates (~30 extra instructions per element, likely slower than libm) and a global symbol (would collide across separately-linked NeuralForge object files). The pool mechanism is pre-existing on x86_64 (layernorm uses it since M14) and new on arm64 (arm64 layernorm uses inline immediates). File-local `.L`-prefixed labels and `@PAGE`/`@PAGEOFF` (arm64) / `(%rip)` (x86_64) relocations are standard on both ISAs.
+- **M17: Two-layer accuracy contract — ≤ 1 ulp, widen LN2 split not degree** — Layer 1 anchors asm against regression: asm output is bit-exact vs a per-profile Rust `exp_ref` port (arm64 uses `f32::mul_add` for every FMA step; x86_64 uses separate `*`/`+`/`-` for SSE2's two-rounding model). Layer 2 anchors truth: `exp_ref` is swept over x∈[−80, 0] and asserted within ≤ 1 ulp of libm. If a sweep point exceeds 1 ulp, the fix is to widen the LN2 split (add a `LN2_LO2` term) — NOT to increase the polynomial degree. This was confirmed passing without widening on both platforms.
 
 ---
 

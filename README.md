@@ -72,13 +72,20 @@ design decision is recorded there with its reasoning.
 
 ## Project status
 
-**Milestone 16 complete** — A3 (profile-level viewer annotations) shipped;
-Axis 2 fully complete. `nflc inspect --profile <arm64|x86_64>` prints
-per-node footprint, BufferLoc, and params alongside per-model stack-frame,
-callee-saved set, and leaf flag. The new `inspect-render/` workspace crate
-houses the renderer; `BufferLoc` was lifted to `profile-api` in Task 2.
-8 golden tests anchor the output format. The §"Known Latent Hazards" table
-remains empty.
+**Milestone 17 complete** — Axis 3 first leg: softmax's libm `expf`
+(`bl _expf` / `call expf@PLT`) is replaced by an **inlined degree-7 Taylor
+polynomial** (Cody-Waite range reduction → Horner → `2^z` bit-trick + branchless
+underflow clamp) on both profiles, removing NeuralForge's **last runtime
+dependency** — the x86_64 `.so` now links without `-lm`. Correctness rests on a
+two-layer contract: the emitted asm is bit-exact against a Rust `exp_ref` port,
+and `exp_ref` is within **≤ 1 ulp** of libm across the softmax domain. The
+now-misnamed predicate `calls_extern_math` was renamed `has_softmax`. Per the
+minimal-swap discipline, the FFI save/restore and callee-saved prologue are
+retained for now; their removal (softmax leaf-cleanup) is the recorded **M18**
+follow-up. The §"Known Latent Hazards" table remains empty.
+
+(Prior milestone — M16: `nflc inspect --profile <arm64|x86_64>` ships
+profile-level viewer annotations; Axis 2 fully complete.)
 
 What's working today:
 
@@ -90,7 +97,7 @@ What's working today:
   lower correctly under SysV AMD64 / AAPCS64 calling conventions; all
   per-emitter scratch is non-INPUT_REGS at all supported N
 - **Stdlib operations on both profiles:** `linear` (± bias), `relu`,
-  `dropout` (no-op pass-through), `softmax` (libm `expf`, rank ≥ 2),
+  `dropout` (no-op pass-through), `softmax` (inline bare-metal exp — degree-7 Taylor, no libm, M17; rank ≥ 2),
   `matmul` (rank ≥ 2, optional `transpose_b`, M10), `mul_scalar` (M10),
   `add` (residual connections, M13), `layernorm` (3-pass mean/var/normalize,
   optional affine, native `fsqrt` / `sqrtss` — no libm dependency, M14)
@@ -104,30 +111,33 @@ What's working today:
   above; AAPCS64-clean register allocation; `fmadd` single-rounding matmul
 - **x86_64 Linux ELF scalar SSE2 code generation** (`profiles/x86_64/`):
   full op-parity with arm64; AT&T syntax; SysV AMD64 ABI; ABI-invariant
-  unit tests at N=2/3/4 for every emitter; xmm-spill strategy across
-  `call expf@PLT` (no callee-saved FP registers under SysV)
+  unit tests at N=2/3/4 for every emitter; xmm-spill strategy for softmax
+  row state (no callee-saved FP registers under SysV)
 - **UIR-pass framework** with `EliminateDropout`, `FuseLinearRelu`, and
   `FuseLinearSoftmax`
 - **CLI:** `nflc parse` (with `--uir` compact and `--uir-verbose` annotated
   rendering), `nflc compile --profile <arm64|x86_64>`, and `nflc inspect --profile <arm64|x86_64>`
 - **Bit-exact FFI integration tests** with `to_bits()` comparison
-  (M14 layernorm precedent); per-profile divergent `reference_matmul` body
-  matches each emitter's rounding semantics (arm64 `fmadd` single-rounding;
-  x86_64 `mulss + addss` two-rounding)
+  (M14 layernorm precedent); per-profile divergent `reference_matmul` /
+  `exp_ref` bodies match each emitter's rounding semantics (arm64 `fmadd`
+  single-rounding; x86_64 `mulss + addss` two-rounding). M17 adds a two-layer
+  numeric contract for the inline `exp`: asm bit-exact vs the Rust `exp_ref`
+  port, plus an `exp_ref`-vs-libm ≤ 1 ulp sweep over the softmax domain
 - **OQ-BENCH harness** (`bench/` crate, M11) — per-profile median + p95 µs
   across `classifier` / `large_classifier_k` / `self_attention` fixtures;
   CI workflow `.github/workflows/bench.yml` writes per-profile Job
   Summaries on `macos-14` (arm64) and `ubuntu-latest` (x86_64)
 - **Viewer v0.1:** `nflc parse --uir-verbose` renders annotated UIR with
   top-level and per-model summaries, and fused post-ops on indented lines
-- **466 tests passing on macOS arm64 (~468 on Linux x86_64 CI)**; CI green;
+- **472 tests passing on macOS arm64 (~476 on Linux x86_64 CI)**; CI green;
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   `cargo test --workspace` all clean
 
 Active development continues along three strategic axes — codegen breadth
 (SIMD/AVX vectorisation still open), modelling depth (A2 axis fully closed
 in M15; A3 — profile-level viewer annotations closed in M16; Axis 2 fully
-complete), and deployment reach (bare-metal `expf` to drop libm) — tracked in
+complete), and deployment reach (bare-metal inline `expf` — first leg closed in
+M17, removing the last libm dependency; M18 softmax leaf-cleanup next) — tracked in
 [`PROJECT_SPEC.md` §"Strategic Roadmap"](PROJECT_SPEC.md#strategic-roadmap).
 
 NFL training syntax (loss, optimiser) remains deferred to v0.3.

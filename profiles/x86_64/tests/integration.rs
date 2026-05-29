@@ -21,7 +21,7 @@ fn reference_softmax_stable(input: &[f32], b: usize, k: usize) -> Vec<f32> {
         let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let mut sum = 0.0f32;
         for kk in 0..k {
-            let e = (row[kk] - max).exp();
+            let e = common::exp_ref(row[kk] - max);
             out[i * k + kk] = e;
             sum += e;
         }
@@ -52,8 +52,8 @@ fn reference_linear_relu(input: &[f32; 32], params: &[f32; 8]) -> [f32; 16] {
 /// Architecture-matched x86_64 reference for SelfAttention. Uses
 /// separate `mul + add` (no FMA) to match emit_matmul x86_64's
 /// deliberate non-FMA design from M9 — intentional divergence from
-/// the arm64 reference, not a defect. `f32::exp` wraps platform libm
-/// `expf` (glibc on Linux x86_64).
+/// the arm64 reference, not a defect. `common::exp_ref` matches the
+/// M17 inline polynomial exp (replaces `f32::exp` / libm expf).
 fn reference_self_attention_x86_64(
     x: &[f32],
     batch: usize,
@@ -84,12 +84,13 @@ fn reference_self_attention_x86_64(
             }
         }
 
+        // attn = softmax(scores, last_axis) — M17: use exp_ref to match inline polynomial
         for i in 0..seq {
             let row = &scores[i * seq..(i + 1) * seq];
             let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             let mut sum = 0.0f32;
             for j in 0..seq {
-                let e = (row[j] - max).exp();
+                let e = common::exp_ref(row[j] - max);
                 attn[i * seq + j] = e;
                 sum += e;
             }
@@ -590,11 +591,15 @@ fn fused_vs_unfused_softmax_match_numerically() {
         // Asm structural validation. Note: classifier.nfl is also
         // covered by M5a's fused_vs_unfused_classifier_match_numerically,
         // which pins relu fusion (maxss %xmm4, %xmm0 + .Lrelu_). This test
-        // pins softmax fusion (.Lfsmx_ + call expf@PLT) — complementary, not
+        // pins softmax fusion (.Lfsmx_ + inline exp M17) — complementary, not
         // redundant.
         assert!(
-            fused_asm.source.contains("call    expf@PLT"),
-            "{fixture_path}: fused asm missing call expf@PLT in row-wise tail"
+            !fused_asm.source.contains("call    expf@PLT"),
+            "{fixture_path}: fused asm must not call expf@PLT after M17 inlining"
+        );
+        assert!(
+            fused_asm.source.contains(".Lexp_c7(%rip)"),
+            "{fixture_path}: fused asm missing .Lexp_c7(%rip) (inline exp range reduction)"
         );
         assert!(
             !fused_asm.source.contains(".Lsm_"),
@@ -966,9 +971,17 @@ fn fused_softmax_xmm_spill_x86_64() {
         "fused softmax tail labels missing"
     );
     assert!(
-        asm.source.contains("call    expf@PLT"),
-        "fused softmax tail must call expf@PLT"
+        !asm.source.contains("call    expf@PLT"),
+        "fused softmax tail must not call expf@PLT after M17 inlining"
     );
+    assert!(
+        asm.source.contains(".Lexp_c7(%rip)"),
+        "fused softmax tail missing .Lexp_c7(%rip) (inline exp M17)"
+    );
+    // Row_max/row_sum still live on the stack across the (now inline) exp loop:
+    // the §7.4 stack-slot mechanism is RETAINED in M17 — M18 moves it to xmm
+    // registers once the leaf cleanup lands. These spills are the point of this
+    // test ("xmm_spill") and must not regress.
     assert!(
         asm.source.contains("movss   %xmm8, (%rsp)"),
         "fused tail must spill row_max to (%rsp) [offset 0; spec §7.4]"
@@ -1024,9 +1037,9 @@ fn fused_softmax_xmm_spill_x86_64() {
 //
 // Bit-exact assertion against an architecture-matched x86_64 reference.
 // x86_64 emit_matmul uses `mulss + addss` (no FMA, two roundings);
-// reference uses separate `let prod = a*b; acc = acc + prod;`. libm expf
-// (glibc on Linux x86_64) is the same function called in both asm and
-// reference.
+// reference uses separate `let prod = a*b; acc = acc + prod;`. M17: both
+// asm and reference use the inline polynomial exp (common::exp_ref), so
+// softmax outputs are bit-exact.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1094,6 +1107,7 @@ fn self_attention_ffi_matches_reference() {
 /// Pure-Rust reference attention for x86_64: Q @ K, scale by 0.25,
 /// softmax(last-axis), then attn @ V. Uses separate mul + add (no FMA) to
 /// match x86_64 emit_matmul's deliberate non-FMA design (mulss + addss).
+/// M17: softmax uses common::exp_ref (inline polynomial) to match emitter.
 /// Shapes: Q=[B,H,S,D], K=[B,H,D,S] (transposed), V=[B,H,S,D] → out=[B,H,S,D].
 fn reference_attention_x86_64(
     q: &[f32],
@@ -1123,12 +1137,12 @@ fn reference_attention_x86_64(
                     scores[sc_off + i * s + j] = acc * 0.25;
                 }
             }
-            // softmax row-wise (stable, matching 3-pass emit_softmax).
+            // softmax row-wise (stable, matching 3-pass emit_softmax — M17: use exp_ref).
             for i in 0..s {
                 let row = &mut scores[sc_off + i * s..sc_off + (i + 1) * s];
                 let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
                 for x in row.iter_mut() {
-                    *x = (*x - max).exp();
+                    *x = common::exp_ref(*x - max);
                 }
                 let sum: f32 = row.iter().sum();
                 for x in row.iter_mut() {
@@ -1701,6 +1715,27 @@ fn pre_ln_block_match_numerically() {
     drop(lib);
 }
 
+// ─── M17 exp_ref unit test (pure Rust; this file is Linux-gated, so it runs on
+// Linux CI — the arm64 copy of this test covers macOS) ───────────────────────
+
+#[test]
+fn exp_ref_within_one_ulp_of_libm() {
+    let ulp_diff = |a: f32, b: f32| (a.to_bits() as i64 - b.to_bits() as i64).abs();
+    let mut x = -80.0_f32;
+    while x <= 0.0 {
+        let (got, want) = (common::exp_ref(x), x.exp());
+        assert!(
+            ulp_diff(got, want) <= 1,
+            "x={x}: {} ulp",
+            ulp_diff(got, want)
+        );
+        x += 0.0009765625;
+    }
+    for &x in &[0.0_f32, -std::f32::consts::LN_2, -1.0, -10.0, -50.0] {
+        assert!(ulp_diff(common::exp_ref(x), x.exp()) <= 1, "x={x}");
+    }
+}
+
 // ─── M15 FFN integration tests ───────────────────────────────────────────────
 
 #[test]
@@ -1855,4 +1890,121 @@ fn transformer_block_ffi() {
     }
 
     drop(lib);
+}
+
+// ---------------------------------------------------------------------------
+// M17 Layer-1 FFI: softmax_only fixture — bit-exact + underflow-clamp evidence.
+//
+// T.1: softmax_only_ffi_bit_exact_vs_exp_ref
+//      Compile softmax_only.nfl to a .so, run it, assert every output
+//      element matches reference_softmax_stable bit-for-bit. This is the
+//      definitive evidence that the x86_64 inline exp matches exp_ref.
+//
+// T.2: softmax_only_ffi_underflow_clamp_agrees_with_libm
+//      Feed a row with huge logit spread (x[0]=120, x[1..8]=-120) so
+//      the shifted exponents z = (x[j] - row_max) * log2e underflow past
+//      the bias floor (z < -127). The branchless flush sets those outputs
+//      to exactly +0.0. Assert the flushed terms are 0.0 and the row sums
+//      to 1 within 1e-6.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn softmax_only_ffi_bit_exact_vs_exp_ref() {
+    if !common::cc_available() {
+        eprintln!("skip: cc unavailable");
+        return;
+    }
+
+    const B: usize = 4;
+    const K: usize = 8;
+    const TOTAL: usize = B * K;
+
+    let src =
+        std::fs::read_to_string("../../tests/fixtures/softmax_only.nfl").expect("fixture readable");
+    let ast = compiler::parse(&src).expect("parse");
+    let uir = compiler::ir::build(&ast).expect("ir::build");
+    let uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
+    let asm = profiles_x86_64::lower(&uir).expect("lower");
+
+    let sig = &asm.functions[0];
+    assert_eq!(sig.name, "nfl_forward_SoftmaxOnly");
+    assert_eq!(sig.inputs_floats, vec![TOTAL], "input is [4,8]=32 floats");
+    assert_eq!(sig.params_floats, 0, "softmax has no learnable params");
+    assert_eq!(sig.output_floats, TOTAL, "output is [4,8]=32 floats");
+
+    let so_path = common::compile_to_so(&asm.source, "softmax_only_bit_exact");
+
+    let input = deterministic_input(TOTAL);
+    let params = [0.0f32; 1]; // non-empty dummy; never dereferenced
+    let mut output = vec![0.0f32; TOTAL];
+
+    unsafe {
+        let lib = libloading::Library::new(&so_path).expect("dlopen");
+        let forward: libloading::Symbol<unsafe extern "C" fn(*const f32, *const f32, *mut f32)> =
+            lib.get(b"nfl_forward_SoftmaxOnly").expect("dlsym");
+        forward(input.as_ptr(), params.as_ptr(), output.as_mut_ptr());
+    }
+
+    let reference = reference_softmax_stable(&input, B, K);
+
+    for (i, (got, want)) in output.iter().zip(reference.iter()).enumerate() {
+        assert!(
+            got.to_bits() == want.to_bits(),
+            "bit-exact mismatch at index {i}: got={got} ({:#010x}), want={want} ({:#010x})",
+            got.to_bits(),
+            want.to_bits()
+        );
+    }
+}
+
+#[test]
+fn softmax_only_ffi_underflow_clamp_agrees_with_libm() {
+    if !common::cc_available() {
+        eprintln!("skip: cc unavailable");
+        return;
+    }
+
+    let src =
+        std::fs::read_to_string("../../tests/fixtures/softmax_only.nfl").expect("fixture readable");
+    let ast = compiler::parse(&src).expect("parse");
+    let uir = compiler::ir::build(&ast).expect("ir::build");
+    let uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
+    let asm = profiles_x86_64::lower(&uir).expect("lower");
+
+    let so_path = common::compile_to_so(&asm.source, "softmax_only_underflow");
+
+    // batch=4, k=8. Row 0 has a huge spread: x[0]=120, x[1..8]=-120.
+    // After max-subtraction: x[0]-max = 0, x[j]-max ≈ -240 for j in 1..8.
+    // (−240) * log2e ≈ −346.4, well below the flush floor of z < −127.
+    let mut input = deterministic_input(32);
+    input[0] = 120.0_f32;
+    for v in input.iter_mut().take(8).skip(1) {
+        *v = -120.0_f32;
+    }
+    let params = [0.0f32; 1]; // non-empty dummy; never dereferenced
+    let mut output = vec![0.0f32; 32];
+
+    unsafe {
+        let lib = libloading::Library::new(&so_path).expect("dlopen");
+        let forward: libloading::Symbol<unsafe extern "C" fn(*const f32, *const f32, *mut f32)> =
+            lib.get(b"nfl_forward_SoftmaxOnly").expect("dlsym");
+        forward(input.as_ptr(), params.as_ptr(), output.as_mut_ptr());
+    }
+
+    // Row 0: indices 1..8 must be exactly +0.0 (flushed by branchless clamp).
+    for (j, got) in output.iter().enumerate().take(8).skip(1) {
+        assert!(
+            got.to_bits() == 0.0f32.to_bits(),
+            "output[{j}] should be exactly +0.0 (underflow flush), got {got}"
+        );
+    }
+
+    // Row 0 must still be a valid probability distribution (sums to ~1).
+    let row0_sum: f32 = output[0..8].iter().sum();
+    assert!(
+        (row0_sum - 1.0).abs() < 1e-6,
+        "row 0 sum = {row0_sum}, expected ~1.0"
+    );
 }

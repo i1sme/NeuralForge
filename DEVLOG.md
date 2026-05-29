@@ -14,6 +14,118 @@ Format for each entry:
 
 ---
 
+## 2026-05-29 — Milestone 17 closed: Axis 3 first leg — bare-metal inline expf
+
+### What was done
+
+- **Task 1 — rename `calls_extern_math` → `has_softmax`** (compiler core):
+  The predicate already computed "model contains softmax" — only its name
+  implied an extern-math consequence that became false after inlining. Renamed
+  in `compiler/src/ir/types.rs` (method + `VerboseUir` Display label
+  `has-softmax: yes/no`), all consumer sites in both profiles' `buffer.rs` /
+  `codegen.rs`, `profile-api/src/lib.rs`, and `docs/language_reference/uir.md`.
+  Method-level tests renamed accordingly. Design Principle 5 (human-inspectable
+  output) compliance restored.
+
+- **Tasks 2/6 — `exp_ref` Rust ports + layer-2 accuracy sweep**:
+  Per-profile reference implementations mirroring the ISA divergence: arm64
+  uses `f32::mul_add` (matches `fmadd`/`fmsub`); x86_64 uses separate `*`/`+`/`-`
+  (matches `mulss`/`subss`/`addss`). Layer-2 test sweeps x∈[−80, 0] in 2^−10
+  steps + structural points, asserting ≤ 1 ulp vs libm `f32::exp`. Passed
+  without needing to widen the LN2 split on either platform.
+
+- **Tasks 3/7 — file-local constant pools**:
+  arm64: new `.section __TEXT,__const` pool (11 f32 constants under `.Lexp_*`
+  labels, `adrp`/`ldr` references) — new mechanism for arm64 (layernorm uses
+  inline immediates). x86_64: `.section .rodata` pool following the pre-existing
+  layernorm pattern. Both emitted once per file from `walk_uir` when
+  `uir.has_softmax()`.
+
+- **Tasks 4/8 — `emit_exp_inline` + wire into both softmax sites**:
+  arm64: Cody-Waite reduction (`fmul`/`fcvtns`/`scvtf`/two `fmsub`) → 7×
+  `fmadd` Horner → `add`/`lsl`/`csel`/`fmov`/`fmul` reconstruction. x86_64:
+  same algorithm with `mulss`/`cvtss2si`/`cvtsi2ss`/two-step `mulss+subss`
+  reduction → 7× (`mulss`+`addss`) Horner → `addl`/`shll`/`testl`/`cmovle`/
+  `movd`/`mulss` reconstruction. Wired into `emit_softmax` and the fused
+  `SoftmaxRow` tail in `emit_linear` (both sites, both profiles). FFI
+  save/restore block RETAINED per minimal-swap spec (M18 removes it).
+
+- **Tasks 5/9 — layer-1 bit-exact FFI + underflow-clamp tests**:
+  New `tests/fixtures/softmax_only.nfl` fixture (isolated `input → softmax`).
+  `softmax_ref` helper added to both profiles' `common/mod.rs` (composes
+  `exp_ref`). arm64: FFI tests run natively (macOS). x86_64: FFI tests gated
+  `#[cfg(target_os = "linux")]` (Linux CI only). `compile_to_so` drops `-lm`
+  as bare-metal proof — all x86_64 FFI tests pass with libm absent.
+
+- **Task 10 — documentation + milestone closure** (this session):
+  Profile guides rewritten (softmax sections updated for inline algorithm,
+  pool, scratch contract, minimal-swap note). PROJECT_SPEC.md milestone row 17
+  added, strategic roadmap updated with M18 deferral list, Known Latent Hazards
+  confirmed empty, Decisions entries added. CLAUDE.md status bumped. Source
+  doc-comments swept for stale `bl _expf` / `expf@PLT` / `libm expf` references.
+
+- **Final test count: 472** (macOS arm64); **~476** on Linux x86_64 CI —
+  +4 delta is M15 `ffn_ffi`/`transformer_block_ffi` + M17
+  `softmax_only_ffi_bit_exact_vs_exp_ref`/`softmax_only_ffi_underflow_clamp_agrees_with_libm`
+  (all `#[cfg(target_os = "linux")]`).
+
+### Decisions made
+
+- **Minimal-swap discipline** — FFI save/restore and the callee-saved prologue
+  contribution for softmax are RETAINED in M17. The justification shifts from
+  "across `bl _expf`" to "across the inline exp's scratch usage" — structurally
+  unchanged. Their removal (and leaf reclassification) is M18. This keeps M17
+  a clean, narrow diff: only the exp-pass instruction block changes.
+
+- **File-local `.rodata`/`__const` pool** for the 11 constants. Rejected inline
+  `movz/movk/fmov` immediates (~30 extra instructions per element — likely
+  slower than libm). File-local labels prevent multi-object link collisions.
+  Pool is emitted once per file regardless of how many softmax models appear.
+
+- **Two-layer accuracy contract** — layer 1 (bit-exact asm vs `exp_ref`) + layer 2
+  (`exp_ref` within ≤ 1 ulp of libm). If a sweep point exceeds 1 ulp, the fix
+  is to widen the LN2 split (not increase polynomial degree). Neither platform
+  needed widening — the degree-7 + two-part LN2 split held ≤ 1 ulp over the
+  full softmax domain x∈[−80, 0].
+
+- **`has_softmax` rename** — mandatory in M17 (not deferrable). A
+  `calls-extern-math: yes` label on a post-inline softmax model is a factual lie
+  in human-inspectable output (Design Principle 5). The rename carries no
+  register-layout cascade — purely method name + doc-comments + CLI label.
+
+### Problems encountered
+
+- **Two spec refinements found during plan synthesis** (reconciled in Task 10
+  docs per plan instruction):
+  1. The `.rodata` pool is pre-existing on x86_64 (layernorm since M14) but
+     new on arm64. M17 introduces the `.section __TEXT,__const` pool for arm64.
+  2. The existing softmax FFI tests are tolerance-based, not bit-exact vs libm.
+     Layer 1 therefore needed a new isolated fixture `softmax_only.nfl` rather
+     than modifying existing tests.
+
+- **Task-4 omission** — nflc CLI tests asserting `bl _expf` absence were not
+  updated in the initial Task 4 commit; caught in review and fixed before merge.
+
+- **Task-9 over-removal** — a stack-spill assertion in x86_64 tests was
+  removed too aggressively (the spill is retained in M17); caught in review
+  and restored before merge.
+
+- **No other blockers.** All workspace gates clean on first pass after fixes.
+
+### Next step
+
+**M18 — softmax leaf-cleanup** (Axis 3 second leg): move loop state from
+callee-saved to caller-saved registers; drop `emit_ffi_save`/`emit_ffi_restore`
+and scratch recomputes; remove softmax's callee-saved prologue contribution
+(arm64 `d8-d9`/`x19-x23`; x86_64 softmax half of `callee_saved_int`); move
+x86_64 `row_max`/`row_sum` from stack slots to xmm registers; flip
+`compute_is_leaf` to `true` for softmax models + update M16 inspect goldens;
+measure bench speedup on `self_attention`. See M18 deferral list in
+`PROJECT_SPEC.md` §"Strategic Roadmap" and `docs/superpowers/specs/
+2026-05-29-bare-metal-expf-m17-design.md` §9.
+
+---
+
 ## 2026-05-11 — Milestone 16 closed: A3 — profile-level viewer annotations
 
 ### What was done

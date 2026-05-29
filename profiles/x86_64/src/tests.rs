@@ -200,7 +200,7 @@ fn linear_relu_fused_emits_inline_maxss_no_separate_loop() {
 }
 
 #[test]
-fn linear_softmax_fused_emits_row_wise_tail_with_call_expf_plt() {
+fn linear_softmax_fused_emits_row_wise_tail_with_inline_exp() {
     let src = "model S [b=2, k=4, n=3]:\n    x: Tensor[b, k]\n    x -> linear[n] -> softmax\n";
     let s = lower_x86(src).source;
     assert!(
@@ -208,8 +208,16 @@ fn linear_softmax_fused_emits_row_wise_tail_with_call_expf_plt() {
         "fused softmax tail uses .Lfsmx_ labels:\n{s}"
     );
     assert!(
-        s.contains("call    expf@PLT"),
-        "fused softmax tail must call expf@PLT:\n{s}"
+        !s.contains("call    expf@PLT"),
+        "expf must be inlined now:\n{s}"
+    );
+    assert!(
+        s.contains("cvtss2si"),
+        "missing round-to-int (range reduction):\n{s}"
+    );
+    assert!(
+        s.contains(".Lexp_c7(%rip)"),
+        "missing Horner constant load:\n{s}"
     );
 }
 
@@ -246,15 +254,23 @@ fn linear_matmul_uses_only_scalar_sse2_xmm_regs() {
 // ── Task 3.10: standalone softmax asm-shape tests ────────────────────────────
 
 #[test]
-fn standalone_softmax_emits_three_pass_with_call_expf_plt() {
+fn standalone_softmax_emits_three_pass_with_inline_exp() {
     let src = "model SS [b=2, k=4]:\n    x: Tensor[b, k]\n    x -> softmax\n";
     let s = lower_x86_no_passes(src).source;
     assert!(s.contains(".Lsm_max_"), "phase 1 max label missing:\n{s}");
     assert!(s.contains(".Lsm_exp_"), "phase 2 exp label missing:\n{s}");
     assert!(s.contains(".Lsm_norm_"), "phase 3 norm label missing:\n{s}");
     assert!(
-        s.contains("call    expf@PLT"),
-        "softmax must call expf@PLT:\n{s}"
+        !s.contains("call    expf@PLT"),
+        "expf must be inlined now:\n{s}"
+    );
+    assert!(
+        s.contains("cvtss2si"),
+        "missing round-to-int (range reduction):\n{s}"
+    );
+    assert!(
+        s.contains(".Lexp_c7(%rip)"),
+        "missing Horner constant load:\n{s}"
     );
 }
 
@@ -275,7 +291,7 @@ fn standalone_softmax_uses_callee_saved_int_pushes() {
 #[test]
 fn standalone_softmax_spills_max_to_stack_at_offset_32() {
     // assign_buffers reserves bytes 0..15 for the two xmm-spill slots
-    // when calls_extern_math; row_max sits at offset 0, row_sum at 8
+    // when has_softmax; row_max sits at offset 0, row_sum at 8
     // (spec §7.4). Standalone softmax model has no intermediate buffers,
     // so the reserve is the only stack content other than alignment pad.
     //
@@ -303,16 +319,19 @@ fn standalone_softmax_initialises_sum_slot_to_zero() {
 }
 
 #[test]
-fn standalone_softmax_recomputes_offset_after_call() {
-    // After call expf@PLT, the offset-holding GPR (%rax) is clobbered;
-    // emitter must recompute before the next memory access.
+fn standalone_softmax_recomputes_offset_after_inline_exp() {
+    // After emit_exp_inline, the scratch GPRs (%eax/%ecx/%edx) are clobbered;
+    // emitter must recompute %rax before the next memory access.
+    // Re-anchored on the last pool load (.Lexp_c0(%rip)) immediately before the recompute.
     let src = "model SR [b=2, k=4]:\n    x: Tensor[b, k]\n    x -> softmax\n";
     let s = lower_x86_no_passes(src).source;
-    let post_call_idx = s.find("call    expf@PLT").expect("must contain call");
-    let post_call = &s[post_call_idx..];
+    let post_exp_idx = s
+        .find(".Lexp_c0(%rip)")
+        .expect("must contain .Lexp_c0(%rip) pool load");
+    let post_exp = &s[post_exp_idx..];
     assert!(
-        post_call.contains("movq    %r15, %rax"),
-        "must recompute %rax = row_base after call expf@PLT:\n{s}"
+        post_exp.contains("movq    %r15, %rax"),
+        "must recompute %rax = row_base after inline exp:\n{s}"
     );
 }
 
@@ -515,7 +534,7 @@ fn compute_is_leaf_true_for_linear_relu() {
 
 #[test]
 fn compute_is_leaf_false_when_softmax_present() {
-    // Softmax → calls expf@PLT → callee_saved_int true → non-leaf.
+    // Softmax uses inline exp (M17) with callee-saved int regs → non-leaf.
     let ast =
         compiler::parse("model M [b=2]:\n    x: Tensor[b, 3]\n    x -> linear[2] -> softmax\n")
             .expect("parse");
@@ -720,7 +739,7 @@ fn is_leaf_false_for_fused_softmax_row_linear() {
     let regs = compute_callee_saved(model);
     assert!(
         regs.contains_callee_saved_int(),
-        "a Linear carrying PostOp::SoftmaxRow still calls expf@PLT — not a leaf"
+        "a Linear carrying PostOp::SoftmaxRow uses callee-saved int regs — not a leaf"
     );
 }
 
@@ -743,10 +762,18 @@ fn emit_linear_with_softmax_row_post_op_emits_three_phase_softmax() {
         "Phase 2 row-max scan into xmm8 missing:\n{s}"
     );
 
-    // Phase 3 — exp(x - max), sum, with call expf@PLT.
+    // Phase 3 — exp(x - max), sum, with inline exp.
     assert!(
-        s.contains("call    expf@PLT"),
-        "Phase 3 missing call expf@PLT:\n{s}"
+        !s.contains("call    expf@PLT"),
+        "expf must be inlined now:\n{s}"
+    );
+    assert!(
+        s.contains("cvtss2si"),
+        "missing round-to-int (range reduction):\n{s}"
+    );
+    assert!(
+        s.contains(".Lexp_c7(%rip)"),
+        "missing Horner constant load:\n{s}"
     );
     assert!(
         s.contains("addss   %xmm0, %xmm1"),
@@ -785,10 +812,14 @@ fn emit_linear_with_softmax_row_post_op_preserves_bias_add() {
         s.contains("addss   %xmm5, %xmm0"),
         "bias-add missing in fused row-wise emit:\n{s}"
     );
-    // Phase 3 still calls expf@PLT.
+    // Phase 3 uses inline exp (no PLT call).
     assert!(
-        s.contains("call    expf@PLT"),
-        "fused softmax tail missing call expf@PLT:\n{s}"
+        !s.contains("call    expf@PLT"),
+        "expf must be inlined now:\n{s}"
+    );
+    assert!(
+        s.contains(".Lexp_c7(%rip)"),
+        "missing Horner constant load in fused softmax tail:\n{s}"
     );
 }
 
@@ -2531,4 +2562,25 @@ fn inspect_linear_with_bias_reports_correct_params() {
 
     // K=4, N=8, bias=true → 4*8 + 8 = 40 floats
     assert_eq!(f.nodes[linear_idx].params_floats, Some(40));
+}
+
+// ── M17 Task 7: x86_64 .rodata exp constant pool ─────────────────────────────
+
+#[test]
+fn softmax_model_emits_local_exp_pool() {
+    let src = "model S [batch=2, k=3]:\n    x: Tensor[batch, k]\n    x -> softmax\n";
+    let uir = compiler::ir::build(&compiler::parse(src).unwrap()).unwrap();
+    let asm = crate::lower(&uir).unwrap().source;
+    assert!(asm.contains(".section .rodata"), "no rodata pool:\n{asm}");
+    assert!(asm.contains(".Lexp_log2e:"), "no log2e constant:\n{asm}");
+    assert!(asm.contains(".Lexp_c7:"), "no c7 constant:\n{asm}");
+    assert_eq!(
+        asm.matches(".Lexp_log2e:").count(),
+        1,
+        "pool must be unique per file"
+    );
+    assert!(
+        !asm.contains("expf"),
+        "exp must be inlined — no expf symbol reference:\n{asm}"
+    );
 }

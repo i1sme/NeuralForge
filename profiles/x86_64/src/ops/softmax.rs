@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Softmax (per-row stable, libm expf via PLT) codegen — x86_64 SSE2.
+//! Softmax (per-row stable, inline bare-metal exp M17) codegen — x86_64 SSE2.
 
 use crate::abi::AbiContext;
 use crate::asm::emit_imm32_to_r10;
@@ -8,21 +8,17 @@ use crate::buffer::BufferLoc;
 
 /// Emit x86_64 asm for softmax over `[b, k]` shape (per-row normalize).
 ///
-/// Calls `<sym_prefix>expf@PLT` for each element. State across the call
-/// lives in callee-saved int registers (%rbx, %r12, %r13, %r14, %r15)
-/// and on the stack (`(%rsp)` row_max, `8(%rsp)` row_sum; reserved by
-/// `assign_buffers` per spec §7.4); see the register contract in
-/// profiles/x86_64/src/ops/linear.rs.
+/// Uses inline `emit_exp_inline()` for each element (M17 — no PLT call).
+/// State across the inline exp lives in callee-saved int registers
+/// (%rbx, %r12, %r13, %r14, %r15) and on the stack (`(%rsp)` row_max,
+/// `8(%rsp)` row_sum; reserved by `assign_buffers` per spec §7.4);
+/// see the register contract in profiles/x86_64/src/ops/linear.rs.
 ///
-/// FFI register preservation (M12): `call expf@PLT` clobbers caller-
-/// saved regs including the SysV argument registers (input(s), params,
-/// output) per AMD64 ABI. Any downstream emitter that reads any of
-/// these via `abi.materialise_ptr` would otherwise see garbage. Spec
-/// §5.4: any emitter that clobbers an ABI register that a follow-up
-/// emitter reads must save/restore. Self-attention exercises this:
+/// FFI register preservation (M12): kept for the downstream emitter
+/// contract (any emitter following softmax may read ABI argument regs
+/// via `abi.materialise_ptr`). Self-attention exercises this:
 /// matmul → softmax → matmul where the second matmul's
-/// `abi.materialise_ptr(InputReg(_), …)` reads %rdi/%rsi after
-/// softmax's `call expf@PLT` has clobbered them.
+/// `abi.materialise_ptr(InputReg(_), …)` reads %rdi/%rsi.
 ///
 /// Strategy: at function entry, push the full `ffi_save_set()`
 /// (= INPUT_REGS[..N+2]) onto the stack, with `pushq %rax` padding
@@ -41,7 +37,7 @@ pub fn emit_softmax(
     softmax_idx: usize,
     src_loc: BufferLoc,
     dst_loc: BufferLoc,
-    sym_prefix: &str,
+    _sym_prefix: &str,
 ) -> String {
     let sid = format!("{model_idx}_{softmax_idx}");
     let mut s = String::new();
@@ -49,7 +45,7 @@ pub fn emit_softmax(
         "    # softmax (3-pass): input [{b},{k}] -> output [{b},{k}]\n"
     ));
 
-    // Pin src/dst into callee-saved %rbx/%r12 (survives `call expf@PLT`).
+    // Pin src/dst into callee-saved %rbx/%r12 (survives the inline exp body).
     // MUST happen before the FFI-reg push below: `materialise_ptr` for any
     // `BufferLoc::StackOffset(off)` emits `leaq off(%rsp), %rbx` against
     // the current %rsp. Pushing first would shift %rsp and corrupt the
@@ -58,10 +54,11 @@ pub fn emit_softmax(
     abi.materialise_ptr(dst_loc, "%r12", &mut s);
 
     // Spill the full ABI argument set (inputs + params + output) so they
-    // survive `call expf@PLT`. Arity-aware via AbiContext (spec §5.4,
-    // §6.1). For N=1 this emits `pushq %rdi; pushq %rsi; pushq %rdx;
-    // pushq %rax` (with %rax as alignment padding) — bit-identical to
-    // the M11 hand-written block.
+    // survive the inline exp body (emit_exp_inline clobbers %eax/%ecx/%edx
+    // and %xmm1-%xmm5, but the ABI int regs are preserved by the push).
+    // Arity-aware via AbiContext (spec §5.4, §6.1). For N=1 this emits
+    // `pushq %rdi; pushq %rsi; pushq %rdx; pushq %rax` (with %rax as
+    // alignment padding) — bit-identical to the M11 hand-written block.
     abi.emit_ffi_save(&mut s);
 
     // Spill SP delta — used to compute the row_max / row_sum stack slot
@@ -117,8 +114,8 @@ pub fn emit_softmax(
     s.push_str("    addq    %r14, %rax\n");
     s.push_str("    movss   (%rbx, %rax, 4), %xmm0\n");
     s.push_str(&format!("    subss   {}(%rsp), %xmm0\n", row_max_slot));
-    s.push_str(&format!("    call    {}expf@PLT\n", sym_prefix));
-    // %rax clobbered by call; recompute.
+    s.push_str(&crate::ops::emit_exp_inline());
+    // %rax recomputed: emit_exp_inline clobbers scratch (%eax/%ecx/%edx/%xmm1-5).
     s.push_str("    movq    %r15, %rax\n");
     s.push_str("    addq    %r14, %rax\n");
     s.push_str("    movss   %xmm0, (%r12, %rax, 4)\n");

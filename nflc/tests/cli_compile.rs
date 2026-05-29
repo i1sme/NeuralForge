@@ -259,7 +259,7 @@ fn compile_with_passes_filter_only_fuse_linear_softmax_runs() {
     // with `linear[output] -> softmax`.  Only fuse_linear_softmax runs;
     // eliminate_dropout and fuse_linear_relu must be absent from the
     // applied-passes note.  Asm confirms the RowWise fused tail was
-    // emitted (.Lfsmx_* labels, bl _expf) and the standalone softmax
+    // emitted (.Lfsmx_* labels, inline exp) and the standalone softmax
     // path (.Lsm_*) was NOT taken.
     let output = Command::new(nflc_bin())
         .args([
@@ -291,10 +291,14 @@ fn compile_with_passes_filter_only_fuse_linear_softmax_runs() {
         "stderr should NOT mention fuse_linear_relu under filter:\n{stderr}"
     );
 
-    // Fused RowWise tail: bl _expf and .Lfsmx_* labels must be present.
+    // Fused RowWise tail: inline exp (M17, no libm) and .Lfsmx_* labels present.
     assert!(
-        stdout.contains("bl      _expf"),
-        "fused asm should call bl _expf inside the RowWise softmax tail:\n{stdout}"
+        !stdout.contains("bl      _expf"),
+        "fused asm must NOT call libm _expf — exp is inlined (M17):\n{stdout}"
+    );
+    assert!(
+        stdout.contains(".Lexp_c7"),
+        "fused RowWise tail should contain the inline-exp Horner constant load:\n{stdout}"
     );
     assert!(
         stdout.contains(".Lfsmx_"),

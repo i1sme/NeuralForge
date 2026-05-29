@@ -82,7 +82,38 @@ _nfl_forward_LargeN:
     add     x6, x20, x21
     ldr     s0, [x22, x6, lsl #2]
     fsub    s0, s0, s8
-    bl      _expf
+    ; --- inline exp(x), x<=0 (M17) ---
+    adrp    x9, .Lexp_log2e@PAGE
+    ldr     s1, [x9, .Lexp_log2e@PAGEOFF]
+    fmul    s2, s0, s1
+    fcvtns  w11, s2
+    scvtf   s2, w11
+    ldr     s1, [x9, .Lexp_ln2hi@PAGEOFF]
+    fmsub   s3, s2, s1, s0
+    ldr     s1, [x9, .Lexp_ln2lo@PAGEOFF]
+    fmsub   s3, s2, s1, s3
+    ldr     s4, [x9, .Lexp_c7@PAGEOFF]
+    ldr     s1, [x9, .Lexp_c6@PAGEOFF]
+    fmadd   s4, s4, s3, s1
+    ldr     s1, [x9, .Lexp_c5@PAGEOFF]
+    fmadd   s4, s4, s3, s1
+    ldr     s1, [x9, .Lexp_c4@PAGEOFF]
+    fmadd   s4, s4, s3, s1
+    ldr     s1, [x9, .Lexp_c3@PAGEOFF]
+    fmadd   s4, s4, s3, s1
+    ldr     s1, [x9, .Lexp_c2@PAGEOFF]
+    fmadd   s4, s4, s3, s1
+    ldr     s1, [x9, .Lexp_c1@PAGEOFF]
+    fmadd   s4, s4, s3, s1
+    ldr     s1, [x9, .Lexp_c0@PAGEOFF]
+    fmadd   s4, s4, s3, s1
+    add     w11, w11, #127
+    lsl     w12, w11, #23
+    cmp     w11, #0
+    csel    w12, wzr, w12, le
+    fmov    s5, w12
+    fmul    s0, s4, s5
+    ; --- end inline exp ---
     add     x6, x20, x21
     str     s0, [x23, x6, lsl #2]
     fadd    s9, s9, s0
@@ -111,3 +142,17 @@ _nfl_forward_LargeN:
     ldp     x19, x20, [sp], #16
     ret
 
+
+.section __TEXT,__const
+.p2align 2
+.Lexp_log2e: .long 0x3fb8aa3b
+.Lexp_ln2hi: .long 0x3f318000
+.Lexp_ln2lo: .long 0xb95e8083
+.Lexp_c0: .long 0x3f800000
+.Lexp_c1: .long 0x3f800000
+.Lexp_c2: .long 0x3f000000
+.Lexp_c3: .long 0x3e2aaaab
+.Lexp_c4: .long 0x3d2aaaab
+.Lexp_c5: .long 0x3c088889
+.Lexp_c6: .long 0x3ab60b61
+.Lexp_c7: .long 0x39500d01

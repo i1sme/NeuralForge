@@ -110,7 +110,15 @@ fn softmax_emits_three_passes() {
     let s = &asm.source;
 
     // Key instructions present.
-    assert!(s.contains("bl      _expf"), "expected 'bl _expf' in:\n{s}");
+    assert!(
+        !s.contains("bl      _expf"),
+        "expf must be inlined now:\n{s}"
+    );
+    assert!(
+        s.contains("fcvtns"),
+        "missing round-to-int (range reduction):\n{s}"
+    );
+    assert!(s.contains(".Lexp_c7"), "missing Horner constant load:\n{s}");
     assert!(
         s.contains("fdiv"),
         "expected fdiv (normalize pass) in:\n{s}"
@@ -173,7 +181,8 @@ fn softmax_function_saves_d8_d9_and_x19_x23() {
         s.contains("ldp     d8, d9, [sp], #16"),
         "missing d8/d9 epilogue:\n{s}"
     );
-    // Callee-saved integer regs (x19-x23 for softmax loop state across bl _expf).
+    // Callee-saved integer regs (x19-x23 hold softmax loop state across the
+    // inline exp; M17 inlined the call but kept the callee-saved regime — M18 removes it).
     assert!(
         s.contains("stp     x19, x20, [sp, #-16]!"),
         "missing x19/x20 prologue:\n{s}"
@@ -541,7 +550,7 @@ fn is_leaf_false_for_fused_softmax_row_linear() {
 
     assert!(
         !super::buffer::compute_is_leaf(model),
-        "a Linear carrying PostOp::SoftmaxRow still calls bl _expf — leaf must be false"
+        "a Linear carrying PostOp::SoftmaxRow keeps the non-leaf softmax regime — leaf must be false (M17 inlined exp; precise reclassification is M18)"
     );
 }
 
@@ -582,11 +591,16 @@ fn emit_linear_with_softmax_row_post_op_emits_three_phase_softmax() {
         "Phase 2 row-max scan into s8 missing:\n{s}"
     );
 
-    // Phase 3 — exp(x - max), sum into s9, with bl _expf.
+    // Phase 3 — exp(x - max), sum into s9, with inline exp.
     assert!(
-        s.contains("bl      _expf"),
-        "Phase 3 missing bl _expf:\n{s}"
+        !s.contains("bl      _expf"),
+        "expf must be inlined now:\n{s}"
     );
+    assert!(
+        s.contains("fcvtns"),
+        "missing round-to-int (range reduction):\n{s}"
+    );
+    assert!(s.contains(".Lexp_c7"), "missing Horner constant load:\n{s}");
     assert!(
         s.contains("fadd    s9, s9, s0"),
         "Phase 3 sum accumulation in s9 missing:\n{s}"
@@ -627,11 +641,16 @@ fn emit_linear_with_softmax_row_post_op_preserves_bias_add() {
         s.contains("fadd    s0, s0, s5"),
         "bias-add missing in fused row-wise emit:\n{s}"
     );
-    // Phase 3 still calls _expf.
+    // Phase 3 uses inline exp (no bl _expf after M17).
     assert!(
-        s.contains("bl      _expf"),
-        "fused softmax tail missing bl _expf:\n{s}"
+        !s.contains("bl      _expf"),
+        "expf must be inlined now:\n{s}"
     );
+    assert!(
+        s.contains("fcvtns"),
+        "missing round-to-int (range reduction):\n{s}"
+    );
+    assert!(s.contains(".Lexp_c7"), "missing Horner constant load:\n{s}");
 }
 
 #[test]
@@ -1830,4 +1849,28 @@ fn inspect_linear_with_bias_reports_correct_params() {
 
     // K=4, N=8, bias=true → 4*8 + 8 = 40 floats
     assert_eq!(f.nodes[linear_idx].params_floats, Some(40));
+}
+
+// ── M17 Task 3: arm64 exp constant pool ─────────────────────────────────────
+
+#[test]
+fn softmax_model_emits_local_exp_pool() {
+    let src = "model S [batch=2, k=3]:\n    x: Tensor[batch, k]\n    x -> softmax\n";
+    let uir = compiler::ir::build(&compiler::parse(src).unwrap()).unwrap();
+    let asm = crate::lower(&uir).unwrap().source;
+    assert!(
+        asm.contains(".section __TEXT,__const"),
+        "no const pool:\n{asm}"
+    );
+    assert!(asm.contains(".Lexp_log2e:"), "no log2e constant:\n{asm}");
+    assert!(asm.contains(".Lexp_c7:"), "no c7 constant:\n{asm}");
+    assert_eq!(
+        asm.matches(".Lexp_log2e:").count(),
+        1,
+        "pool must be unique per file"
+    );
+    assert!(
+        !asm.contains("expf"),
+        "no libm expf symbol after inlining:\n{asm}"
+    );
 }

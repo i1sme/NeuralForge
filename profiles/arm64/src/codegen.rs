@@ -20,6 +20,15 @@ pub fn walk_uir(uir: &Uir, sym_prefix: &'static str) -> Result<Asm, LowerError> 
         functions.push(sig);
     }
 
+    // M17: emit the file-local __const pool once per assembly file when any
+    // model has softmax (standalone StdOp::Softmax or fused PostOp::SoftmaxRow).
+    // The pool is appended after all models; its labels are harmlessly
+    // unreferenced until Task 4 lands emit_exp_inline.
+    if uir.has_softmax() {
+        source.push('\n');
+        source.push_str(&crate::ops::exp_pool_arm64());
+    }
+
     Ok(Asm { source, functions })
 }
 

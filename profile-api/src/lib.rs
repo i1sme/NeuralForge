@@ -171,8 +171,11 @@ pub struct FnAnnotations {
     /// arm64: e.g. `["d8-d9", "x19-x23"]`. x86_64: e.g. `["%rbx", "%r12-%r15"]`.
     /// Empty Vec if no callee-saved registers are touched by this function.
     pub callee_saved: Vec<String>,
-    /// True iff the function emits no `bl _expf` / `call expf@PLT`
-    /// (== `!UirModel::calls_extern_math()` for both profiles today).
+    /// True iff the model contains no softmax (`!UirModel::has_softmax()`).
+    /// Conservative: softmax models stay non-leaf through M17 because
+    /// the loop holds state in callee-saved registers and a non-leaf frame;
+    /// M17 inlined the exp but did not change the register layout. Precise
+    /// leaf reclassification (remove callee-saved push + frame) is M18.
     pub leaf: bool,
     /// Real NodeId of each input in the post-pass UirModel, in
     /// declaration order. Renderer uses these to produce `n<id>` refs;
