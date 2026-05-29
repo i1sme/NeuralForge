@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Softmax (per-row stable, libm expf) codegen.
+//! Softmax (per-row stable, inline exp M17) codegen.
 
 use crate::abi::AbiContext;
 use crate::asm::emit_imm32;
@@ -47,7 +47,7 @@ pub fn emit_softmax(
     softmax_idx: usize,
     src_loc: BufferLoc,
     dst_loc: BufferLoc,
-    sym_prefix: &str,
+    _sym_prefix: &str,
 ) -> String {
     let sid = format!("{model_idx}_{softmax_idx}");
     let mut s = String::new();
@@ -105,8 +105,8 @@ pub fn emit_softmax(
     s.push_str("    add     x6, x20, x21\n");
     s.push_str("    ldr     s0, [x22, x6, lsl #2]\n");
     s.push_str("    fsub    s0, s0, s8\n");
-    s.push_str(&format!("    bl      {}expf\n", sym_prefix));
-    // x6 must be recomputed: bl _expf may have clobbered it (caller-saved).
+    s.push_str(&crate::ops::emit_exp_inline());
+    // x6 recomputed: emit_exp_inline clobbers scratch (x9/x11/x12/s1-s5).
     s.push_str("    add     x6, x20, x21\n");
     s.push_str("    str     s0, [x23, x6, lsl #2]\n");
     s.push_str("    fadd    s9, s9, s0\n");

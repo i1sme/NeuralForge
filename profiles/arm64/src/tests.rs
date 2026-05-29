@@ -110,7 +110,15 @@ fn softmax_emits_three_passes() {
     let s = &asm.source;
 
     // Key instructions present.
-    assert!(s.contains("bl      _expf"), "expected 'bl _expf' in:\n{s}");
+    assert!(
+        !s.contains("bl      _expf"),
+        "expf must be inlined now:\n{s}"
+    );
+    assert!(
+        s.contains("fcvtns"),
+        "missing round-to-int (range reduction):\n{s}"
+    );
+    assert!(s.contains(".Lexp_c7"), "missing Horner constant load:\n{s}");
     assert!(
         s.contains("fdiv"),
         "expected fdiv (normalize pass) in:\n{s}"
@@ -582,11 +590,16 @@ fn emit_linear_with_softmax_row_post_op_emits_three_phase_softmax() {
         "Phase 2 row-max scan into s8 missing:\n{s}"
     );
 
-    // Phase 3 — exp(x - max), sum into s9, with bl _expf.
+    // Phase 3 — exp(x - max), sum into s9, with inline exp.
     assert!(
-        s.contains("bl      _expf"),
-        "Phase 3 missing bl _expf:\n{s}"
+        !s.contains("bl      _expf"),
+        "expf must be inlined now:\n{s}"
     );
+    assert!(
+        s.contains("fcvtns"),
+        "missing round-to-int (range reduction):\n{s}"
+    );
+    assert!(s.contains(".Lexp_c7"), "missing Horner constant load:\n{s}");
     assert!(
         s.contains("fadd    s9, s9, s0"),
         "Phase 3 sum accumulation in s9 missing:\n{s}"
@@ -627,11 +640,16 @@ fn emit_linear_with_softmax_row_post_op_preserves_bias_add() {
         s.contains("fadd    s0, s0, s5"),
         "bias-add missing in fused row-wise emit:\n{s}"
     );
-    // Phase 3 still calls _expf.
+    // Phase 3 uses inline exp (no bl _expf after M17).
     assert!(
-        s.contains("bl      _expf"),
-        "fused softmax tail missing bl _expf:\n{s}"
+        !s.contains("bl      _expf"),
+        "expf must be inlined now:\n{s}"
     );
+    assert!(
+        s.contains("fcvtns"),
+        "missing round-to-int (range reduction):\n{s}"
+    );
+    assert!(s.contains(".Lexp_c7"), "missing Horner constant load:\n{s}");
 }
 
 #[test]
@@ -1849,5 +1867,9 @@ fn softmax_model_emits_local_exp_pool() {
         asm.matches(".Lexp_log2e:").count(),
         1,
         "pool must be unique per file"
+    );
+    assert!(
+        !asm.contains("expf"),
+        "no libm expf symbol after inlining:\n{asm}"
     );
 }

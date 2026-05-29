@@ -17,7 +17,7 @@ fn reference_softmax_stable(input: &[f32], b: usize, k: usize) -> Vec<f32> {
         let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let mut sum = 0.0f32;
         for kk in 0..k {
-            let e = (row[kk] - max).exp();
+            let e = common::exp_ref(row[kk] - max);
             out[i * k + kk] = e;
             sum += e;
         }
@@ -47,7 +47,7 @@ fn reference_linear_relu(input: &[f32; 32], params: &[f32; 8]) -> [f32; 16] {
 
 /// Architecture-matched arm64 reference for SelfAttention. Uses
 /// `f32::mul_add` to match the fmadd-using emit_matmul / emit_linear
-/// arm64 codegen. `f32::exp` wraps platform libm `expf`.
+/// arm64 codegen. `common::exp_ref` matches the M17 inline polynomial exp.
 ///
 /// `x` is the input tensor in row-major [batch, heads, seq, head_dim].
 /// Returns the output tensor in the same layout.
@@ -87,13 +87,13 @@ fn reference_self_attention_arm64(
             }
         }
 
-        // attn = softmax(scores, last_axis)
+        // attn = softmax(scores, last_axis) — M17: use exp_ref to match inline polynomial
         for i in 0..seq {
             let row = &scores[i * seq..(i + 1) * seq];
             let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             let mut sum = 0.0f32;
             for j in 0..seq {
-                let e = (row[j] - max).exp();
+                let e = common::exp_ref(row[j] - max);
                 attn[i * seq + j] = e;
                 sum += e;
             }
@@ -630,11 +630,15 @@ fn fused_vs_unfused_softmax_match_numerically() {
         // Asm structural validation. Note: classifier.nfl is also
         // covered by M5a's fused_vs_unfused_classifier_match_numerically,
         // which pins relu fusion (fmax s0, s0, s4 + .Lrelu_). This test
-        // pins softmax fusion (.Lfsmx_ + bl _expf) — complementary, not
+        // pins softmax fusion (.Lfsmx_ + inline exp M17) — complementary, not
         // redundant.
         assert!(
-            fused_asm.source.contains("bl      _expf"),
-            "{fixture_path}: fused asm missing bl _expf in row-wise tail"
+            !fused_asm.source.contains("bl      _expf"),
+            "{fixture_path}: fused asm must not call bl _expf after M17 inlining"
+        );
+        assert!(
+            fused_asm.source.contains("fcvtns"),
+            "{fixture_path}: fused asm missing fcvtns (inline exp range reduction)"
         );
         assert!(
             !fused_asm.source.contains(".Lsm_"),
@@ -1108,12 +1112,12 @@ fn reference_attention_arm64(
                     scores[sc_off + i * s + j] = acc * 0.25;
                 }
             }
-            // softmax row-wise (stable, matching 3-pass emit_softmax).
+            // softmax row-wise (stable, matching 3-pass emit_softmax — M17: use exp_ref).
             for i in 0..s {
                 let row = &mut scores[sc_off + i * s..sc_off + (i + 1) * s];
                 let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
                 for x in row.iter_mut() {
-                    *x = (*x - max).exp();
+                    *x = common::exp_ref(*x - max);
                 }
                 let sum: f32 = row.iter().sum();
                 for x in row.iter_mut() {
