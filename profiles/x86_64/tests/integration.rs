@@ -1715,7 +1715,8 @@ fn pre_ln_block_match_numerically() {
     drop(lib);
 }
 
-// ─── M17 exp_ref unit test (pure Rust — runs on all platforms) ───────────────
+// ─── M17 exp_ref unit test (pure Rust; this file is Linux-gated, so it runs on
+// Linux CI — the arm64 copy of this test covers macOS) ───────────────────────
 
 #[test]
 fn exp_ref_within_one_ulp_of_libm() {

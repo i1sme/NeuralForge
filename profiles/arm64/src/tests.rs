@@ -181,7 +181,8 @@ fn softmax_function_saves_d8_d9_and_x19_x23() {
         s.contains("ldp     d8, d9, [sp], #16"),
         "missing d8/d9 epilogue:\n{s}"
     );
-    // Callee-saved integer regs (x19-x23 for softmax loop state across bl _expf).
+    // Callee-saved integer regs (x19-x23 hold softmax loop state across the
+    // inline exp; M17 inlined the call but kept the callee-saved regime — M18 removes it).
     assert!(
         s.contains("stp     x19, x20, [sp, #-16]!"),
         "missing x19/x20 prologue:\n{s}"
@@ -549,7 +550,7 @@ fn is_leaf_false_for_fused_softmax_row_linear() {
 
     assert!(
         !super::buffer::compute_is_leaf(model),
-        "a Linear carrying PostOp::SoftmaxRow still calls bl _expf — leaf must be false"
+        "a Linear carrying PostOp::SoftmaxRow keeps the non-leaf softmax regime — leaf must be false (M17 inlined exp; precise reclassification is M18)"
     );
 }
 

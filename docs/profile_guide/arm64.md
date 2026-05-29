@@ -287,7 +287,7 @@ file-local `.L`-prefixed labels:
 .p2align 2
 .Lexp_log2e: .long 0x3fb8aa3b    ; LOG2E = log2(e)
 .Lexp_ln2hi: .long 0x3f318000    ; LN2_HI (exactly representable)
-.Lexp_ln2lo: .long 0xb91de9e6    ; LN2_LO (two-part split for cancellation)
+.Lexp_ln2lo: .long 0xb95e8083    ; LN2_LO (two-part split for cancellation)
 .Lexp_c0:    .long 0x3f800000    ; C0 = 1.0
 .Lexp_c1:    .long 0x3f800000    ; C1 = 1.0
 .Lexp_c2:    .long 0x3f000000    ; C2 = 0.5
