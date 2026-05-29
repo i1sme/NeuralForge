@@ -275,7 +275,7 @@ fn standalone_softmax_uses_callee_saved_int_pushes() {
 #[test]
 fn standalone_softmax_spills_max_to_stack_at_offset_32() {
     // assign_buffers reserves bytes 0..15 for the two xmm-spill slots
-    // when calls_extern_math; row_max sits at offset 0, row_sum at 8
+    // when has_softmax; row_max sits at offset 0, row_sum at 8
     // (spec §7.4). Standalone softmax model has no intermediate buffers,
     // so the reserve is the only stack content other than alignment pad.
     //

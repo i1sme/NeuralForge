@@ -207,18 +207,22 @@ impl std::fmt::Display for Uir {
 }
 
 // ----------------------------------------------------------------------------
-// M8: calls_extern_math predicate (Task 14)
+// M8: has_softmax predicate (Task 14; M17 renamed from the old predicate
+// whose name referenced "extern math" — forward-looking honest naming, as
+// M17's exp-inline removes the libm call in a later task)
 //
-// UIR-level predicate: true iff any operation requires linking against
-// external math. Currently: standalone Softmax or fused SoftmaxRow.
+// UIR-level predicate: true iff the model contains softmax (standalone
+// `StdOp::Softmax` or fused `PostOp::SoftmaxRow`) — the op whose codegen
+// needs the callee-saved register regime.
 // Does not depend on any profile.
 // ----------------------------------------------------------------------------
 
 impl UirModel {
-    /// True iff any operation in this model requires linking against
-    /// external math (currently: standalone Softmax or fused SoftmaxRow).
+    /// True iff any operation in this model contains softmax (standalone
+    /// `StdOp::Softmax` or fused `PostOp::SoftmaxRow`) — the op whose
+    /// codegen needs the callee-saved register regime.
     /// UIR-level predicate — does not depend on any profile.
-    pub fn calls_extern_math(&self) -> bool {
+    pub fn has_softmax(&self) -> bool {
         use crate::ir::stdlib::StdOp;
         self.nodes.iter().any(|n| match &n.kind {
             NodeKind::Op {
@@ -235,8 +239,8 @@ impl UirModel {
 }
 
 impl Uir {
-    pub fn calls_extern_math(&self) -> bool {
-        self.models.iter().any(UirModel::calls_extern_math)
+    pub fn has_softmax(&self) -> bool {
+        self.models.iter().any(UirModel::has_softmax)
     }
 }
 
@@ -261,12 +265,8 @@ impl std::fmt::Display for VerboseUir<'_> {
         writeln!(f, "  total nodes: {}", total_nodes)?;
         writeln!(
             f,
-            "  calls-extern-math: {}",
-            if self.0.calls_extern_math() {
-                "yes"
-            } else {
-                "no"
-            }
+            "  has-softmax: {}",
+            if self.0.has_softmax() { "yes" } else { "no" }
         )?;
         writeln!(f)?;
         for m in &self.0.models {
@@ -293,8 +293,8 @@ impl std::fmt::Display for VerboseModel<'_> {
         writeln!(f, "  node count: {}", m.nodes.len())?;
         writeln!(
             f,
-            "  calls-extern-math: {}",
-            if m.calls_extern_math() { "yes" } else { "no" }
+            "  has-softmax: {}",
+            if m.has_softmax() { "yes" } else { "no" }
         )?;
         writeln!(f)?;
         for (i, node) in m.nodes.iter().enumerate() {

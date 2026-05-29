@@ -81,27 +81,30 @@ pub fn assign_buffers(model: &UirModel) -> BufferAssignment {
     BufferAssignment { locs, stack_bytes }
 }
 
-/// True iff the model emits no `bl`/`blr` (i.e. no softmax in any form).
+/// Conservative: softmax models are non-leaf because their loop uses
+/// callee-saved registers and a frame, even though M17 (later) inlines
+/// the exp. Precise leaf reclassification is M18.
 ///
 /// After M6 fusion, a fused `linear → softmax` node carries
-/// `PostOp::SoftmaxRow` and still calls `bl _expf` — so such a model is
-/// not a leaf even though there is no standalone `StdOp::Softmax` node.
-/// Delegated to UIR-side `UirModel::calls_extern_math` (single source of
+/// `PostOp::SoftmaxRow` — so such a model is not a leaf even though
+/// there is no standalone `StdOp::Softmax` node.
+/// Delegated to UIR-side `UirModel::has_softmax` (single source of
 /// truth across profiles).
 pub fn compute_is_leaf(model: &UirModel) -> bool {
-    !model.calls_extern_math()
+    !model.has_softmax()
 }
 
 /// Set of callee-saved registers used by the model's body. M6: `{d8, d9}`
-/// and `{x19-x23}` iff any node calls `bl _expf` — either a standalone
-/// `StdOp::Softmax` or a `Linear` carrying `PostOp::SoftmaxRow` in its
-/// `fused_post_ops`. Delegated to `UirModel::calls_extern_math`.
+/// and `{x19-x23}` iff the model has softmax (its loop holds state in
+/// these registers) — either a standalone `StdOp::Softmax` or a `Linear`
+/// carrying `PostOp::SoftmaxRow` in its `fused_post_ops`.
+/// Delegated to `UirModel::has_softmax`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RegSet {
     pub d8_d9: bool,
     /// x19-x23 are used by `emit_softmax` (standalone path) and by the
     /// row-wise softmax tail in `emit_linear` (M6 fused path; see
-    /// `arm64.md` §4.10) to hold loop state across `bl _expf`.
+    /// `arm64.md` §4.10) to hold loop state.
     pub x19_x23: bool,
 }
 
@@ -116,9 +119,9 @@ impl RegSet {
 }
 
 pub fn compute_callee_saved(model: &UirModel) -> RegSet {
-    let has_extern_math = model.calls_extern_math();
+    let has_softmax = model.has_softmax();
     RegSet {
-        d8_d9: has_extern_math,
-        x19_x23: has_extern_math,
+        d8_d9: has_softmax,
+        x19_x23: has_softmax,
     }
 }

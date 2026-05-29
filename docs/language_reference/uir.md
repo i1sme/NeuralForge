@@ -230,8 +230,8 @@ for the UIR a source file produces:
   for inspection of small models or quick debugging.
 
 - **`--uir-verbose`** — annotated form. Adds a top-level summary
-  block (model count, total node count, `calls-extern-math: yes/no`),
-  a per-model summary block (node count, `calls-extern-math`), and
+  block (model count, total node count, `has-softmax: yes/no`),
+  a per-model summary block (node count, `has-softmax`), and
   breaks each fused post-op out onto its own indented line prefixed
   with `-> fused: <op>` for visibility. Suitable for understanding
   models with active fusion or models with unfamiliar structure.
@@ -239,13 +239,12 @@ for the UIR a source file produces:
 Both modes are mutually exclusive — passing both flags in a single
 invocation is a CLI error.
 
-`calls-extern-math` reports whether the model contains any operation
-that requires linking against external math at codegen time. In
-NFL v0.1 this is true iff the model has a standalone `Softmax`
-op or any node carrying `PostOp::SoftmaxRow` in `fused_post_ops`
-(softmax requires `expf` from libm). The predicate is UIR-level —
-profile-independent — and is also exposed as a method on `Uir` and
-`UirModel` for programmatic use.
+`has-softmax` reports whether the model contains any softmax operation
+(standalone `Softmax` op or any node carrying `PostOp::SoftmaxRow`
+in `fused_post_ops`). This predicate drives the callee-saved register
+regime in both profiles. The predicate is UIR-level — profile-independent
+— and is also exposed as a method on `Uir` and `UirModel` for programmatic
+use.
 
 Both rendering modes consume the UIR as built by `compiler::ir::build`,
 **before** any pass pipeline runs. To inspect the post-pipeline UIR,

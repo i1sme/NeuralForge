@@ -29,7 +29,7 @@
 //!   This profile saves `%rbp` unconditionally in the prologue (frame
 //!   pointer role); the body is free to clobber it as scratch since no
 //!   op-emitter reads `%rbp`. The other 5 are saved by the function-level
-//!   prologue when `compute_callee_saved` returns true (= `model.calls_extern_math() OR has_matmul(model)`,
+//!   prologue when `compute_callee_saved` returns true (= `model.has_softmax() OR has_matmul(model)`,
 //!   per `buffer.rs`).
 //!
 //! At N=3 the non-ABI caller-saved scratch is `%rax`, `%r10`, `%r11`,

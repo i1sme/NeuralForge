@@ -9,7 +9,7 @@ fn nflc_bin() -> &'static str {
 }
 
 #[test]
-fn parse_with_uir_verbose_renders_summary_and_extern_math() {
+fn parse_with_uir_verbose_renders_summary_and_has_softmax() {
     let output = Command::new(nflc_bin())
         .args(["parse", "../tests/fixtures/classifier.nfl", "--uir-verbose"])
         .output()
@@ -23,8 +23,8 @@ fn parse_with_uir_verbose_renders_summary_and_extern_math() {
         "stdout missing verbose header:\n{stdout}"
     );
     assert!(
-        stdout.contains("calls-extern-math:"),
-        "stdout missing calls-extern-math line:\n{stdout}"
+        stdout.contains("has-softmax:"),
+        "stdout missing has-softmax line:\n{stdout}"
     );
     assert!(
         stdout.contains("node count:"),

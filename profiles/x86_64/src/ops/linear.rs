@@ -322,7 +322,7 @@ pub fn emit_linear(
 ///   (%rsp)  = row_max f32 slot (offset 0)
 ///   8(%rsp) = row_sum f32 slot (offset 8)
 /// The 16-byte spill region is reserved at the bottom of the frame by
-/// `assign_buffers` whenever `model.calls_extern_math()` (spec §7.4);
+/// `assign_buffers` whenever `model.has_softmax()` (spec §7.4);
 /// `BufferAssignment::stack_bytes` already accounts for it, so the
 /// prologue's `subq $frame_size, %rsp` covers both slots and any
 /// intermediate buffers without per-emitter parameterisation.

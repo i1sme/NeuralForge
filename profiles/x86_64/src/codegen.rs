@@ -44,7 +44,7 @@ pub fn walk_uir(uir: &Uir, sym_prefix: &'static str) -> Result<Asm, LowerError> 
 /// Mirror of arm64's analyze(), minus LeafKind (x86_64 prologue does
 /// not depend on leaf classification — see profiles/x86_64/src/asm.rs).
 /// Leaf classification for inspect output is computed via the UIR-side
-/// `model.calls_extern_math()` predicate directly in inspect_model.
+/// `model.has_softmax()` predicate directly in inspect_model.
 struct ModelAnalysis {
     fn_sig: FnSig,
     assignment: crate::buffer::BufferAssignment,
@@ -489,7 +489,7 @@ pub(crate) fn inspect_model(model: &UirModel) -> Result<profile_api::FnAnnotatio
     // x86_64 has no LeafKind (its prologue is leaf-agnostic). Compute
     // leaf bool directly from the UIR-side predicate — same source
     // arm64's compute_is_leaf delegates to.
-    let leaf_bool = !model.calls_extern_math();
+    let leaf_bool = !model.has_softmax();
 
     const BYTES_PER_ELEMENT: usize = 4;
 

@@ -1105,11 +1105,12 @@ Field reference:
   consumed from the packed `params` buffer (weights + bias for Linear,
   γ + β for LayerNorm). Other ops omit this field.
 - **`callee-saved`** (per-model) — registers saved in the prologue for
-  this function. `d8-d9` and `x19-x23` appear when any node in the
-  model calls `_expf` (standalone Softmax or fused SoftmaxRow); empty
-  for leaf functions.
-- **`leaf`** — `yes` iff no `bl _expf` is emitted; `no` otherwise.
-  Drives whether `x29`/`x30` are saved in the prologue.
+  this function. `d8-d9` and `x19-x23` appear when `UirModel::has_softmax()`
+  (standalone Softmax or fused SoftmaxRow), whose loop holds state in
+  those registers; empty otherwise.
+- **`leaf`** — `yes` iff `!UirModel::has_softmax()`. Conservative:
+  softmax models stay non-leaf through M17's exp-inline (precise
+  reclassification is M18). Drives whether `x29`/`x30` are saved.
 
 See `docs/superpowers/specs/2026-05-11-a3-viewer-annotations-design.md`
 for the full schema and design rationale.
