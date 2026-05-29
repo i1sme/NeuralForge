@@ -62,7 +62,7 @@ fn compile_unknown_profile_exits_failure_with_supported_list() {
 }
 
 #[test]
-fn compile_arm64_still_emits_underscore_prefix_and_bl_expf() {
+fn compile_arm64_emits_underscore_prefix_and_inline_exp() {
     // Regression guard for the dispatch refactor: arm64 path must
     // still produce Mach-O-shaped output.
     let fixture = "../tests/fixtures/classifier.nfl";
@@ -81,7 +81,11 @@ fn compile_arm64_still_emits_underscore_prefix_and_bl_expf() {
         "arm64 asm missing underscore-prefixed function label:\n{asm}"
     );
     assert!(
-        asm.contains("bl      _expf"),
-        "arm64 asm with softmax must call _expf:\n{asm}"
+        !asm.contains("bl      _expf"),
+        "arm64 asm must NOT call libm _expf — exp is inlined (M17):\n{asm}"
+    );
+    assert!(
+        asm.contains(".Lexp_c7"),
+        "arm64 softmax asm must contain the inline-exp Horner constant load:\n{asm}"
     );
 }
