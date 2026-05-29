@@ -72,13 +72,20 @@ design decision is recorded there with its reasoning.
 
 ## Project status
 
-**Milestone 16 complete** — A3 (profile-level viewer annotations) shipped;
-Axis 2 fully complete. `nflc inspect --profile <arm64|x86_64>` prints
-per-node footprint, BufferLoc, and params alongside per-model stack-frame,
-callee-saved set, and leaf flag. The new `inspect-render/` workspace crate
-houses the renderer; `BufferLoc` was lifted to `profile-api` in Task 2.
-8 golden tests anchor the output format. The §"Known Latent Hazards" table
-remains empty.
+**Milestone 17 complete** — Axis 3 first leg: softmax's libm `expf`
+(`bl _expf` / `call expf@PLT`) is replaced by an **inlined degree-7 Taylor
+polynomial** (Cody-Waite range reduction → Horner → `2^z` bit-trick + branchless
+underflow clamp) on both profiles, removing NeuralForge's **last runtime
+dependency** — the x86_64 `.so` now links without `-lm`. Correctness rests on a
+two-layer contract: the emitted asm is bit-exact against a Rust `exp_ref` port,
+and `exp_ref` is within **≤ 1 ulp** of libm across the softmax domain. The
+now-misnamed predicate `calls_extern_math` was renamed `has_softmax`. Per the
+minimal-swap discipline, the FFI save/restore and callee-saved prologue are
+retained for now; their removal (softmax leaf-cleanup) is the recorded **M18**
+follow-up. The §"Known Latent Hazards" table remains empty.
+
+(Prior milestone — M16: `nflc inspect --profile <arm64|x86_64>` ships
+profile-level viewer annotations; Axis 2 fully complete.)
 
 What's working today:
 
@@ -111,9 +118,11 @@ What's working today:
 - **CLI:** `nflc parse` (with `--uir` compact and `--uir-verbose` annotated
   rendering), `nflc compile --profile <arm64|x86_64>`, and `nflc inspect --profile <arm64|x86_64>`
 - **Bit-exact FFI integration tests** with `to_bits()` comparison
-  (M14 layernorm precedent); per-profile divergent `reference_matmul` body
-  matches each emitter's rounding semantics (arm64 `fmadd` single-rounding;
-  x86_64 `mulss + addss` two-rounding)
+  (M14 layernorm precedent); per-profile divergent `reference_matmul` /
+  `exp_ref` bodies match each emitter's rounding semantics (arm64 `fmadd`
+  single-rounding; x86_64 `mulss + addss` two-rounding). M17 adds a two-layer
+  numeric contract for the inline `exp`: asm bit-exact vs the Rust `exp_ref`
+  port, plus an `exp_ref`-vs-libm ≤ 1 ulp sweep over the softmax domain
 - **OQ-BENCH harness** (`bench/` crate, M11) — per-profile median + p95 µs
   across `classifier` / `large_classifier_k` / `self_attention` fixtures;
   CI workflow `.github/workflows/bench.yml` writes per-profile Job
