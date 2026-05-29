@@ -1,0 +1,9 @@
+# Minimal fixture: pure softmax with no preceding ops.
+# Used by profiles/arm64/tests/integration.rs:
+#   softmax_only_ffi_bit_exact_vs_exp_ref  (M17 Task 5)
+#   softmax_only_ffi_underflow_clamp_agrees_with_libm
+
+model SoftmaxOnly [batch=4, k=8]:
+    x: Tensor[batch, k]
+
+    x -> softmax

@@ -1816,3 +1816,128 @@ fn exp_ref_within_one_ulp_of_libm() {
         assert!(ulp_diff(common::exp_ref(x), x.exp()) <= 1, "x={x}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// M17 Layer-1 FFI: softmax_only fixture — bit-exact + underflow-clamp evidence.
+//
+// T.1: softmax_only_ffi_bit_exact_vs_exp_ref
+//      Compile softmax_only.nfl to a dylib, run it, assert every output
+//      element matches reference_softmax_stable bit-for-bit. This is the
+//      definitive evidence that the arm64 inline exp matches exp_ref.
+//
+// T.2: softmax_only_ffi_underflow_clamp_agrees_with_libm
+//      Feed a row with huge logit spread (x[0]=120, x[1..8]=-120) so
+//      the shifted exponents z = (x[j] - row_max) * log2e underflow past
+//      the bias floor (z < -127). The branchless flush sets those outputs
+//      to exactly +0.0. Assert the flushed terms are 0.0 and the row sums
+//      to 1 within 1e-6.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn softmax_only_ffi_bit_exact_vs_exp_ref() {
+    if !cfg!(target_arch = "aarch64") {
+        eprintln!("skip: integration test requires aarch64 host");
+        return;
+    }
+    if !common::cc_available() {
+        eprintln!("skip: cc unavailable");
+        return;
+    }
+
+    const B: usize = 4;
+    const K: usize = 8;
+    const TOTAL: usize = B * K;
+
+    let src =
+        std::fs::read_to_string("../../tests/fixtures/softmax_only.nfl").expect("fixture readable");
+    let ast = compiler::parse(&src).expect("parse");
+    let uir = compiler::ir::build(&ast).expect("ir::build");
+    let uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
+    let asm = profiles_arm64::lower(&uir).expect("lower");
+
+    let sig = &asm.functions[0];
+    assert_eq!(sig.name, "nfl_forward_SoftmaxOnly");
+    assert_eq!(sig.inputs_floats, vec![TOTAL], "input is [4,8]=32 floats");
+    assert_eq!(sig.params_floats, 0, "softmax has no learnable params");
+    assert_eq!(sig.output_floats, TOTAL, "output is [4,8]=32 floats");
+
+    let dylib_path = common::compile_to_dylib(&asm.source, "softmax_only_bit_exact");
+
+    let input = deterministic_input(TOTAL);
+    let params = [0.0f32; 1]; // non-empty dummy; never dereferenced
+    let mut output = vec![0.0f32; TOTAL];
+
+    unsafe {
+        let lib = libloading::Library::new(&dylib_path).expect("dlopen");
+        let forward: libloading::Symbol<unsafe extern "C" fn(*const f32, *const f32, *mut f32)> =
+            lib.get(b"nfl_forward_SoftmaxOnly").expect("dlsym");
+        forward(input.as_ptr(), params.as_ptr(), output.as_mut_ptr());
+    }
+
+    let reference = reference_softmax_stable(&input, B, K);
+
+    for (i, (got, want)) in output.iter().zip(reference.iter()).enumerate() {
+        assert!(
+            got.to_bits() == want.to_bits(),
+            "bit-exact mismatch at index {i}: got={got} ({:#010x}), want={want} ({:#010x})",
+            got.to_bits(),
+            want.to_bits()
+        );
+    }
+}
+
+#[test]
+fn softmax_only_ffi_underflow_clamp_agrees_with_libm() {
+    if !cfg!(target_arch = "aarch64") {
+        eprintln!("skip: integration test requires aarch64 host");
+        return;
+    }
+    if !common::cc_available() {
+        eprintln!("skip: cc unavailable");
+        return;
+    }
+
+    let src =
+        std::fs::read_to_string("../../tests/fixtures/softmax_only.nfl").expect("fixture readable");
+    let ast = compiler::parse(&src).expect("parse");
+    let uir = compiler::ir::build(&ast).expect("ir::build");
+    let uir = compiler::passes::run_pipeline(&uir, &compiler::passes::default_pipeline())
+        .expect("pipeline ok");
+    let asm = profiles_arm64::lower(&uir).expect("lower");
+
+    let dylib_path = common::compile_to_dylib(&asm.source, "softmax_only_underflow");
+
+    // batch=4, k=8. Row 0 has a huge spread: x[0]=120, x[1..8]=-120.
+    // After max-subtraction: x[0]-max = 0, x[j]-max ≈ -240 for j in 1..8.
+    // (−240) * log2e ≈ −346.4, well below the flush floor of z < −127.
+    let mut input = deterministic_input(32);
+    input[0] = 120.0_f32;
+    for v in input.iter_mut().take(8).skip(1) {
+        *v = -120.0_f32;
+    }
+    let params = [0.0f32; 1]; // non-empty dummy; never dereferenced
+    let mut output = vec![0.0f32; 32];
+
+    unsafe {
+        let lib = libloading::Library::new(&dylib_path).expect("dlopen");
+        let forward: libloading::Symbol<unsafe extern "C" fn(*const f32, *const f32, *mut f32)> =
+            lib.get(b"nfl_forward_SoftmaxOnly").expect("dlsym");
+        forward(input.as_ptr(), params.as_ptr(), output.as_mut_ptr());
+    }
+
+    // Row 0: indices 1..8 must be exactly +0.0 (flushed by branchless clamp).
+    for (j, got) in output.iter().enumerate().take(8).skip(1) {
+        assert!(
+            got.to_bits() == 0.0f32.to_bits(),
+            "output[{j}] should be exactly +0.0 (underflow flush), got {got}"
+        );
+    }
+
+    // Row 0 must still be a valid probability distribution (sums to ~1).
+    let row0_sum: f32 = output[0..8].iter().sum();
+    assert!(
+        (row0_sum - 1.0).abs() < 1e-6,
+        "row 0 sum = {row0_sum}, expected ~1.0"
+    );
+}
