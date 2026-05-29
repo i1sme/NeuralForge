@@ -166,6 +166,49 @@ pub fn ffn_ref(
     reference_bias_add(&mm2, b2, dim)
 }
 
+/// Reference f32 exp for x ≤ 0 — bit-exact match for the arm64 inline emitter.
+/// Cody-Waite reduction + degree-7 Taylor (Horner) + 2^z.
+///
+/// CRITICAL: arm64 fuses multiply-accumulate (fmadd/fmsub), so every step uses
+/// `f32::mul_add` (single rounding) to match the asm bit-for-bit. Do NOT rewrite
+/// as separate `*`/`+` — that is the x86_64 variant. (Mirror of the per-profile
+/// reference_matmul split, M15.)
+///
+/// Constants are INTENTIONALLY spelled out at full double precision before
+/// truncation to f32 — they must match the emitter literals exactly.
+/// Clippy lints are suppressed so the bit-patterns are preserved as-is.
+#[allow(clippy::excessive_precision, clippy::approx_constant)]
+pub fn exp_ref(x: f32) -> f32 {
+    const LOG2E: f32 = 1.4426950408889634;
+    const LN2_HI: f32 = 0.693359375;
+    const LN2_LO: f32 = -0.00021219444005469057;
+    const C: [f32; 8] = [
+        1.0,
+        1.0,
+        0.5,
+        1.0 / 6.0,
+        1.0 / 24.0,
+        1.0 / 120.0,
+        1.0 / 720.0,
+        1.0 / 5040.0,
+    ];
+    let z = (x * LOG2E).round_ties_even() as i32; // fcvtns: nearest, ties-even
+    let zf = z as f32;
+    let r = (-zf).mul_add(LN2_HI, x); // x - zf*LN2_HI (fmsub, single rounding)
+    let r = (-zf).mul_add(LN2_LO, r);
+    let mut p = C[7];
+    for k in (0..7).rev() {
+        p = p.mul_add(r, C[k]); // p*r + C[k]
+    }
+    let zp = z + 127;
+    let pow = if zp <= 0 {
+        0.0_f32
+    } else {
+        f32::from_bits((zp as u32) << 23)
+    };
+    p * pow
+}
+
 /// Reference transformer block — composes `layernorm_ref` + `ffn_ref` +
 /// element-wise add. Mirrors the `transformer_block.nfl` fixture pipeline:
 /// `x -> layernorm[affine] -> linear -> relu -> linear -> add[skip1] -> add[skip2]`.

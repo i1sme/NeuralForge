@@ -1785,3 +1785,30 @@ fn transformer_block_ffi() {
 
     drop(lib);
 }
+
+// ---------------------------------------------------------------------------
+// M17 Layer-2 sweep: exp_ref within 1 ulp of libm over the softmax domain.
+// Pure Rust, no FFI, runs on all platforms.
+// ---------------------------------------------------------------------------
+
+/// Layer 2 (spec §5.2): the Rust port must be within 1 ulp of libm over the
+/// reachable softmax domain x ∈ [−80, 0]. Pure Rust; no asm, no FFI.
+#[test]
+fn exp_ref_within_one_ulp_of_libm() {
+    let ulp_diff = |a: f32, b: f32| (a.to_bits() as i64 - b.to_bits() as i64).abs();
+    let mut x = -80.0_f32;
+    while x <= 0.0 {
+        let (got, want) = (common::exp_ref(x), x.exp());
+        assert!(
+            ulp_diff(got, want) <= 1,
+            "x={x}: exp_ref={got} ({:#x}) libm={want} ({:#x}), {} ulp",
+            got.to_bits(),
+            want.to_bits(),
+            ulp_diff(got, want)
+        );
+        x += 0.0009765625; // 2^-10, exact step
+    }
+    for &x in &[0.0_f32, -std::f32::consts::LN_2, -1.0, -10.0, -50.0] {
+        assert!(ulp_diff(common::exp_ref(x), x.exp()) <= 1, "x={x}");
+    }
+}
