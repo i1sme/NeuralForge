@@ -14,6 +14,7 @@ pub mod softmax;
 
 pub use add::emit_add;
 pub use dropout::emit_dropout_copy;
+pub use exp::emit_exp_inline; // M17
 pub use exp::exp_pool_x86_64; // M17
 pub use layernorm::emit_layernorm; // M14
 pub use linear::emit_linear;

@@ -203,7 +203,43 @@ nfl_forward_Classifier:
     addq    %r14, %rax
     movss   (%rbx, %rax, 4), %xmm0
     subss   (%rsp), %xmm0
-    call    expf@PLT
+    # --- inline exp(x), x<=0 (M17) ---
+    movss   .Lexp_log2e(%rip), %xmm1
+    mulss   %xmm0, %xmm1
+    cvtss2si %xmm1, %eax
+    cvtsi2ss %eax, %xmm2
+    movss   .Lexp_ln2hi(%rip), %xmm3
+    mulss   %xmm2, %xmm3
+    movss   %xmm0, %xmm5
+    subss   %xmm3, %xmm5
+    movss   .Lexp_ln2lo(%rip), %xmm3
+    mulss   %xmm2, %xmm3
+    subss   %xmm3, %xmm5
+    movss   .Lexp_c7(%rip), %xmm4
+    mulss   %xmm5, %xmm4
+    addss   .Lexp_c6(%rip), %xmm4
+    mulss   %xmm5, %xmm4
+    addss   .Lexp_c5(%rip), %xmm4
+    mulss   %xmm5, %xmm4
+    addss   .Lexp_c4(%rip), %xmm4
+    mulss   %xmm5, %xmm4
+    addss   .Lexp_c3(%rip), %xmm4
+    mulss   %xmm5, %xmm4
+    addss   .Lexp_c2(%rip), %xmm4
+    mulss   %xmm5, %xmm4
+    addss   .Lexp_c1(%rip), %xmm4
+    mulss   %xmm5, %xmm4
+    addss   .Lexp_c0(%rip), %xmm4
+    addl    $127, %eax
+    movl    %eax, %ecx
+    shll    $23, %ecx
+    xorl    %edx, %edx
+    testl   %eax, %eax
+    cmovle  %edx, %ecx
+    movd    %ecx, %xmm5
+    mulss   %xmm5, %xmm4
+    movss   %xmm4, %xmm0
+    # --- end inline exp ---
     movq    %r15, %rax
     addq    %r14, %rax
     movss   %xmm0, (%r12, %rax, 4)

@@ -12,7 +12,7 @@ fn nflc_path() -> std::path::PathBuf {
 }
 
 #[test]
-fn compile_x86_64_emits_no_underscore_prefix_and_call_expf_plt() {
+fn compile_x86_64_emits_no_underscore_prefix_and_inline_exp() {
     let fixture = "../tests/fixtures/classifier.nfl";
     let output = Command::new(nflc_path())
         .args(["compile", fixture, "--profile", "x86_64"])
@@ -34,8 +34,12 @@ fn compile_x86_64_emits_no_underscore_prefix_and_call_expf_plt() {
         "x86_64 asm must not have underscore-prefixed label:\n{asm}"
     );
     assert!(
-        asm.contains("call    expf@PLT"),
-        "x86_64 asm with softmax must call expf@PLT:\n{asm}"
+        !asm.contains("call    expf@PLT"),
+        "x86_64 asm must NOT call expf@PLT — exp is inlined (M17):\n{asm}"
+    );
+    assert!(
+        asm.contains(".Lexp_c7(%rip)"),
+        "x86_64 softmax asm must contain the inline-exp Horner constant load:\n{asm}"
     );
 }
 

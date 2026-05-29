@@ -73,7 +73,7 @@ pub fn emit_linear(
     bias_offset: Option<usize>,
     node_span: Span,
     fused_post_ops: &[PostOp],
-    sym_prefix: &str,
+    _sym_prefix: &str,
 ) -> Result<String, LowerError> {
     let lid = format!("{model_idx}_{linear_idx}");
     let mut s = String::new();
@@ -121,8 +121,8 @@ pub fn emit_linear(
     // caught).
     //
     // Skip when SoftmaxRow is fused — that's the LAST op in the model,
-    // and no follow-up consumer needs output_reg. Saving across
-    // `call expf@PLT` is also pointless (xmm7 is caller-saved under SysV).
+    // and no follow-up consumer needs output_reg. Saving across the
+    // inline exp is also pointless (xmm7 would be clobbered by it).
     let has_softmax_row = fused_post_ops
         .iter()
         .any(|p| matches!(p, PostOp::SoftmaxRow));
@@ -152,8 +152,8 @@ pub fn emit_linear(
     //
     // Skip the save when SoftmaxRow is fused — that's the LAST linear in
     // the model (softmax is always terminal), so no follow-up emit_linear
-    // needs params_reg. Saving across the `call expf@PLT` is also pointless
-    // because xmm6 is caller-saved under SysV; the call would clobber it.
+    // needs params_reg. Saving across the inline exp is also pointless
+    // because xmm6 is clobbered by emit_exp_inline (%xmm1-5 scratch range).
     let preserve_params_ptr = !has_softmax_row;
     if preserve_params_ptr {
         s.push_str(&format!("    movq    {}, %xmm6\n", params_reg));
@@ -264,8 +264,8 @@ pub fn emit_linear(
     s.push_str("    popq    %r15\n");
     s.push_str("    popq    %r14\n");
     // ABI-register restore (LIFO of the entry save block). Runs BEFORE the
-    // SoftmaxRow tail so any `call expf@PLT` in the tail sees a properly-
-    // aligned RSP and uncorrupted ABI registers. %rcx pop omitted —
+    // SoftmaxRow tail so the inline exp body sees a properly-aligned RSP
+    // and uncorrupted ABI registers. %rcx pop omitted —
     // j-counter relocated to %rbp, body no longer writes %rcx.
     if save_abi {
         s.push_str("    popq    %rsi\n");
@@ -277,7 +277,7 @@ pub fn emit_linear(
         match post_op {
             PostOp::Relu => {} // already inlined above
             PostOp::SoftmaxRow => {
-                s.push_str(&emit_fused_softmax_tail(b, n, &lid, sym_prefix));
+                s.push_str(&emit_fused_softmax_tail(b, n, &lid));
             }
             #[allow(unreachable_patterns)]
             _ => {
@@ -318,7 +318,7 @@ pub fn emit_linear(
 ///   %r14 = j (inner column counter)
 ///   %r15 = row_base = i * n
 ///
-/// Stack-resident state across `call expf@PLT`:
+/// Stack-resident state across the inline exp body (M17):
 ///   (%rsp)  = row_max f32 slot (offset 0)
 ///   8(%rsp) = row_sum f32 slot (offset 8)
 /// The 16-byte spill region is reserved at the bottom of the frame by
@@ -326,7 +326,7 @@ pub fn emit_linear(
 /// `BufferAssignment::stack_bytes` already accounts for it, so the
 /// prologue's `subq $frame_size, %rsp` covers both slots and any
 /// intermediate buffers without per-emitter parameterisation.
-fn emit_fused_softmax_tail(b: u64, n: u64, lid: &str, sym_prefix: &str) -> String {
+fn emit_fused_softmax_tail(b: u64, n: u64, lid: &str) -> String {
     let mut s = String::new();
     s.push_str(&format!(
         "    # fused softmax_row: output [{b},{n}] in-place\n"
@@ -375,8 +375,8 @@ fn emit_fused_softmax_tail(b: u64, n: u64, lid: &str, sym_prefix: &str) -> Strin
     s.push_str("    addq    %r14, %rax\n"); // %rax = row_base + j
     s.push_str("    movss   (%rbx, %rax, 4), %xmm0\n");
     s.push_str("    subss   (%rsp), %xmm0\n");
-    s.push_str(&format!("    call    {}expf@PLT\n", sym_prefix));
-    // %rax was clobbered; recompute.
+    s.push_str(&crate::ops::emit_exp_inline());
+    // %rax recomputed: emit_exp_inline clobbers scratch (%eax/%ecx/%edx/%xmm1-5).
     s.push_str("    movq    %r15, %rax\n");
     s.push_str("    addq    %r14, %rax\n");
     s.push_str("    movss   %xmm0, (%r12, %rax, 4)\n"); // write exp result back

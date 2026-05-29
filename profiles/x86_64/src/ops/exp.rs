@@ -23,6 +23,43 @@ const C: [f32; 8] = [
     1.0 / 5040.0,
 ];
 
+/// Emit x86_64 SSE2 inline `exp` for x ≤ 0. Input in `%xmm0`; result in `%xmm0`.
+///
+/// Scratch (all non-loop-live; the softmax loop owns %rbx/%r12-%r15 + stack
+/// slots, NOT touched here): %eax (z), %ecx/%edx (pow bits), %xmm1-%xmm5.
+/// Branchless underflow clamp via `cmovle` — no labels.
+pub fn emit_exp_inline() -> String {
+    let mut s = String::new();
+    s.push_str("    # --- inline exp(x), x<=0 (M17) ---\n");
+    s.push_str("    movss   .Lexp_log2e(%rip), %xmm1\n");
+    s.push_str("    mulss   %xmm0, %xmm1\n");
+    s.push_str("    cvtss2si %xmm1, %eax\n");
+    s.push_str("    cvtsi2ss %eax, %xmm2\n");
+    s.push_str("    movss   .Lexp_ln2hi(%rip), %xmm3\n");
+    s.push_str("    mulss   %xmm2, %xmm3\n");
+    s.push_str("    movss   %xmm0, %xmm5\n");
+    s.push_str("    subss   %xmm3, %xmm5\n");
+    s.push_str("    movss   .Lexp_ln2lo(%rip), %xmm3\n");
+    s.push_str("    mulss   %xmm2, %xmm3\n");
+    s.push_str("    subss   %xmm3, %xmm5\n");
+    s.push_str("    movss   .Lexp_c7(%rip), %xmm4\n");
+    for k in (0..7).rev() {
+        s.push_str("    mulss   %xmm5, %xmm4\n");
+        s.push_str(&format!("    addss   .Lexp_c{}(%rip), %xmm4\n", k));
+    }
+    s.push_str("    addl    $127, %eax\n");
+    s.push_str("    movl    %eax, %ecx\n");
+    s.push_str("    shll    $23, %ecx\n");
+    s.push_str("    xorl    %edx, %edx\n");
+    s.push_str("    testl   %eax, %eax\n");
+    s.push_str("    cmovle  %edx, %ecx\n");
+    s.push_str("    movd    %ecx, %xmm5\n");
+    s.push_str("    mulss   %xmm5, %xmm4\n");
+    s.push_str("    movss   %xmm4, %xmm0\n");
+    s.push_str("    # --- end inline exp ---\n");
+    s
+}
+
 /// File-local `.rodata` pool, emitted once per file from `walk_uir` when
 /// `uir.has_softmax()`. Mirrors the layernorm pool pattern
 /// (profiles/x86_64/src/ops/layernorm.rs). `.L`-local labels.
